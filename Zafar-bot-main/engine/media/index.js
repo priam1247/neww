@@ -1,13 +1,16 @@
 // engine/media/index.js — high-level resolve API used by the bot commands.
 //
-// Fixed in the ZaFar Bot integration:
-//   • the caller may pass `tmdbId` — previously every command re-searched TMDB
-//     by title and silently resolved `results[0]`, which could be a DIFFERENT
-//     movie than the one the user picked from the list
-//   • cache keys fall back to tmdbId when TMDB has no imdb id (the old code wrote
-//     the literal string "null:" for those, making every such title share one
-//     cache slot — and serve the wrong film from disk)
-//   • a disk-cache hit returns a usable `{kind:'cache', file}` result
+// Titles/metadata now come from the multi-source layer (metadata/index.js):
+// TMDB first, then Cinemeta / IMDb / TVMaze / OMDb / Trakt / Jikan / AniList.
+// A TMDB outage (or a missing key) no longer means "movies don't work".
+//
+// Fixes carried over + new:
+//   • caller may pass tmdbId OR imdbId OR a raw title; we normalise to an id
+//   • cache keys fall back to tmdbId when TMDB has no imdb id (the old code
+//     wrote the literal string "null:" for those and served the wrong film)
+//   • quality ladder: 1080 → 720 → 480 (or upward) instead of a hard failure
+//   • anime titles route through the anime sources and get `anime: true`, which
+//     the ranker/nyaa provider use for absolute episode numbering
 import path from 'node:path';
 import config from '../config.js';
 import cache from '../core/cache.js';
@@ -17,7 +20,8 @@ import registry from '../core/registry.js';
 import queue from '../core/queue.js';
 import { isOld } from '../core/ranker.js';
 import { metrics } from '../core/metrics.js';
-import * as tmdb from './tmdb.js';
+import metadata from '../metadata/index.js';
+import * as tmdb from '../metadata/tmdb.js';
 import * as tv from '../core/tv.js';
 import { parseRelease, matchesEpisode } from '../core/release.js';
 import { pickEpisodeFile, episodeQuery, seasonQuery } from '../core/tv.js';
@@ -48,7 +52,7 @@ async function boot() {
   await cache.init();
 }
 
-const cacheId = (meta) => meta?.imdbId || meta?.tmdbId || null;
+const cacheId = (meta) => meta?.imdbId || meta?.tmdbId || meta?.malId || null;
 
 function cachedFile(meta, quality, season, episode) {
   const id = cacheId(meta);
@@ -63,89 +67,148 @@ function cachedFile(meta, quality, season, episode) {
   };
 }
 
+// ── title → full metadata ──────────────────────────────────────────────────
+/**
+ * Resolve a user's title to one metadata item with ids.
+ * @param {{title?:string, year?:string, type?:'movie'|'series', tmdbId?:number, imdbId?:string}} want
+ */
+export async function identify({ item = null, title, year, type = 'movie', tmdbId = null, imdbId = null } = {}) {
+  // the command already showed the user a list — use exactly that item.
+  // When it already holds both ids nothing needs to be looked up again.
+  if (item) {
+    if (item.imdbId && (item.tmdbId || item.malId)) return item;
+    return metadata.details(item).catch(() => item);
+  }
+
+  if (tmdbId) {
+    const meta = type === 'series' ? await tmdb.tvDetails(tmdbId) : await tmdb.movieDetails(tmdbId);
+    return metadata.details(meta).catch(() => meta);
+  }
+  if (imdbId) {
+    const base = await metadata.details({ source: 'cinemeta', type, imdbId, title: title || '' })
+      .catch(() => null);
+    if (base) return base;
+  }
+  if (!title) throw new Error('no title or id given');
+
+  const hits = await metadata.search(title, { type, year, limit: 6 });
+  if (!hits.length) {
+    throw new Error(`no ${type === 'series' ? 'series' : 'movie'} found for “${title}” ` +
+      '(TMDB, Cinemeta, IMDb, TVMaze and the anime indexes all came back empty)');
+  }
+
+  // exact year (when given) wins, otherwise the best-ranked hit
+  const best = (year && hits.find(h => String(h.year) === String(year))) || hits[0];
+  return metadata.details(best);
+}
+
+// ── quality ladder ─────────────────────────────────────────────────────────
+/** Neighbour qualities, best-first, starting at the requested one. */
+export function qualityLadder(quality) {
+  const q = Number(quality) || 720;
+  if (!config.qualityFallback) return [q];
+  const order = [480, 720, 1080, 2160];
+  const i = order.indexOf(q);
+  if (i === -1) return [q];
+  const out = [q];
+  // step DOWN first (smaller file, higher chance of a source), then up
+  for (let d = 1; i - d >= 0; d++) out.push(order[i - d]);
+  for (let d = 1; i + d < order.length; d++) out.push(order[i + d]);
+  return [...new Set(out)];
+}
+
+async function resolveWithLadder(media, wantQuality, buildOpts, meta, season, episode) {
+  // NOTE: the ladder start must come from the caller's requested quality — it
+  // used to be read off `buildOpts` (a function), so every request silently
+  // started at 720p and a 1080p/4K request was downgraded without saying so.
+  const want = Number(wantQuality) || 720;
+  const ladder = qualityLadder(want);
+  const failures = [];
+
+  for (const q of ladder) {
+    try {
+      const opts = buildOpts(q);
+      const res = await resolver.resolve(media, opts);
+      return { ...res, meta, season, episode, quality: q, requestedQuality: want, downgraded: q !== want };
+    } catch (e) {
+      failures.push(`${q}p: ${e.message}`);
+      if (e.fatal) break;                 // e.g. "no provider registered" — quality won't help
+    }
+  }
+
+  const err = new Error(
+    ladder.length > 1 && failures.length > 1
+      ? `no source for ${ladder.join('/')}p\n${failures.slice(0, 3).map(f => `• ${f}`).join('\n')}`
+      : failures[0] || 'no source found'
+  );
+  throw err;
+}
+
 // ── MOVIE ──────────────────────────────────────────────────────────────────
-export async function resolveMovie({ title, year, quality = 720, tmdbId = null }) {
+export async function resolveMovie({ title, year, quality = 720, tmdbId = null, imdbId = null, item = null }) {
   await boot();
 
-  let meta;
-  if (tmdbId) {
-    meta = await tmdb.movieDetails(tmdbId);
-  } else {
-    const matches = await tmdb.searchMovie(title, year);
-    if (!matches.length) throw new Error(`no movie found: ${title}`);
-    meta = await tmdb.movieDetails(matches[0].tmdbId);
-  }
+  const meta = await identify({ item, title, year, type: 'movie', tmdbId, imdbId });
 
   const hit = cachedFile(meta, quality, null, null);
   if (hit) return { ...hit, meta };
 
   const media = { ...meta, type: 'movie' };
-  const opts = {
-    quality: Number(quality), want: Number(quality), year: meta.year,
-    query: `${meta.title} ${meta.year || ''} ${quality}p`.trim(),
+  const res = await resolveWithLadder(media, quality, (q) => ({
+    quality: q, want: q, year: meta.year,
+    query: `${meta.title} ${meta.year || ''} ${q}p`.trim(),
     old: isOld(meta.year),
+    anime: metadata.looksAnime(meta),
     maxMB: config.maxSendMB
-  };
+  }), meta, null, null);
 
-  const res = await resolver.resolve(media, opts);
   return { ...res, meta };
 }
 
-// ── SERIES EPISODE (default path) ──────────────────────────────────────────
-export async function resolveEpisode({ title, year, season, episode, quality = 720, tmdbId = null }) {
+// ── SERIES EPISODE ─────────────────────────────────────────────────────────
+export async function resolveEpisode({ title, year, season, episode, quality = 720, tmdbId = null, imdbId = null, item = null }) {
   await boot();
 
-  let meta;
-  if (tmdbId) {
-    meta = await tmdb.tvDetails(tmdbId);
-  } else {
-    const matches = await tmdb.searchTv(title, year);
-    if (!matches.length) throw new Error(`no series found: ${title}`);
-    meta = await tmdb.tvDetails(matches[0].tmdbId);
-  }
+  const meta = await identify({ item, title, year, type: 'series', tmdbId, imdbId });
 
   const hit = cachedFile(meta, quality, season, episode);
   if (hit) return { ...hit, meta, season, episode };
 
   const media = { ...meta, type: 'series' };
-  const opts = {
-    quality: Number(quality), want: Number(quality), year: meta.year,
+  const anime = metadata.looksAnime(meta);
+  const res = await resolveWithLadder(media, quality, (q) => ({
+    quality: q, want: q, year: meta.year,
     season, episode, wantSingleEpisode: true,
     query: episodeQuery(meta.title, meta.year, season, episode),
     pickEpisode: (files) => pickEpisodeFile(files, season, episode),
     old: isOld(meta.year),
+    anime,
     maxMB: config.maxSendMB
-  };
+  }), meta, season, episode);
 
-  const res = await resolver.resolve(media, opts);
   return { ...res, meta, season, episode };
 }
 
 // ── SERIES SEASON (packs) ──────────────────────────────────────────────────
-export async function resolveSeason({ title, year, season, quality = 720, tmdbId = null }) {
+export async function resolveSeason({ title, year, season, quality = 720, tmdbId = null, imdbId = null, item = null }) {
   await boot();
 
-  let meta;
-  if (tmdbId) {
-    meta = await tmdb.tvDetails(tmdbId);
-  } else {
-    const matches = await tmdb.searchTv(title, year);
-    if (!matches.length) throw new Error(`no series found: ${title}`);
-    meta = await tmdb.tvDetails(matches[0].tmdbId);
-  }
-
+  const meta = await identify({ item, title, year, type: 'series', tmdbId, imdbId });
   const media = { ...meta, type: 'series' };
-  const opts = {
-    quality: Number(quality), want: Number(quality), year: meta.year,
+
+  const res = await resolveWithLadder(media, quality, (q) => ({
+    quality: q, want: q, year: meta.year,
     season, episode: null, wantSingleEpisode: false,
     query: seasonQuery(meta.title, meta.year, season),
     old: isOld(meta.year),
-    maxMB: 1e9                     // packs are huge; verification is size-windowed later
-  };
-  return { ...(await resolver.resolve(media, opts)), meta, season };
+    anime: metadata.looksAnime(meta),
+    maxMB: 1e9
+  }), meta, season, null);
+
+  return { ...res, meta, season };
 }
 
-// file path a resolved title will be downloaded to
+// ── file paths + cache bookkeeping ─────────────────────────────────────────
 export function targetFile(title, year, quality, season = null, episode = null) {
   return path.join(config.tempDir, sanitize(`${title}.${year || ''}`, quality, season, episode));
 }
@@ -161,8 +224,9 @@ export function rememberFile(meta, quality, season, episode, file, sizeMB) {
   return true;
 }
 
-export { boot, cache, config, tv, parseRelease, matchesEpisode, tmdb, debrid, resolver, registry, queue, mlog };
+export { boot, cache, config, tv, parseRelease, matchesEpisode, tmdb, metadata, debrid, resolver, registry, queue, mlog };
 export default {
-  boot, resolveMovie, resolveEpisode, resolveSeason, targetFile, rememberFile,
-  cache, config, tmdb, resolver, debrid, registry, queue
+  boot, identify, resolveMovie, resolveEpisode, resolveSeason,
+  targetFile, rememberFile, qualityLadder,
+  cache, config, tmdb, metadata, resolver, debrid, registry, queue
 };

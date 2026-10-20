@@ -37,11 +37,37 @@ const cfg = {
   userAgent: process.env.USER_AGENT ||
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
 
-  // keys
+  // keys — TMDB is required, everything else is optional enrichment
   tmdbKey: process.env.TMDB_API_KEY || '98bb6b66ece431fbea8a0ee9c18ac712',
+  omdbKey: process.env.OMDB_API_KEY || '',
+  traktClientId: process.env.TRAKT_CLIENT_ID || '',
   realDebridKey: process.env.REALDEBRID_API_KEY || '',
   allDebridKey: process.env.ALLDEBRID_API_KEY || '',
   openSubsKey: process.env.OPENSUBTITLES_API_KEY || '',
+
+  // ── metadata sources ─────────────────────────────────────────────────────
+  // Every base URL is overridable so tests can run against a local server.
+  tmdbBase: process.env.TMDB_BASE || 'https://api.themoviedb.org/3',
+  cinemetaBase: process.env.CINEMETA_BASE || 'https://v3-cinemeta.strem.io',
+  tvmazeBase: process.env.TVMAZE_BASE || 'https://api.tvmaze.com',
+  omdbBase: process.env.OMDB_BASE || 'https://www.omdbapi.com',
+  traktBase: process.env.TRAKT_BASE || 'https://api.trakt.tv',
+  jikanBase: process.env.JIKAN_BASE || 'https://api.jikan.moe/v4',
+  anilistBase: process.env.ANILIST_BASE || 'https://graphql.anilist.co',
+  imdbSuggestBase: process.env.IMDB_SUGGEST_BASE || 'https://v2.sg.media-imdb.com',
+  imdbIndexFile: process.env.IMDB_INDEX_FILE || './temp/imdb-index.tsv',
+
+  metadataTimeoutMs: num(process.env.METADATA_TIMEOUT_MS, 8000),
+
+  // per-source switches (anime covers jikan + anilist)
+  metadata: {
+    cinemeta: bool(process.env.META_CINEMETA, true),
+    imdb: bool(process.env.META_IMDB, true),
+    tvmaze: bool(process.env.META_TVMAZE, true),
+    omdb: bool(process.env.META_OMDB, true),
+    trakt: bool(process.env.META_TRAKT, true),
+    anime: bool(process.env.META_ANIME, true),
+  },
 
   // debrid is optional: without a key, torrent results are skipped and the
   // cascade runs on the DDL + HLS tiers (which need no account at all).
@@ -77,6 +103,10 @@ const cfg = {
     480: [150, 900], 720: [350, 1900], 1080: [650, 4000], 2160: [1800, 14000]
   },
 
+  // quality ladder: if the requested quality has no usable source, step to the
+  // neighbours instead of failing (1080 → 720 → 480, and up for old 480-only)
+  qualityFallback: bool(process.env.QUALITY_FALLBACK, true),
+
   // series strategy
   preferEpisodeTorrent: bool(process.env.PREFER_EPISODE_TORRENT, true),
   packOnlyWhenCached: bool(process.env.PACK_ONLY_WHEN_CACHED, true),
@@ -100,7 +130,7 @@ const cfg = {
 
 // ── boot-time validation: fail loudly, not silently at runtime ─────────────
 const problems = [];
-if (!cfg.tmdbKey) problems.push('TMDB_API_KEY is not set — title lookups will fail (free key: themoviedb.org)');
+if (!cfg.tmdbKey) problems.push('TMDB_API_KEY is not set — falling back to Cinemeta/IMDb/TVMaze for titles');
 if (!cfg.realDebridKey && !cfg.allDebridKey) {
   problems.push('no debrid key — torrent sources are skipped (DDL + stream tiers still work). Add REALDEBRID_API_KEY or ALLDEBRID_API_KEY for 4K/1080p torrents.');
 }

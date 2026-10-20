@@ -33,6 +33,12 @@ function applyConfig() {
 
   // keys
   setIfEmpty('TMDB_API_KEY', m.tmdbKey);
+  setIfEmpty('OMDB_API_KEY', m.omdbKey);
+  setIfEmpty('TRAKT_CLIENT_ID', m.traktClientId);
+  setIfEmpty('META_CINEMETA', m.metadata?.cinemeta === false ? '0' : '1');
+  setIfEmpty('META_IMDB', m.metadata?.imdb === false ? '0' : '1');
+  setIfEmpty('META_TVMAZE', m.metadata?.tvmaze === false ? '0' : '1');
+  setIfEmpty('META_ANIME', m.metadata?.anime === false ? '0' : '1');
   setIfEmpty('REALDEBRID_API_KEY', m.realDebridKey);
   setIfEmpty('ALLDEBRID_API_KEY', m.allDebridKey);
 
@@ -51,6 +57,8 @@ function applyConfig() {
   setIfEmpty('DRY_RUN', m.dryRun ? '1' : '');
   setIfEmpty('BOT_NAME', config.botName);
   setIfEmpty('MOVIE_QUIET', '1');                  // engine must not print warnings itself
+  setIfEmpty('IMDB_INDEX_FILE', m.imdbIndexFile ? abs(m.imdbIndexFile) : undefined);
+  setIfEmpty('QUALITY_FALLBACK', m.qualityFallback === false ? '0' : '1');
 }
 
 /**
@@ -85,14 +93,28 @@ module.exports = {
   ROOT,
   ENGINE,
 
-  // ── TMDB ────────────────────────────────────────────────────────────────
+  // ── metadata (multi-source: TMDB · Cinemeta · IMDb · TVMaze · OMDb · Trakt · Jikan · AniList)
+  async search(title, { type = 'movie', year = null, limit = 8 } = {}) {
+    const { metadata } = await load();
+    return metadata.search(title, { type, year, limit });
+  },
   async searchMovie(title, year) {
-    const { tmdb } = await load();
-    return tmdb.searchMovie(title, year);
+    return module.exports.search(title, { type: 'movie', year });
   },
   async searchTv(title, year) {
-    const { tmdb } = await load();
-    return tmdb.searchTv(title, year);
+    return module.exports.search(title, { type: 'series', year });
+  },
+  async details(item) {
+    const { metadata } = await load();
+    return metadata.details(item);
+  },
+  async lookup(title, opts = {}) {
+    const { metadata } = await load();
+    return metadata.lookup(title, opts);
+  },
+  async metadataTable() {
+    const { metadata } = await load();
+    return metadata.table();
   },
   async movieDetails(tmdbId) {
     const { tmdb } = await load();
@@ -102,11 +124,34 @@ module.exports = {
     const { tmdb } = await load();
     return tmdb.tvDetails(tmdbId);
   },
+  /** episode guide from TVMaze (keyless) — air dates + "does this episode exist" */
+  async episodeGuide(item, season) {
+    const { tvmaze } = await load();
+    try {
+      let show = item?.tvmazeId ? { tvmazeId: item.tvmazeId } : null;
+      if (!show && item?.imdbId) show = await tvmaze.byImdb(item.imdbId);
+      if (!show && item?.title) {
+        const hits = await tvmaze.search(item.title);
+        show = hits[0] || null;
+      }
+      if (!show?.tvmazeId) return null;
+      return await tvmaze.season(show.tvmazeId, season);
+    } catch { return null; }
+  },
+  /** anime detection (routes .series through Nyaa + abs numbering) */
+  async looksAnime(item) {
+    const { metadata } = await load();
+    return metadata.looksAnime(item);
+  },
 
   // ── resolve ─────────────────────────────────────────────────────────────
   async resolveMovie(opts) {
     const { resolveMovie } = await load();
     return resolveMovie(opts);
+  },
+  async identify(opts) {
+    const { identify } = await load();
+    return identify(opts);
   },
   async resolveEpisode(opts) {
     const { resolveEpisode } = await load();
