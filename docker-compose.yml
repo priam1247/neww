@@ -1,0 +1,10 @@
+services:
+  zafar3:
+    build: .
+    container_name: zafar3
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data          # session + download cache live here
+    stdin_open: true          # keep TTY alive for the QR prompt
+    tty: true
