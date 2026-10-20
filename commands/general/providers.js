@@ -23,9 +23,10 @@ const providersCommand = {
 
   async execute(sock, msg, args, extra) {
     try {
-      const [rows, metaRows] = await Promise.all([
+      const [rows, metaRows, mirrorPools] = await Promise.all([
         engine.providers(),
         engine.metadataTable().catch(() => []),
+        engine.mirrors().catch(() => []),
       ]);
       if (!rows.length) return extra.reply('No sources registered — the engine did not load.');
 
@@ -57,6 +58,16 @@ const providersCommand = {
         `🔑 debrid: ${debrid.length ? debrid.join(', ') : 'none — torrents skipped, free sources only'}`,
         `🧩 host: ${host.statusLine()}`,
         '',
+        ...(mirrorPools.length ? [
+          '🪞 *DDL mirrors*',
+          ...mirrorPools.map(p => {
+            const live = p.mirrors.filter(m => m.state === 'closed').length;
+            const benched = p.mirrors.filter(m => m.state === 'open').map(m => m.url.replace(/^https?:\/\//, ''));
+            return `• *${p.provider}* ${live}/${p.mirrors.length} up` +
+              (benched.length ? ` · benched: ${benched.join(', ')}` : '');
+          }),
+          '',
+        ] : []),
         `🗂 *Metadata* (${metaRows.filter(s => s.enabled).length}/${metaRows.length} live)`,
         '',
         ...metaLines,

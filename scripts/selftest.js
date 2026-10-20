@@ -18,6 +18,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const http = require('http');
 const assert = require('assert');
 
@@ -655,9 +656,14 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     { url: 'https://youtu.be/ccc', id: 'ccc', title: 'Third Song', author: 'C', duration: 220, thumbnail: '' },
   ];
 
-  await test('offers a numbered list instead of silently taking the first hit', async () => {
+  await test('offers a numbered list when SEARCH_PICKER is on', async () => {
     const song = require(path.join(REPO, 'commands/media/song.js'));
     stubSearch(THREE);
+    // picker is opt-in now (.song sends the official/top hit by default)
+    const cfg = require(path.join(REPO, 'config.js'));
+    const wasPicker = cfg.search.picker;
+    cfg.search.picker = true;
+    settings.set('searchPicker', true);
 
     const sock = mockSock();
     await song.execute(sock, mockMsg('.song some song'), ['some', 'song'], makeExtra(sock));
@@ -667,6 +673,9 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     assert.ok(/First Song/.test(list) && /Third Song/.test(list), 'results missing from the list');
     assert.ok(!sock.sent.some((m) => m.document), 'it downloaded something before the user chose');
     assert.ok(selections.peek('chat@s.whatsapp.net', '1234@s.whatsapp.net'), 'no pending choice registered');
+
+    cfg.search.picker = wasPicker;
+    settings.set('searchPicker', false);
   });
 
   await test('"2" downloads the second result', async () => {
@@ -676,6 +685,11 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     YT.downloadAudio = async () => ({ file: audioPath, ext: 'mp3', profile: 'default', attempts: [] });
     YT.getInfo = async (u) => ({ title: u.includes('bbb') ? 'Second Song' : 'Wrong Song', uploader: 'B', duration: 210, thumbnail: '', id: 'x' });
     stubSearch(THREE);
+
+    const cfg = require(path.join(REPO, 'config.js'));
+    const wasPicker = cfg.search.picker;
+    cfg.search.picker = true;
+    settings.set('searchPicker', true);
 
     const sock = mockSock();
     const extra = makeExtra(sock);
@@ -689,6 +703,28 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     const doc = sock.sent.find((m) => m.document);
     assert.ok(doc, 'nothing downloaded after picking');
     assert.ok(/Second Song/.test(String(doc.fileName)), `wrong item downloaded: ${doc.fileName}`);
+
+    cfg.search.picker = wasPicker;
+    settings.set('searchPicker', false);
+  });
+
+  await test('.song sends the top hit directly when the picker is off', async () => {
+    const song = require(path.join(REPO, 'commands/media/song.js'));
+    const audioPath = path.join(sandbox, 'top.m4a');
+    fs.writeFileSync(audioPath, Buffer.concat([Buffer.from([0, 0, 0, 0x20]), Buffer.from('ftypM4A '), Buffer.alloc(60000, 4)]));
+    YT.downloadAudio = async () => ({ file: audioPath, ext: 'm4a', profile: 'default', attempts: [] });
+    YT.getInfo = async () => ({ title: 'First Song', uploader: 'A', duration: 200, thumbnail: '', id: 'y' });
+    stubSearch(THREE);
+    settings.set('searchPicker', false);
+
+    const sock = mockSock();
+    await song.execute(sock, mockMsg('.song some song'), ['some', 'song'], makeExtra(sock));
+
+    assert.ok(!sock.sent.map(textOf).some((t) => /^1\./m.test(t)), 'a numbered list was shown');
+    const doc = sock.sent.find((m) => m.document);
+    assert.ok(doc, 'no document sent');
+    assert.ok(/First Song/.test(String(doc.fileName)), `wrong song: ${doc.fileName}`);
+    assert.ok(/m4a$/.test(String(doc.fileName)), `audio was re-encoded: ${doc.fileName}`);
   });
 
   await test('"9" is out of range and reported as such', () => {
@@ -1021,6 +1057,133 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       'cookies', 'ytdl', 'menu', 'paper', 'sticker', 'fb', 'instagram']) {
       assert.ok(names.has(expected), `command missing: ${expected}`);
     }
+  });
+
+
+  console.log('\n── 17. ffmpeg-free HLS downloader (movies/series core) ──');
+
+  await test('HLS master → variant → segments land in one playable file', async () => {
+    const http = require('http');
+    const seg = (n) => { const b = Buffer.alloc(188 * 90, 0x11); for (let i = 0; i < 90; i++) b[i * 188] = 0x47; b[b.length - 1] = n; return b; };
+    const files = {
+      '/master.m3u8': '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=640x360\nlow.m3u8\n' +
+        '#EXT-X-STREAM-INF:BANDWIDTH=2600000,RESOLUTION=1280x720\nhi.m3u8\n',
+      '/low.m3u8': '#EXTM3U\n#EXTINF:2,\nlow0.ts\n#EXTINF:2,\nlow1.ts\n#EXT-X-ENDLIST\n',
+      '/hi.m3u8': '#EXTM3U\n#EXTINF:2,\nhi0.ts\n#EXTINF:2,\nhi1.ts\n#EXT-X-ENDLIST\n',
+      '/low0.ts': seg(1), '/low1.ts': seg(2), '/hi0.ts': seg(3), '/hi1.ts': seg(4),
+    };
+    const server = http.createServer((req, res) => {
+      const f = files[req.url];
+      if (!f) { res.writeHead(404); return res.end('no'); }
+      if (Buffer.isBuffer(f)) { res.writeHead(200); return res.end(f); }
+      res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' }); res.end(f);
+    });
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+
+    try {
+      const hls = await import(pathToFileURL(path.join(REPO, 'engine/media/hls.js')).href);
+      const variants = hls.parseVariants(files['/master.m3u8'], base);
+      assert.strictEqual(variants[0].height, 720, 'variants not sorted best-first');
+      assert.strictEqual(hls.chooseVariant(variants, 480).height, 360, '480p request did not fall to 360p');
+
+      const out = path.join(sandbox, 'hls-out.mp4');
+      const got = await hls.downloadHlsNative(`${base}/master.m3u8`, out, { maxHeight: 720 });
+      assert.strictEqual(got.variant, 720, 'wrong variant downloaded');
+      assert.ok(got.file.endsWith('.ts'), `TS stream was not written as .ts: ${got.file}`);
+      assert.strictEqual(fs.statSync(got.file).size, 2 * 188 * 90, 'segments were not concatenated');
+    } finally {
+      server.close();
+    }
+  });
+
+  await test('HLS downloader refuses an empty playlist instead of writing 0 bytes', async () => {
+    const http = require('http');
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' });
+      res.end('#EXTM3U\n#EXT-X-ENDLIST\n');
+    });
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const hls = await import(pathToFileURL(path.join(REPO, 'engine/media/hls.js')).href);
+      await assert.rejects(
+        () => hls.downloadHlsNative(`${base}/empty.m3u8`, path.join(sandbox, 'empty.ts')),
+        /no segments/,
+      );
+    } finally { server.close(); }
+  });
+
+  console.log('\n── 18. media log format ──');
+
+  await test('log lines are one line, timestamped and aligned', () => {
+    const lines = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    console.log = (...a) => lines.push(a.join(' '));
+    console.error = (...a) => lines.push(a.join(' '));
+    try {
+      const log = require(path.join(REPO, 'utils/logger.js'))('movie');
+      log.info('Inception · vidlink · 1080p');
+      log.error(new Error('boom\nsecond line'));
+    } finally { console.log = origLog; console.error = origErr; }
+    const info = lines.find(l => /INFO/.test(l));
+    const err = lines.find(l => /ERROR/.test(l));
+    assert.ok(info && /^\d{2}:\d{2}:\d{2}\.\d{3}\s+INFO\s+movie\s+Inception/.test(info), `bad info line: ${info}`);
+    assert.ok(err && !err.includes('\n') && err.includes('boom'), `bad error line: ${err}`);
+  });
+
+
+  console.log('\n── 19. mirror failover, request coalescing, stale cache ──');
+
+  await test('mirror pool fails over and benches a domain that never answers', async () => {
+    const { withMirrors, mirrorReport } = await import(pathToFileURL(path.join(REPO, 'engine/core/mirrors.js')).href);
+
+    // 1. a dead first mirror must not cost the request
+    let aliveHits = 0;
+    const out = await withMirrors('unit-pool-a', ['https://dead.example', 'https://alive.example'], async (base) => {
+      if (base.includes('dead')) throw new Error('ENOTFOUND');
+      aliveHits++;
+      return [{ ok: true }];
+    });
+    assert.ok(out.length === 1 && aliveHits === 1, 'failover did not reach the live mirror');
+
+    // 2. an all-dead pool trips the breaker after 3 rounds instead of hammering
+    const deadOnly = ['https://one.invalid', 'https://two.invalid'];
+    for (let i = 0; i < 3; i++) {
+      await assert.rejects(() => withMirrors('unit-pool-b', deadOnly, async () => { throw new Error('ECONNRESET'); }));
+    }
+    const report = mirrorReport().find(p => p.provider === 'unit-pool-b');
+    assert.ok(report, 'no report for the dead pool');
+    assert.ok(report.mirrors.every(m => m.state === 'open'), `mirrors not benched: ${JSON.stringify(report.mirrors)}`);
+
+    // 3. half-open probe after the cooldown, not immediately
+    assert.ok(report.mirrors.every(m => m.fails >= 3), 'failure counts not tracked');
+  });
+
+  await test('identical concurrent JSON requests are coalesced', async () => {
+    const http = require('http');
+    let hits = 0;
+    const server = http.createServer((req, res) => {
+      hits++;
+      setTimeout(() => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true}'); }, 100);
+    });
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${server.address().port}/same`;
+    try {
+      const { req } = await import(pathToFileURL(path.join(REPO, 'engine/core/http.js')).href);
+      const [a, b, c] = await Promise.all([req(url), req(url), req(url)]);
+      assert.strictEqual(hits, 1, `hit upstream ${hits} times`);
+      assert.ok(a.ok && b.ok && c.ok, 'coalesced responses lost their body');
+    } finally { server.close(); }
+  });
+
+  await test('a rotating user-agent is used when the caller does not pin one', async () => {
+    const { nextUserAgent } = await import(pathToFileURL(path.join(REPO, 'engine/core/http.js')).href);
+    const a = nextUserAgent();
+    const b = nextUserAgent();
+    assert.ok(/^Mozilla\/5\.0/.test(a) && /^Mozilla\/5\.0/.test(b), 'UA pool is not browser-shaped');
+    assert.notStrictEqual(a, b, 'UA did not rotate');
   });
 
   // ─── summary ────────────────────────────────────────────────────────────────

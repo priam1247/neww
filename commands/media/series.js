@@ -19,6 +19,8 @@ const config = require('../../config');
 const engine = require('../../utils/movieEngine');
 const selections = require('../../utils/selections');
 const host = require('../../utils/movieHost');
+const logger = require('../../utils/logger');
+const log = logger('series');
 
 const QUALITY_RX = /^(480|720|1080|2160|4k)$/i;
 const MOVIES = () => config.movies || {};
@@ -171,8 +173,8 @@ async function deliverSeasonPack(sock, msg, extra, meta, job) {
       }
 
       const dest = await engine.targetFile(meta.title, meta.year, job.quality, season, null);
-      await engine.download(resolved, dest);
-      return { res: resolved, file: dest };
+      const saved = await engine.download(resolved, dest);
+      return { res: resolved, file: (saved && saved.file) || dest };
     }, { timeoutMs: MOVIES().jobTimeoutMs });
 
     const { res, file } = out;
@@ -200,10 +202,54 @@ async function deliverSeasonPack(sock, msg, extra, meta, job) {
 
     return react('✅');
   } catch (e) {
-    console.error('[series] pack', e.message);
+    log.error(`${meta.title} S${pad(season)} pack · ${e.code || 'FAIL'} · ${String(e.message || '').split('\n')[0]}`);
     await react('❌');
     return say(`❌ *${meta.title}* S${pad(season)} pack\n${String(e.message || '').split('\n')[0]}`);
   }
+}
+
+/**
+ * Resolve + download one episode, retrying with the failed provider excluded.
+ * A single dead CDN link no longer costs the user the whole batch.
+ */
+async function fetchEpisodeSource(meta, season, ep, quality, attempts = 3) {
+  const exclude = [];
+  let lastErr = null;
+
+  for (let i = 0; i < attempts; i++) {
+    const resolved = await engine.resolveEpisode({
+      item: meta, tmdbId: meta.tmdbId, title: meta.title, year: meta.year,
+      season, episode: ep, quality, exclude,
+    });
+
+    if (MOVIES().dryRun) return { res: resolved, file: null };
+
+    const maxMB = host.maxDownloadMB();
+    if (resolved.sizeMB && resolved.sizeMB > maxMB) return { res: resolved, tooLarge: resolved.sizeMB };
+
+    if (resolved.kind === 'cache' && resolved.file && fs.existsSync(resolved.file)) {
+      return { res: resolved, file: resolved.file };
+    }
+
+    const dest = await engine.targetFile(meta.title, meta.year, quality, season, ep);
+    try {
+      const saved = await engine.download(resolved, dest);
+      const realFile = (saved && saved.file) || dest;
+      const size = fs.statSync(realFile).size;
+      if (!size) throw new Error('download produced an empty file');
+      await engine.rememberFile(resolved.meta || meta, quality, season, ep, realFile, size / 1048576);
+      return { res: resolved, file: realFile };
+    } catch (e) {
+      lastErr = e;
+      log.warn(`${meta.title} S${pad(season)}E${pad(ep)} · ${resolved.provider} download failed · ${e.message}`);
+      exclude.push(resolved.provider);
+      for (const f of [dest, dest.replace(/\.(mp4|mkv|ts|m4v)$/i, '') + '.ts']) {
+        try { fs.rmSync(f, { force: true }); } catch { /* ignore */ }
+      }
+      if (exclude.length >= attempts) break;
+    }
+  }
+  throw lastErr || new Error('no downloadable source found');
 }
 
 async function deliver(sock, msg, extra, meta, job) {
@@ -249,29 +295,12 @@ async function deliver(sock, msg, extra, meta, job) {
     const tag = `S${pad(season)}E${pad(ep)}`;
     try {
       // resolve + download in ONE queue slot so a batch stays sequential
-      const done = await engine.enqueue(chatId, `${meta.title} ${tag}`, async () => {
-        const resolved = await engine.resolveEpisode({
-          item: meta, tmdbId: meta.tmdbId, title: meta.title, year: meta.year,
-          season, episode: ep, quality: job.quality,
-        });
-
-        if (MOVIES().dryRun) return { res: resolved, file: null };
-
-        const maxMB = host.maxDownloadMB();
-        if (resolved.sizeMB && resolved.sizeMB > maxMB) return { res: resolved, tooLarge: resolved.sizeMB };
-
-        if (resolved.kind === 'cache' && resolved.file && fs.existsSync(resolved.file)) {
-          return { res: resolved, file: resolved.file };
-        }
-
-        const dest = await engine.targetFile(meta.title, meta.year, job.quality, season, ep);
-        await engine.download(resolved, dest);
-
-        const size = fs.statSync(dest).size;
-        if (!size) throw new Error('download produced an empty file');
-        await engine.rememberFile(resolved.meta || meta, job.quality, season, ep, dest, size / 1048576);
-        return { res: resolved, file: dest };
-      }, { timeoutMs: MOVIES().jobTimeoutMs });
+      const done = await engine.enqueue(
+        chatId,
+        `${meta.title} ${tag}`,
+        () => fetchEpisodeSource(meta, season, ep, job.quality),
+        { timeoutMs: MOVIES().jobTimeoutMs }
+      );
 
       const { res, file } = done;
 
@@ -287,10 +316,11 @@ async function deliver(sock, msg, extra, meta, job) {
         continue;
       }
 
+      log.info(`${meta.title} ${tag} · ${res.provider} · ${res.quality || job.quality}p · ${host.fmtMB(fs.statSync(file).size)}`);
       await sendEpisode(sock, msg, chatId, file, meta, season, ep, job.quality, res);
       sent++;
     } catch (e) {
-      console.error(`[series] ${tag}`, e.message);
+      log.error(`${meta.title} ${tag} · ${e.code || 'FAIL'} · ${String(e.message || '').split('\n')[0]}`);
       failures.push(`${tag}: ${String(e.message || '').split('\n')[0]}`);
     }
   }
@@ -335,7 +365,7 @@ module.exports = {
       if (matches.length === 1) return deliver(sock, msg, extra, matches[0], job);
       return offerChoices(sock, msg, extra, matches, job);
     } catch (e) {
-      console.error('[series]', e.message);
+      log.error(`${job.title || 'search'} · ${e.code || 'FAIL'} · ${String(e.message || '').split('\n')[0]}`);
       return extra.reply(`❌ ${String(e.message || '').split('\n')[0]}`);
     }
   },

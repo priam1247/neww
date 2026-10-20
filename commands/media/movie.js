@@ -13,6 +13,8 @@ const config = require('../../config');
 const engine = require('../../utils/movieEngine');
 const selections = require('../../utils/selections');
 const host = require('../../utils/movieHost');
+const logger = require('../../utils/logger');
+const log = logger('movie');
 
 const QUALITY_RX = /^(480|720|1080|2160|4k)$/i;
 const MOVIES = () => config.movies || {};
@@ -63,6 +65,47 @@ const help = (P) =>
 const shortError = (e) =>
   `❌ ${String(e && e.message ? e.message : e).split('\n').filter(Boolean).slice(0, 2).join('\n')}`;
 
+/**
+ * Resolve + download, retrying with the failed provider excluded.
+ * One dead CDN link used to end the command; now the engine walks on to the
+ * next source instead of telling the user "no source".
+ */
+async function fetchSource(meta, quality, attempts = 3) {
+  const exclude = [];
+  let lastErr = null;
+
+  for (let i = 0; i < attempts; i++) {
+    const resolved = await engine.resolveMovie({
+      item: meta, tmdbId: meta.tmdbId, title: meta.title, year: meta.year, quality, exclude,
+    });
+
+    if (MOVIES().dryRun) return { res: resolved, file: null };
+
+    const sizeMB = Number(resolved.sizeMB) || 0;
+    if (sizeMB && sizeMB > host.maxDownloadMB()) return { res: resolved, file: null, tooBig: sizeMB };
+
+    if (resolved.kind === 'cache' && resolved.file && fs.existsSync(resolved.file)) {
+      return { res: resolved, file: resolved.file, cached: true };
+    }
+
+    const dest = await engine.targetFile(meta.title, meta.year, quality, null, null);
+    try {
+      const saved = await engine.download(resolved, dest);
+      // HLS sources may land as .ts (no ffmpeg on the host) — use the real path
+      return { res: resolved, file: (saved && saved.file) || dest };
+    } catch (e) {
+      lastErr = e;
+      log.warn(`${meta.title} ${quality}p · ${resolved.provider} download failed · ${e.message}`);
+      exclude.push(resolved.provider);
+      for (const f of [dest, dest.replace(/\.(mp4|mkv|ts|m4v)$/i, '') + '.ts']) {
+        try { fs.rmSync(f, { force: true }); } catch { /* ignore */ }
+      }
+      if (exclude.length >= attempts) break;
+    }
+  }
+  throw lastErr || new Error('no downloadable source found');
+}
+
 /** Render the match list and offer a numbered pick. */
 async function offerChoices(sock, msg, extra, matches, job, kind) {
   const list = matches.slice(0, 6);
@@ -93,25 +136,14 @@ async function deliver(sock, msg, extra, meta, job) {
   try {
     // resolve + download inside ONE queue slot: concurrency stays 1, so a
     // second movie waits instead of competing for bandwidth/disk
-    const jobResult = await engine.enqueue(chatId, `movie ${meta.title} ${quality}p`, async () => {
-      const resolved = await engine.resolveMovie({
-        item: meta, tmdbId: meta.tmdbId, title: meta.title, year: meta.year, quality,
-      });
-
-      if (MOVIES().dryRun) return { res: resolved, file: null };
-
-      const sizeMB = Number(resolved.sizeMB) || 0;
-      const maxMB = host.maxDownloadMB();
-      if (sizeMB && sizeMB > maxMB) return { res: resolved, file: null, tooBig: sizeMB };
-
-      if (resolved.kind === 'cache' && resolved.file && fs.existsSync(resolved.file)) {
-        return { res: resolved, file: resolved.file, cached: true };
-      }
-
-      const dest = await engine.targetFile(meta.title, meta.year, quality, null, null);
-      await engine.download(resolved, dest);
-      return { res: resolved, file: dest };
-    }, { timeoutMs: MOVIES().jobTimeoutMs });
+    log.info(`${meta.title}${meta.year ? ` (${meta.year})` : ''} · ${quality}p · start`);
+    const t0 = Date.now();
+    const jobResult = await engine.enqueue(
+      chatId,
+      `movie ${meta.title} ${quality}p`,
+      () => fetchSource(meta, quality),
+      { timeoutMs: MOVIES().jobTimeoutMs }
+    );
 
     const { res, file } = jobResult;
 
@@ -123,6 +155,9 @@ async function deliver(sock, msg, extra, meta, job) {
       await react('❌');
       return say(`❌ *${meta.title}* is ${jobResult.tooBig.toFixed(0)} MB — over the ${host.maxDownloadMB()} MB download cap.`);
     }
+
+    log.info(`${meta.title} · ${res.provider} · ${res.quality || quality}p · ` +
+      `${host.fmtMB(fs.statSync(file).size)} · ${Math.round((Date.now() - t0) / 1000)}s`);
 
     if (host.shouldUploadDrime(fs.statSync(file).size) && host.drimeReady()) await react('☁️');
 
@@ -136,7 +171,7 @@ async function deliver(sock, msg, extra, meta, job) {
 
     await react('✅');
   } catch (e) {
-    console.error('[movie]', e.message);
+    log.error(`${meta.title} · ${e.code || 'FAIL'} · ${String(e.message).split('\n')[0]}`);
     await react('❌');
     await say(shortError(e));
   }
@@ -169,7 +204,7 @@ module.exports = {
       // otherwise let the user pick instead of silently grabbing results[0]
       return offerChoices(sock, msg, extra, matches, job, 'movie');
     } catch (e) {
-      console.error('[movie]', e.message);
+      log.error(`${job.title || 'search'} · ${e.code || 'FAIL'} · ${String(e.message).split('\n')[0]}`);
       return extra.reply(shortError(e));
     }
   },

@@ -76,7 +76,9 @@ module.exports = {
   // When a query is not a link, the bot lists the top results and lets the user
   // reply with a number instead of silently downloading the first hit.
   search: {
-    picker: env.SEARCH_PICKER === 'false' ? false : true,
+    // Off by default: .song/.ytv take the top (official) hit and only reply
+    // with the file. SEARCH_PICKER=true restores the numbered list.
+    picker: /^(1|true|yes)$/i.test(String(env.SEARCH_PICKER || '')),
     maxResults: Math.max(1, Math.min(10, Number(env.SEARCH_RESULTS || 5))),
     ttlMinutes: Math.max(1, Number(env.SEARCH_TTL_MINUTES || 5)),
   },

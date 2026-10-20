@@ -13,7 +13,6 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import config from '../config.js';
 import { which } from '../utils/disk.js';
-import { ffmpegPath } from '../host.js';
 import { metrics } from './metrics.js';
 import { emit, EVENTS } from './events.js';
 
@@ -103,11 +102,8 @@ export async function sniffRemote(url, headers = {}) {
 
 /** HLS: confirm the manifest is real and still alive. */
 async function verifyHls(cand) {
-  // Without ffmpeg an HLS stream can never be turned into a file — say so now
-  // instead of failing after the user waited for a download.
-  if (!(await ffmpegPath()) && !(await which('ffmpeg'))) {
-    throw new Error('HLS source needs ffmpeg on this host');
-  }
+  // HLS no longer needs ffmpeg (engine/media/hls.js downloads the segments
+  // itself), so a live manifest is all we check.
   const res = await fetch(cand.url, {
     headers: { ...cand.headers, 'user-agent': ua() },
     signal: tmo(config.verifyTimeoutMs), redirect: 'follow'
@@ -116,8 +112,9 @@ async function verifyHls(cand) {
   const text = await res.text();
   if (!/#EXTM3U/i.test(text)) throw new Error('not an HLS playlist');
   const variants = (text.match(/#EXT-X-STREAM-INF/gi) || []).length;
+  if (!variants && !/#EXTINF/i.test(text)) throw new Error('empty HLS playlist');
   metrics.bump('verify.ok');
-  return { url: cand.url, sizeMB: 0, verified: false, kind: 'hls', variants };
+  return { url: cand.url, sizeMB: 0, verified: true, kind: 'hls', variants };
 }
 
 export async function verify(cand, opts = {}) {

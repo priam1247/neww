@@ -26,6 +26,7 @@ const DEFAULTS = {
   remoteFallback: true,   // use remote downloader APIs when yt-dlp fails
   cobaltInstances: [],    // extra cobalt API instances (base URLs)
   preferEngine: '',       // '' | 'ytdlp' | 'remote' — force a starting engine
+  searchPicker: null,     // null = use config.search.picker; true shows the numbered list
 };
 
 let _cache = null;

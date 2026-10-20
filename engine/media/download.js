@@ -20,6 +20,7 @@ import { freeBytes, ensureDir, which, sanitize as sanitizeName } from '../utils/
 import { emit, EVENTS } from '../core/events.js';
 import { metrics } from '../core/metrics.js';
 import { ffmpegPath, downloadFallback } from '../host.js';
+import { downloadHlsNative } from './hls.js';
 
 export const sanitize = (name, q, s, e) => {
   const base = sanitizeName(name);
@@ -29,12 +30,31 @@ export const sanitize = (name, q, s, e) => {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// HLS -> mp4 via ffmpeg, straight to disk
-export async function hlsToFile(url, dest, onProgress, { headers = {} } = {}) {
+// HLS -> file, straight to disk.
+// ffmpeg is used when the host has it (it is faster and remuxes cleanly), but
+// it is NOT required any more: the native downloader below concatenates the
+// playlist's segments itself, so stream sources work on a bare Node host.
+export async function hlsToFile(url, dest, onProgress, { headers = {}, maxHeight } = {}) {
   // Prefer the binary the bot itself verified (system → user install →
   // ffmpeg-static); fall back to a PATH lookup so the engine still works alone.
   const ffmpeg = (await ffmpegPath()) || await which('ffmpeg');
-  if (!ffmpeg) throw new Error('ffmpeg required for HLS sources (apt install ffmpeg)');
+  if (!ffmpeg) {
+    // hard cap so a runaway playlist can never eat the host's disk
+    const maxBytes = Math.round(config.maxDownloadMB * 1.2 * 1048576);
+    let got;
+    try {
+      got = await downloadHlsNative(url, dest, { headers, onProgress, maxHeight, maxBytes });
+    } catch (e) {
+      // never leave a half-written stream behind for the next retry to resume
+      for (const f of [dest, dest.replace(/\.(mp4|mkv|ts|m4v)$/i, '') + '.ts']) {
+        try { fs.rmSync(f, { force: true }); } catch { /* ignore */ }
+      }
+      throw e;
+    }
+    metrics.bump('download.bytes', {}, got.bytes);
+    emit(EVENTS.DOWNLOAD_DONE, { dest: got.file, bytes: got.bytes });
+    return { bytes: got.bytes, file: got.file, native: true };
+  }
   ensureDir(path.dirname(dest));
   cache.markActive(dest);
 
@@ -76,7 +96,7 @@ export async function hlsToFile(url, dest, onProgress, { headers = {} } = {}) {
 
   const bytes = fs.statSync(dest).size;
   metrics.bump('download.bytes', {}, bytes);
-  return { bytes };
+  return { bytes, file: dest };
 }
 
 // One HTTP attempt. Resumes from whatever is already on disk.

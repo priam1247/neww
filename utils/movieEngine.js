@@ -136,6 +136,11 @@ module.exports = {
     const { metadata } = await load();
     return metadata.table();
   },
+  /** per-provider mirror pools: which DDL domain answered, which is benched */
+  async mirrors() {
+    const { mirrorReport } = await load();
+    try { return mirrorReport(); } catch { return []; }
+  },
   async movieDetails(tmdbId) {
     const { tmdb } = await load();
     return tmdb.movieDetails(tmdbId);
@@ -197,6 +202,7 @@ module.exports = {
     return rememberFile(...args);
   },
   /** stream a resolved source to disk (stall guard + resume + retries) */
+  /** @returns {Promise<{bytes:number, file:string}>} file = what actually landed on disk */
   async download(res, file, onProgress) {
     await load();
     const { download } = await import(pathToFileURL(path.join(ENGINE, 'media', 'downloader.js')).href);

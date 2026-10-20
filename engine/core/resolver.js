@@ -26,11 +26,47 @@ const rlog = log.child('resolver');
 const TIERS = [[1], [2], [3]];          // torrents → DDL → streams
 const MAX_PER_TIER = 6;
 
+// ── stale-on-error cache ───────────────────────────────────────────────────
+// A tier that answered five minutes ago is still better than "no source" when
+// every mirror is having a bad minute. Fresh for 15 min, reusable for 6 h.
+const FRESH_MS = 15 * 60_000;
+const STALE_MS = 6 * 60 * 60_000;
+const tierCache = new Map();            // key -> { value, freshUntil, staleUntil }
+
+const tierKey = (tier, media, opts) =>
+  `${tier}|${media.type}|${media.imdbId || media.tmdbId || media.title}|` +
+  `${opts.season ?? ''}|${opts.episode ?? ''}|${opts.want ?? ''}`;
+
+function tierCacheGet(key) {
+  const hit = tierCache.get(key);
+  if (!hit) return { state: 'miss' };
+  const now = Date.now();
+  if (now < hit.freshUntil) return { state: 'fresh', value: hit.value };
+  if (now < hit.staleUntil) return { state: 'stale', value: hit.value };
+  tierCache.delete(key);
+  return { state: 'miss' };
+}
+
+function tierCacheSet(key, value) {
+  if (!value?.length) return;
+  if (tierCache.size > 300) tierCache.clear();
+  const now = Date.now();
+  tierCache.set(key, { value, freshUntil: now + FRESH_MS, staleUntil: now + STALE_MS });
+}
+
 async function searchTier(tier, media, opts) {
-  const live = liveProviders({ tier: tier[0], type: media.type });
-  if (!live.length) return [];
+  const skip = new Set(opts.exclude || []);
+  const live = liveProviders({ tier: tier[0], type: media.type }).filter(p => !skip.has(p.id));
+  if (!live.length) {
+    // every provider is benched — a cached answer still beats a refusal
+    const cached = tierCacheGet(tierKey(tier[0], media, opts));
+    return cached.state === 'miss' ? [] : cached.value;
+  }
 
   const t0 = Date.now();
+  // Stream providers do 2–3 chained HTTP calls (token → api → manifest), so the
+  // generic 15s tier deadline cut them off before they could answer.
+  const deadline = tier[0] === 3 ? Math.max(config.tierTimeoutMs, 25_000) : config.tierTimeoutMs;
   const results = await hedge(
     live.map(p =>
       (async () => {
@@ -43,15 +79,25 @@ async function searchTier(tier, media, opts) {
           return c;
         } catch (e) {
           recordFail(p.id, e);
-          rlog.debug(`${p.id} search failed: ${e.message}`);
+          rlog.debug(`${p.id} search failed · ${e.code || 'ERROR'} · ${e.message}`);
           return [];
         }
       })()
     ),
-    config.tierTimeoutMs
+    deadline
   );
 
   const cands = results.flat().filter(Boolean);
+  const ck = tierKey(tier[0], media, opts);
+  if (cands.length) tierCacheSet(ck, cands);
+  else {
+    const cached = tierCacheGet(ck);
+    if (cached.state === 'stale') {
+      metrics.bump('search.stale');
+      rlog.info(`tier ${tier[0]}: live sources empty — reusing cached results`);
+      return cached.value;
+    }
+  }
   metrics.bump('search.ok');
   if (!cands.length) metrics.bump('search.empty');
   metrics.time(`tier.${tier[0]}`, Date.now() - t0);
@@ -108,6 +154,10 @@ async function resolve(media, opts = {}) {
   const reasons = [];
   let sawCandidates = false;
   let configIssue = false;
+  // A stream URL that failed *verification* (CDN refused a HEAD/range probe)
+  // is still worth one download attempt: verification is a guess, the transfer
+  // is the truth. Kept aside so a normal verified source always wins.
+  let lastResort = null;
 
   const noDebrid = !debrid.active().length && config.skipTorrentWithoutDebrid;
 
@@ -134,17 +184,38 @@ async function resolve(media, opts = {}) {
         cache.ndel(cacheKey);                       // it exists after all
         metrics.bump(`tier.${tier[0]}`);
         metrics.bump('resolve.ok');
-        rlog.info(`✅ ${media.type} via ${cand.provider} (tier ${tier[0]}) ${Math.round(out.sizeMB || 0)}MB`);
+        rlog.info(`${media.type} via ${cand.provider} · tier ${tier[0]} · ${Math.round(out.sizeMB || 0)}MB`);
         emit(EVENTS.RESOLVED, { provider: cand.provider, tier: tier[0], sizeMB: out.sizeMB, title: cand.title });
         return { ...out, provider: cand.provider, tier: tier[0] };
       } catch (e) {
         if (e.configIssue) configIssue = true;
+        if (tier[0] === 3 && !lastResort && /^https?:/i.test(cand.url || '')) {
+          lastResort = cand;
+        }
         reasons.push(`${cand.provider}: ${e.message}`);
         metrics.bump('resolve.candFail');
         emit(EVENTS.CANDIDATE_REJECTED, { provider: cand.provider, reason: e.message });
-        rlog.debug(`↩️ ${cand.provider} rejected: ${e.message}`);
+        rlog.debug(`${cand.provider} rejected · ${e.message}`);
       }
     }
+  }
+
+  // Nothing verified — hand back the best stream link anyway rather than
+  // telling the user "no source". The download is the final judge.
+  if (lastResort) {
+    metrics.bump('resolve.unverified');
+    rlog.warn(`${media.title}: using unverified ${lastResort.provider} link`);
+    return {
+      url: lastResort.url,
+      kind: lastResort.kind === 'hls' ? 'hls' : 'file',
+      provider: lastResort.provider,
+      title: lastResort.title,
+      quality: lastResort.quality || opts.quality,
+      sizeMB: lastResort.sizeMB || 0,
+      headers: lastResort.headers || {},
+      verified: false,
+      unverified: true
+    };
   }
 
   metrics.bump('resolve.fail');

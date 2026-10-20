@@ -8,6 +8,8 @@ import { httpToFile, hlsToFile } from './download.js';
  */
 export async function download(res, file, onProgress) {
   if (!res?.url) throw new Error('nothing to download (no link)');
-  if (res.kind === 'hls') return hlsToFile(res.url, file, onProgress, { headers: res.headers });
+  if (res.kind === 'hls') {
+    return hlsToFile(res.url, file, onProgress, { headers: res.headers, maxHeight: res.quality });
+  }
   return httpToFile(res.url, file, { onProgress, headers: res.headers });
 }
