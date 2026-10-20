@@ -36,6 +36,7 @@ module.exports = {
       m += `└─ .movie <title> [year] [480|720|1080|2160]\n`;
       m += `└─ .series <title> s01e03 [quality]\n`;
       m += `└─ .series <title> s01 1-6  |  s01 full\n`;
+      m += `└─ .info <title> [series]  → ids + sources\n`;
       m += `└─ .providers  .moviestatus\n`;
 
       m += `◈ MEDIA\n`;

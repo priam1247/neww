@@ -122,9 +122,11 @@ async function offerChoices(sock, msg, extra, matches, job) {
 async function sendEpisode(sock, msg, chatId, file, meta, season, episode, quality, res) {
   const stat = fs.statSync(file);
   const tag = `S${pad(season)}E${pad(episode)}`;
+  const shownQuality = res.quality || quality;
+  const note = res.downgraded ? ` _(no ${quality}p — ${shownQuality}p)_` : '';
   const caption =
     `📺 *${meta.title}* — ${tag}\n` +
-    `💾 ${(stat.size / 1048576).toFixed(0)} MB · ${quality}p\n` +
+    `💾 ${(stat.size / 1048576).toFixed(0)} MB · ${shownQuality}p${note}\n` +
     `📡 ${res.provider}${res.tier !== undefined ? ` · tier ${res.tier}` : ''}`;
 
   await sock.sendMessage(chatId, {
@@ -147,7 +149,7 @@ async function deliverSeasonPack(sock, msg, extra, meta, job) {
     // resolve + (if it fits) download inside one queue slot
     const out = await engine.enqueue(chatId, `season ${meta.title} S${pad(season)}`, async () => {
       const resolved = await engine.resolveSeason({
-        tmdbId: meta.tmdbId, title: meta.title, year: meta.year, season, quality: job.quality,
+        item: meta, tmdbId: meta.tmdbId, title: meta.title, year: meta.year, season, quality: job.quality,
       });
 
       if (MOVIES().dryRun) return { res: resolved, file: null };
@@ -210,6 +212,25 @@ async function deliver(sock, msg, extra, meta, job) {
   const episodes = [];
   for (let e = from; e <= to; e++) episodes.push(e);
 
+  // TVMaze (keyless) knows how many episodes actually exist and when they air.
+  // Without this a typo like "s01 1-30" burns 30 resolve attempts on nothing.
+  let guide = null;
+  try { guide = await engine.episodeGuide(meta, season); } catch { guide = null; }
+  if (Array.isArray(guide) && guide.length) {
+    const known = new Map(guide.map(g => [Number(g.episode), g]));
+    const missing = episodes.filter(e => !known.has(e));
+    if (missing.length === episodes.length) {
+      return extra.reply(
+        `❌ *${meta.title}* S${pad(season)} has ${guide.length} episode(s), so ${missing.map(e => `E${pad(e)}`).join(', ')} does not exist.`
+      );
+    }
+    if (missing.length) {
+      const last = Math.max(...[...known.keys()]);
+      await extra.reply(`ℹ️ S${pad(season)} has ${last} episode(s) — skipping ${missing.map(e => `E${pad(e)}`).join(', ')}.`);
+      episodes.splice(0, episodes.length, ...episodes.filter(e => known.has(e)));
+    }
+  }
+
   const card = progressCard(sock, chatId, msg,
     `📺 *${meta.title}* S${pad(season)} — ${episodes.length} episode(s) @ ${job.quality}p\n⏳ starting…`);
 
@@ -225,7 +246,7 @@ async function deliver(sock, msg, extra, meta, job) {
       // resolve + download in ONE queue slot so a batch stays sequential
       const done = await engine.enqueue(chatId, `${meta.title} ${tag}`, async () => {
         const resolved = await engine.resolveEpisode({
-          tmdbId: meta.tmdbId, title: meta.title, year: meta.year,
+          item: meta, tmdbId: meta.tmdbId, title: meta.title, year: meta.year,
           season, episode: ep, quality: job.quality,
         });
 

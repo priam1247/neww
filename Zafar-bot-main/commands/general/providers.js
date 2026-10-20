@@ -22,7 +22,10 @@ const providersCommand = {
 
   async execute(sock, msg, args, extra) {
     try {
-      const rows = await engine.providers();
+      const [rows, metaRows] = await Promise.all([
+        engine.providers(),
+        engine.metadataTable().catch(() => []),
+      ]);
       if (!rows.length) return extra.reply('No sources registered — the engine did not load.');
 
       const m = config.movies || {};
@@ -39,13 +42,24 @@ const providersCommand = {
           return `${icon} *${p.id}* · t${p.tier} ${TIER_NAME[p.tier] || ''} · trust ${p.trust} · ${p.wins}w/${p.fails}f · ${p.latency}`;
         });
 
+      const metaLines = metaRows.map(s => {
+        const icon = s.enabled ? '🟢' : (s.needsKey ? '🔑' : '⚪');
+        return `${icon} *${s.id}*${s.needsKey ? ' (key)' : ''}`;
+      });
+
       const text = [
-        `📡 *Sources* (${rows.length})`,
+        `📡 *Download sources* (${rows.length})`,
         '',
         ...lines,
         '',
         `🔑 TMDB: ${m.tmdbKey ? 'set' : 'MISSING'}`,
         `🔑 debrid: ${debrid.length ? debrid.join(', ') : 'none — torrents skipped, free sources only'}`,
+        '',
+        `🗂 *Metadata* (${metaRows.filter(s => s.enabled).length}/${metaRows.length} live)`,
+        '',
+        ...metaLines,
+        '',
+        '_🔑 = needs a key · ⚪ = disabled in config · .info <title> shows what they return_',
       ].join('\n');
 
       return extra.reply(text);
@@ -64,8 +78,9 @@ const statusCommand = {
 
   async execute(sock, msg, args, extra) {
     try {
-      const [stats, cache, q] = await Promise.all([
+      const [stats, cache, q, metaRows] = await Promise.all([
         engine.stats(), engine.cacheStats(), engine.queueSize(),
+        engine.metadataTable().catch(() => []),
       ]);
 
       const c = stats.counters || {};
@@ -77,6 +92,7 @@ const statusCommand = {
         '```',
         `uptime      ${minutes}m`,
         `queue       ${q.running} running / ${q.queued} waiting`,
+        `metadata    ${metaRows.filter(s => s.enabled).length}/${metaRows.length} sources live`,
         `searches    ${g('search.ok')} ok / ${g('search.empty')} empty`,
         `resolves    ${g('resolve.ok')} ok / ${g('resolve.fail')} fail`,
         `tier wins   t1 ${g('tier.1')} · t2 ${g('tier.2')} · t3 ${g('tier.3')}`,

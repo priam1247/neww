@@ -193,6 +193,39 @@ test('.series downloads every episode of a range', async () => {
   assert.match(docs[2].content.caption, /S02E03/);
 });
 
+test('.info shows the ids that downloads need and which sources produced them', async () => {
+  const bridge = require('../utils/movieEngine');
+  bridge.lookup = async () => ([{
+    source: 'tmdb', sources: ['tmdb', 'cinemeta', 'omdb'], type: 'movie',
+    title: 'Inception', year: '2010', imdbId: 'tt1375666', tmdbId: 27205,
+    rating: 8.8, runtime: 148, genres: ['Sci-Fi'], overview: 'Dreams.', poster: null,
+  }]);
+
+  const cmd = require('../commands/general/info');
+  let out = '';
+  const extra = {
+    from: '555@s.whatsapp.net',
+    sender: '555@s.whatsapp.net',
+    reply: async (t) => { out = t; },
+  };
+  const sock = { sendMessage: async (jid, c) => { out = c.caption || c.text; return { key: { id: '1' } }; } };
+
+  await cmd.execute(sock, { key: { id: 'i1', remoteJid: extra.from } }, ['inception'], extra);
+
+  assert.match(out, /Inception/);
+  assert.match(out, /imdb:tt1375666/);
+  assert.match(out, /tmdb:27205/);
+  assert.match(out, /tmdb · cinemeta · omdb/);
+});
+
+test('.info explains its usage without arguments', async () => {
+  const cmd = require('../commands/general/info');
+  let out = '';
+  const extra = { from: '1@s.whatsapp.net', sender: '1@s.whatsapp.net', reply: async (t) => { out = t; } };
+  await cmd.execute({}, { key: { id: '2' } }, [], extra);
+  assert.match(out, /Usage: \.info/);
+});
+
 test('.series requires an episode marker and explains usage otherwise', async () => {
   const sock = fakeSock();
   const cmd = require('../commands/media/series');

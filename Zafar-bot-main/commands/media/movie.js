@@ -102,7 +102,7 @@ async function deliver(sock, msg, extra, meta, job) {
     const label = `🎬 *${meta.title}${meta.year ? ` (${meta.year})` : ''}* · ${quality}p`;
     const jobResult = await engine.enqueue(chatId, `movie ${meta.title} ${quality}p`, async () => {
       const resolved = await engine.resolveMovie({
-        tmdbId: meta.tmdbId, title: meta.title, year: meta.year, quality,
+        item: meta, tmdbId: meta.tmdbId, title: meta.title, year: meta.year, quality,
       });
 
       if (MOVIES().dryRun) return { res: resolved, file: null };
@@ -138,9 +138,11 @@ async function deliver(sock, msg, extra, meta, job) {
     if (jobResult.cached) await card.update('⚡ already downloaded — sending from cache…', { force: true });
 
     const stat = fs.statSync(file);
+    const shownQuality = res.quality || quality;
+    const note = res.downgraded ? ` _(no ${quality}p source — sent ${shownQuality}p)_` : '';
     const caption =
       `🎬 *${meta.title}${meta.year ? ` (${meta.year})` : ''}*\n` +
-      `💾 ${(stat.size / 1048576).toFixed(0)} MB · ${quality}p\n` +
+      `💾 ${(stat.size / 1048576).toFixed(0)} MB · ${shownQuality}p${note}\n` +
       `📡 ${res.provider}${res.tier !== undefined ? ` · tier ${res.tier}` : ''}`;
 
     await sock.sendMessage(chatId, {
