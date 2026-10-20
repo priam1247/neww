@@ -1,0 +1,22 @@
+{
+  "name": "zafar3",
+  "version": "3.3.0",
+  "description": "ZaFarBot 3.3 — WhatsApp media bot (self-bot + session auto-repair): tiered provider cascade + yt-dlp/cobalt downloaders, stickers, past papers, verification, LRU disk cache. Self-healing installs, degraded-mode boot, pairing-code login baked in, Bad-MAC session detection, TorBox removed (Pro-only API).",
+  "type": "module",
+  "main": "bot.js",
+  "engines": { "node": ">=18.17" },
+  "scripts": {
+    "start": "node bot.js",
+    "start:panel": "bash start.sh",
+    "cli": "node cli.js",
+    "test": "node --test",
+    "test:offline": "OFFLINE=1 node --test",
+    "demo": "node scripts/demo.js",
+    "session:gen": "node scripts/session-gen.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "license": "MIT"
+}

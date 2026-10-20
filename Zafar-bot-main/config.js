@@ -1,0 +1,128 @@
+/**
+ * ZaFar Bot — Global Configuration
+ *
+ * Every value can be overridden with an environment variable (shown in the
+ * comments), which keeps tokens out of git on hosts that have an env panel.
+ * The hard-coded values stay as defaults so Katabump-style panels (no env
+ * panel) keep working exactly as before.
+ */
+
+const env = process.env;
+const list = (raw, fallback) => String(raw || fallback).split(',').map(s => s.trim()).filter(Boolean);
+
+module.exports = {
+  ownerNumber: list(env.OWNER_NUMBER, '265894016453'),
+  // Bot admins: full owner-level access, no need to .allow them
+  adminNumbers: list(env.ADMIN_NUMBERS, '265997564836,265986741036,265894016451'),
+  ownerName: list(env.OWNER_NAME, 'ZaFar'),
+
+  botName: env.BOT_NAME || 'ZaFar Bot',
+  prefix: env.PREFIX || '.',
+  sessionName: env.SESSION_NAME || 'session',
+  // Katabump has no environment-variable panel — set the real value here.
+  // ZaFarBot! session string from your pairing/auth step.
+  sessionID: env.SESSION_ID || '',
+
+  packname: env.PACK_NAME || 'ZaFar Bot',
+
+  // Gifted API (fallback downloader). Register your own key at
+  // api.gifted.co.ke — the shipped one is heavily used and may be disabled.
+  giftedApi: {
+    baseUrl: env.GIFTED_API_URL || 'https://api.gifted.co.ke',
+    apiKey: env.GIFTED_API_KEY || '_0u5aff45,_0l1876s8qc',
+  },
+
+  // Telegram bot token for .tgsticker / .tgpack. Create a free bot with
+  // @BotFather on Telegram and paste its token here (or set TELEGRAM_BOT_TOKEN).
+  telegramBotToken: env.TELEGRAM_BOT_TOKEN || '',
+
+  // ─── yt-dlp / YouTube (used by .song and .ytv) ────────────────────────────
+  // Hosting IPs are what trigger YouTube's "confirm you're not a bot" wall.
+  // Cookies fix it: export a cookies.txt from a logged-in browser and drop it
+  // in the bot folder (or paste its contents / base64 into `cookies`, or set
+  // YOUTUBE_COOKIES in the environment).
+  ytdlp: {
+    cookiesFile: env.YOUTUBE_COOKIES_FILE || '', // path to cookies.txt
+    cookies: env.YOUTUBE_COOKIES || '',          // raw Netscape text, base64, or JSON export
+    proxy: env.YTDLP_PROXY || '',                // e.g. http://user:pass@host:port
+    ipv4: true,                                  // force IPv4 (IPv6 egress is often blocked)
+    noCheckCertificates: true,                   // many free hosts ship an outdated CA bundle
+    updateOnBotCheck: true,                      // self-update yt-dlp once per run after a bot-check
+    // Total time one .song/.ytv job may spend trying player clients before it
+    // gives up (prevents a hopeless download from hanging for an hour).
+    deadlineMs: Number(env.YTDLP_DEADLINE_MS || 10 * 60 * 1000),
+  },
+
+  // ─── Spotify (.spotify) ──────────────────────────────────────────────────
+  // Optional. Without credentials the bot uses Spotify's public oEmbed endpoint
+  // for the track title/artist (no key needed); with them it gets the album and
+  // duration as well. Create an app at developer.spotify.com → Dashboard.
+  spotify: {
+    clientId: env.SPOTIFY_CLIENT_ID || '',
+    clientSecret: env.SPOTIFY_CLIENT_SECRET || '',
+  },
+
+  // ─── Remote downloader fallbacks (used only when yt-dlp cannot do it) ────
+  // Cobalt (github.com/imputnet/cobalt) instances. Community instances come and
+  // go: override with COBALT_INSTANCES="https://a,https://b" (or from WhatsApp
+  // with `.ytdl engine` for a status view). Set useDefaultInstances:false to
+  // rely only on the ones you configure.
+  cobalt: {
+    instances: String(env.COBALT_INSTANCES || '').split(',').map(s => s.trim()).filter(Boolean),
+    useDefaultInstances: env.COBALT_USE_DEFAULTS === 'false' ? false : true,
+  },
+
+  // ─── Search picker (.song / .ytv with a search phrase) ───────────────────
+  // When a query is not a link, the bot lists the top results and lets the user
+  // reply with a number instead of silently downloading the first hit.
+  search: {
+    picker: env.SEARCH_PICKER === 'false' ? false : true,
+    maxResults: Math.max(1, Math.min(10, Number(env.SEARCH_RESULTS || 5))),
+    ttlMinutes: Math.max(1, Number(env.SEARCH_TTL_MINUTES || 5)),
+  },
+
+  // ─── Media limits (.song / .ytv) ──────────────────────────────────────────
+  song: {
+    maxMB: 120,
+    maxMinutes: Number(env.SONG_MAX_MINUTES || 180),
+    // 'document' keeps the "Title - Artist.mp3" filename (old behaviour);
+    // 'audio' sends a normal in-chat playable audio message.
+    sendAs: env.SONG_SEND_AS || 'document',
+  },
+  video: {
+    defaultQuality: 720,
+    maxMB: 300,
+    maxMinutes: 60,
+  },
+
+  messages: {
+    error: '❌ Something went wrong.',
+    ownerOnly: '👑 This command is only for the bot owner.',
+  },
+
+  timezone: env.TZ || 'Africa/Blantyre',
+
+  // Set PAIR_NUMBER (full WhatsApp number, digits only, country code first,
+  // e.g. 265991234567) to log in with a pairing code instead of scanning a
+  // QR — useful when the bot host and your WhatsApp phone are the same device.
+  pairNumber: env.PAIR_NUMBER || '265894016453',
+
+  // ─── Drime Cloud Storage (drime.cloud) ───────────────────────────────────
+  // Replaces the old Google Drive + Service Account setup. Get an access
+  // token from Drime Cloud → Account Settings → Developers.
+  drime: {
+    // Katabump has no environment-variable panel — set the real token here.
+    // Get it from Drime Cloud → Account Settings → Developers.
+    apiToken: env.DRIME_API_TOKEN || '58989|qn4Jom8CnuscD7WDvp7FHLH3v1B7dzNOYgCe0l3i372d67fe',
+    baseUrl: env.DRIME_BASE_URL || 'https://app.drime.cloud/api/v1',
+    // Folder ID (numeric) of the folder in your Drime workspace that
+    // contains the past-papers vault — from GET /drive/file-entries.
+    papersFolderId: Number(env.DRIME_PAPERS_FOLDER_ID || 841342462),
+    // Folder hash (from the folder's Drime URL) — required for windowed
+    // listing of large vaults. Stays valid unless the folder is recreated.
+    papersFolderHash: env.DRIME_PAPERS_FOLDER_HASH || 'ODQxMzQyNDYyfA',
+    // 0 = personal workspace. Set to a workspace ID if papers live in a
+    // shared Drime workspace instead.
+    workspaceId: Number(env.DRIME_WORKSPACE_ID || 0),
+  },
+};
