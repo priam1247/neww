@@ -13,6 +13,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import config from '../config.js';
 import { which } from '../utils/disk.js';
+import { ffmpegPath } from '../host.js';
 import { metrics } from './metrics.js';
 import { emit, EVENTS } from './events.js';
 
@@ -102,6 +103,11 @@ export async function sniffRemote(url, headers = {}) {
 
 /** HLS: confirm the manifest is real and still alive. */
 async function verifyHls(cand) {
+  // Without ffmpeg an HLS stream can never be turned into a file — say so now
+  // instead of failing after the user waited for a download.
+  if (!(await ffmpegPath()) && !(await which('ffmpeg'))) {
+    throw new Error('HLS source needs ffmpeg on this host');
+  }
   const res = await fetch(cand.url, {
     headers: { ...cand.headers, 'user-agent': ua() },
     signal: tmo(config.verifyTimeoutMs), redirect: 'follow'
@@ -134,9 +140,12 @@ export async function verify(cand, opts = {}) {
     metrics.bump('verify.fail');
     throw new Error(`too small (${sizeMB.toFixed(0)}MB) — likely a sample`);
   }
-  if (sizeMB && sizeMB > config.maxSendMB * 1.4) {
+  // Reject only genuinely absurd files. The old check used the WhatsApp send
+  // cap, so a normal 1080p movie (2–4 GB) was thrown away as "too big" and the
+  // user got "no usable source found" for every title.
+  if (sizeMB && sizeMB > config.maxDownloadMB * 1.4) {
     metrics.bump('verify.fail');
-    throw new Error(`too big (${sizeMB.toFixed(0)}MB)`);
+    throw new Error(`too big (${sizeMB.toFixed(0)}MB, cap ${config.maxDownloadMB}MB)`);
   }
 
   // quality truth-check (only when ffprobe exists)

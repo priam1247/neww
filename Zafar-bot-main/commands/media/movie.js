@@ -2,24 +2,16 @@
  * ZaFar Bot — .movie  (download a movie)
  *
  *   .movie <title> [year] [480|720|1080|2160]
- *   .movie <title>            → 720p by default
  *
- * Flow: TMDB search (numbered picker when the title is ambiguous) → the engine
- * cascades torrent → DDL → stream sources → the file is streamed to disk with
- * live progress → handed to the bot's own delivery path (`utils/movieHost`):
- * playable video when small, document when big, Drime Cloud link when it is
- * too large for WhatsApp → kept in the LRU cache for instant resends.
- *
- * Everything heavy runs inside the engine's fair queue, so a movie download can
- * never starve .song/.paper or another chat.
+ * Quiet by design: the only chat messages are the numbered picker (only when a
+ * title is ambiguous), the finished file, and ONE short line if something goes
+ * wrong. Everything else is a reaction (⏳ → ✅ / ❌), like the rest of the bot.
  */
 
 const fs = require('fs');
-const path = require('path');
 const config = require('../../config');
 const engine = require('../../utils/movieEngine');
 const selections = require('../../utils/selections');
-const { progressCard, progressLine } = require('../../utils/cards');
 const host = require('../../utils/movieHost');
 
 const QUALITY_RX = /^(480|720|1080|2160|4k)$/i;
@@ -65,21 +57,19 @@ const help = (P) =>
   `*${P}movie <title> [year] [quality]*\n` +
   `e.g.  ${P}movie inception 2010 1080\n` +
   `      ${P}movie dune 2021\n\n` +
-  `qualities: 480 · 720 · 1080 · 2160 (4k)\n` +
-  `_ambiguous titles show a numbered list — reply with the number_`;
+  `qualities: 480 · 720 · 1080 · 2160 (4k)`;
 
-/** Render the TMDB match list and offer a numbered pick. */
+/** First two lines of an error — never a wall of text. */
+const shortError = (e) =>
+  `❌ ${String(e && e.message ? e.message : e).split('\n').filter(Boolean).slice(0, 2).join('\n')}`;
+
+/** Render the match list and offer a numbered pick. */
 async function offerChoices(sock, msg, extra, matches, job, kind) {
   const list = matches.slice(0, 6);
   const lines = list.map((m, i) => `*${i + 1}.* ${m.title} (${m.year || '—'})`);
-  const text = `🎬 *${list.length} matches* — reply with a number\n\n${lines.join('\n')}\n\n_or reply *cancel*_`;
+  const text = `🎬 *${list.length} matches* — reply with a number\n\n${lines.join('\n')}`;
 
-  if (list[0]?.poster) {
-    await sock.sendMessage(extra.from, { image: { url: list[0].poster }, caption: text }, { quoted: msg })
-      .catch(() => sock.sendMessage(extra.from, { text }, { quoted: msg }));
-  } else {
-    await sock.sendMessage(extra.from, { text }, { quoted: msg });
-  }
+  await sock.sendMessage(extra.from, { text }, { quoted: msg });
 
   selections.offer({
     chatId: extra.from,
@@ -91,19 +81,18 @@ async function offerChoices(sock, msg, extra, matches, job, kind) {
   });
 }
 
-/** Resolve → download → send. */
+/** Resolve → download → send. One file message, reactions for the rest. */
 async function deliver(sock, msg, extra, meta, job) {
   const chatId = extra.from;
   const quality = job.quality;
-  const reply = (t) => sock.sendMessage(chatId, { text: t }, { quoted: msg });
+  const react = (emoji) => sock.sendMessage(chatId, { react: { text: emoji, key: msg.key } }).catch(() => {});
+  const say = (text) => sock.sendMessage(chatId, { text }, { quoted: msg });
 
-  const card = progressCard(sock, chatId, msg,
-    `🎬 *${meta.title}${meta.year ? ` (${meta.year})` : ''}* · ${quality}p\n🔎 searching sources…`);
+  await react('⏳');
 
   try {
     // resolve + download inside ONE queue slot: concurrency stays 1, so a
     // second movie waits instead of competing for bandwidth/disk
-    const label = `🎬 *${meta.title}${meta.year ? ` (${meta.year})` : ''}* · ${quality}p`;
     const jobResult = await engine.enqueue(chatId, `movie ${meta.title} ${quality}p`, async () => {
       const resolved = await engine.resolveMovie({
         item: meta, tmdbId: meta.tmdbId, title: meta.title, year: meta.year, quality,
@@ -111,8 +100,6 @@ async function deliver(sock, msg, extra, meta, job) {
 
       if (MOVIES().dryRun) return { res: resolved, file: null };
 
-      // The download cap is not WhatsApp's send cap: big files are handed to
-      // the bot's Drime account instead of being refused.
       const sizeMB = Number(resolved.sizeMB) || 0;
       const maxMB = host.maxDownloadMB();
       if (sizeMB && sizeMB > maxMB) return { res: resolved, file: null, tooBig: sizeMB };
@@ -122,58 +109,36 @@ async function deliver(sock, msg, extra, meta, job) {
       }
 
       const dest = await engine.targetFile(meta.title, meta.year, quality, null, null);
-      await card.update(`${label}\n📡 ${resolved.provider} (tier ${resolved.tier})\n⬇️ starting…`, { force: true });
-      await engine.download(resolved, dest, (got, total) => {
-        card.update(`${label}\n📡 ${resolved.provider} (tier ${resolved.tier})\n${progressLine(got, total)}`);
-      });
-
-      const size = fs.statSync(dest).size;
-      if (!size) throw new Error('download produced an empty file');
-      await engine.rememberFile(resolved.meta || meta, quality, null, null, dest, size / 1048576);
+      await engine.download(resolved, dest);
       return { res: resolved, file: dest };
     }, { timeoutMs: MOVIES().jobTimeoutMs });
 
     const { res, file } = jobResult;
 
     if (MOVIES().dryRun) {
-      return card.final(`🔗 *${meta.title}* (dry-run)\n${res.url || '(cached)'}\n📡 ${res.provider} · tier ${res.tier}`);
+      await react('🔗');
+      return say(`🔗 ${meta.title}\n${res.url || '(cached)'}`);
     }
     if (jobResult.tooBig) {
-      return card.final(
-        `📦 *${meta.title}* is ${jobResult.tooBig.toFixed(0)} MB — over the ${host.maxDownloadMB()} MB download cap.\n` +
-        `🔗 ${res.url || '(cached file)'}\n` +
-        `_raise MOVIE_MAX_DOWNLOAD_MB to fetch it anyway_`
-      );
+      await react('❌');
+      return say(`❌ *${meta.title}* is ${jobResult.tooBig.toFixed(0)} MB — over the ${host.maxDownloadMB()} MB download cap.`);
     }
-    if (jobResult.cached) await card.update('⚡ already downloaded — sending from cache…', { force: true });
 
-    const stat = fs.statSync(file);
+    if (host.shouldUploadDrime(fs.statSync(file).size) && host.drimeReady()) await react('☁️');
+
     const shownQuality = res.quality || quality;
-    const note = res.downgraded ? ` _(no ${quality}p source — sent ${shownQuality}p)_` : '';
-    const caption =
-      `🎬 *${meta.title}${meta.year ? ` (${meta.year})` : ''}*\n` +
-      `💾 ${(stat.size / 1048576).toFixed(0)} MB · ${shownQuality}p${note}\n` +
-      `📡 ${res.provider}${res.tier !== undefined ? ` · tier ${res.tier}` : ''}`;
-
-    // Delivery goes through the bot's adapter: same video/document rule as
-    // .dl, and a Drime link when the file is too big for WhatsApp.
-    const delivered = await host.deliver(sock, chatId, msg, {
+    const note = res.downgraded ? ` (${shownQuality}p)` : '';
+    await host.deliver(sock, chatId, msg, {
       file,
       title: meta.title,
-      caption,
-      onProgress: (sentBytes, totalBytes) => {
-        const pct = totalBytes ? Math.round((sentBytes / totalBytes) * 100) : 0;
-        card.update(`${label}\n☁️ saving to Drime… ${pct}%`, { force: pct === 100 });
-      },
+      caption: `🎬 *${meta.title}${meta.year ? ` (${meta.year})` : ''}*\n${shownQuality}p${note} · ${host.fmtMB(fs.statSync(file).size)}`,
     });
 
-    await card.final(
-      `✅ *${meta.title}${meta.year ? ` (${meta.year})` : ''}* sent — ${(stat.size / 1048576).toFixed(0)} MB` +
-      (delivered.as === 'link' ? `\n☁️ Drime link: ${delivered.link}` : '')
-    );
+    await react('✅');
   } catch (e) {
     console.error('[movie]', e.message);
-    await card.final(`❌ *${meta.title}*\n${String(e.message || '').split('\n').slice(0, 6).join('\n')}`);
+    await react('❌');
+    await say(shortError(e));
   }
 }
 
@@ -191,15 +156,9 @@ module.exports = {
     const job = parseArgs(args);
     if (!job.title) return extra.reply(help(P));
 
-    if (!MOVIES().tmdbKey) {
-      return extra.reply('❌ Movies need a TMDB API key — set TMDB_API_KEY in config.js / the environment.');
-    }
-
     try {
       const matches = await engine.searchMovie(job.title, job.year || undefined);
-      if (!matches.length) {
-        return extra.reply(`❌ No movie found for *${job.title}*${job.year ? ` (${job.year})` : ''}.`);
-      }
+      if (!matches.length) return extra.reply(`❌ No movie found for *${job.title}*.`);
 
       // exact single hit (or an explicit year) → go straight to the download
       if (matches.length === 1 || job.year) {
@@ -211,7 +170,7 @@ module.exports = {
       return offerChoices(sock, msg, extra, matches, job, 'movie');
     } catch (e) {
       console.error('[movie]', e.message);
-      return extra.reply(`❌ ${String(e.message || '').split('\n')[0]}`);
+      return extra.reply(shortError(e));
     }
   },
 

@@ -59,7 +59,9 @@ const DELTA_PAGE_CAP    = 40;   // bigger delta than this → just do a full wal
 const MEM_CACHE_TTL     = 15 * 60 * 1000;       // serve memory, refresh in background
 const SNAPSHOT_MAX_AGE  = 24 * 60 * 60 * 1000;  // snapshot older → full re-walk
 const paperSearch       = require('../../utils/paperSearch');
-const MAX_SEND_BYTES    = 30 * 1024 * 1024;     // skip files over 30 MB at send time
+// No cap by default (.paper always sent every paper). Set PAPER_MAX_SEND_MB
+// only if the host truly cannot push large files.
+const MAX_SEND_BYTES    = Number(process.env.PAPER_MAX_SEND_MB || 0) * 1024 * 1024;
 const SNAPSHOT_VERSION  = 1;
 const SNAPSHOT_PATH     = path.join(__dirname, '../../database/vault_snapshot.json');
 
@@ -665,10 +667,11 @@ module.exports = {
         return status.update('♻️ These papers were already sent in this chat within the last 3 days — check earlier messages.');
       }
 
-      // WhatsApp + small hosts can't reliably push huge PDFs — skip >30MB.
+      // No size cap (PAPER_MAX_SEND_MB=0): every paper is sent, streamed to
+      // disk first so RAM stays flat whatever the PDF size.
       const sendable = [], tooLarge = [];
       for (const file of toSend) {
-        ((file.size || 0) > MAX_SEND_BYTES ? tooLarge : sendable).push(file);
+        (MAX_SEND_BYTES && (file.size || 0) > MAX_SEND_BYTES ? tooLarge : sendable).push(file);
       }
 
       await status.update(summary);
@@ -678,10 +681,10 @@ module.exports = {
       }
       if (tooLarge.length > 0) {
         const names = tooLarge.map(f => `*${cleanName(f.name)}* (${formatSize(f.size)})`).join(', ');
-        await extra.reply(`_⚠️ ${tooLarge.length} paper(s) skipped — over 30 MB:_ ${names}`);
+        await extra.reply(`_⚠️ ${tooLarge.length} paper(s) skipped — over ${Math.round(MAX_SEND_BYTES / 1048576)} MB:_ ${names}`);
       }
       if (sendable.length === 0) {
-        return extra.reply('❌ Nothing sent — every match exceeds the 30 MB send limit.');
+        return extra.reply('❌ Nothing sent — every match exceeds the configured send limit.');
       }
 
       // Download everything first (parallel, streamed to disk), then send in order.

@@ -11,11 +11,9 @@
  *                       with the same size caps / content-type guards as `.dl`
  *   • ffmpeg          → the bot's resolved binary (`utils/ffmpeg`), so the
  *                       engine works wherever `.song`/`.ytv` already work
- *   • sending         → exactly the `.dl` rule: playable video ≤ 50 MB,
- *                       document above that
+ *   • sending         → as a DOCUMENT, exactly like `.song`/`.paper` in this bot
  *   • very big files  → uploaded to the bot's Drime Cloud account (the same
  *                       account `.paper` uses) and delivered as a link
- *   • status cards    → `utils/cards` (one edited message, not chat spam)
  *
  * Every host module is required lazily and defensively: if one of them is
  * missing or throws, the engine keeps working and only loses that capability.
@@ -30,7 +28,6 @@ const path = require('path');
 const KB = 1024;
 const MB = 1024 * KB;
 /** Same threshold `.dl` / `.song` use to pick video vs document. */
-const PLAY_AS_VIDEO_BELOW = 50 * MB;
 /** Drime multipart chunk size (documented minimum). */
 const PART_SIZE = 5 * MB;
 
@@ -61,7 +58,6 @@ const cfg = () => {
 const moviesCfg = () => cfg().movies || {};
 const tempMod = () => host('./tempManager');
 const transfer = () => host('./mediaTransfer');
-const cardsMod = () => host('./cards');
 const ffmpegMod = () => host('./ffmpeg');
 
 /** Forget cached host modules (tests / hot reloads). */
@@ -162,7 +158,7 @@ function capabilities() {
     },
     maxDownloadMB: maxDownloadMB(),
     defaultQuality: defaultQuality(),
-    send: `video ≤ ${PLAY_AS_VIDEO_BELOW / MB} MB, document above (same as .dl)`,
+    send: 'document (same as .song/.paper)',
   };
 }
 
@@ -193,47 +189,18 @@ async function download(url, dest, { headers = {}, maxBytes, onProgress } = {}) 
   return { file: dest, bytes: res && res.bytes ? res.bytes : fs.statSync(dest).size, sniff: res && res.sniff };
 }
 
-/** Remux/transcode to something WhatsApp plays (no-op when ffmpeg is missing). */
-async function prepareForWhatsApp(file, dest) {
-  const m = transfer();
-  if (!m || typeof m.ensureWhatsAppMp4 !== 'function') return file;
-  const out = dest || tempFile(`wa_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp4`);
-  try {
-    return await m.ensureWhatsAppMp4(file, out);
-  } catch (e) {
-    if (process.env.MOVIE_DEBUG) console.warn('[movies] remux failed:', e.message);
-    cleanup(out);
-    return file;
-  }
-}
-
 // ── sending ────────────────────────────────────────────────────────────────
 /**
- * Send a finished download the way this bot sends everything else:
- * playable `video` when it is small enough, `document` when it is not.
+ * Send a finished download the way this bot sends media: as a DOCUMENT.
+ * (`.song` is sent as a document here too — no transcoding, no RAM spike.)
  *
- * @returns {Promise<{as:'video'|'document', bytes:number}>}
+ * @returns {Promise<{as:'document', bytes:number}>}
  */
-async function sendMedia(sock, chatId, msg, { file, title = '', caption = '', kind = 'video' } = {}) {
+async function sendMedia(sock, chatId, msg, { file, title = '', caption = '' } = {}) {
   const stat = fs.statSync(file);
   const name = safeName(title || path.basename(file, path.extname(file)), 'video');
   const fileName = `${name}${path.extname(file) || '.mp4'}`;
   const text = caption || `🎬 *${name}*\n📦 ${fmtMB(stat.size)}`;
-
-  if (kind === 'video' && stat.size <= PLAY_AS_VIDEO_BELOW) {
-    const ready = await prepareForWhatsApp(file);
-    try {
-      await sock.sendMessage(chatId, {
-        video: { url: ready },
-        mimetype: 'video/mp4',
-        fileName,
-        caption: text,
-      }, { quoted: msg });
-    } finally {
-      if (ready !== file) cleanup(ready);
-    }
-    return { as: 'video', bytes: stat.size };
-  }
 
   await sock.sendMessage(chatId, {
     document: { url: file },
@@ -400,32 +367,28 @@ async function drimeUpload(file, name, { onProgress } = {}) {
  *
  * @returns {Promise<{as:'video'|'document'|'link', bytes:number, link?:string, error?:string}>}
  */
-async function deliver(sock, chatId, msg, { file, title = '', caption = '', kind = 'video', onProgress } = {}) {
+async function deliver(sock, chatId, msg, { file, title = '', caption = '', onProgress } = {}) {
   const bytes = fs.statSync(file).size;
 
   if (shouldUploadDrime(bytes) && drimeReady()) {
     try {
       const up = await drimeUpload(file, title || path.basename(file), { onProgress });
-      const text = `${caption ? `${caption}\n\n` : ''}☁️ *${up.name}* saved on Drime\n🔗 ${up.link}`;
-      if (bytes <= PLAY_AS_VIDEO_BELOW) {
-        await sendMedia(sock, chatId, msg, { file, title, caption: text, kind });
-      } else {
-        // Try to send the file as well — the link is the fallback if that fails.
-        try {
-          await sendMedia(sock, chatId, msg, { file, title, caption: text, kind });
-        } catch {
-          await sock.sendMessage(chatId, { text }, { quoted: msg });
-        }
+      const text = `${caption ? `${caption}\n` : ''}☁️ ${up.link}`;
+      // Prefer the file itself; the link is there if WhatsApp refuses it.
+      try {
+        await sendMedia(sock, chatId, msg, { file, title, caption: text });
+      } catch {
+        await sock.sendMessage(chatId, { text }, { quoted: msg });
       }
       return { as: 'link', bytes, link: up.link };
     } catch (e) {
       console.warn('[movies] Drime upload failed:', e.message);
-      const sent = await sendMedia(sock, chatId, msg, { file, title, caption, kind });
+      const sent = await sendMedia(sock, chatId, msg, { file, title, caption });
       return { ...sent, error: e.message };
     }
   }
 
-  return sendMedia(sock, chatId, msg, { file, title, caption, kind });
+  return sendMedia(sock, chatId, msg, { file, title, caption });
 }
 
 /** One-line capability summary used by `.moviestatus` / `.providers`. */
@@ -444,11 +407,9 @@ module.exports = {
   tempDir, tempFile, cleanup, fmtMB,
   // media
   sniff, safeName, ffmpeg, ffmpegPath, defaultQuality, maxDownloadMB,
-  download, prepareForWhatsApp, sendMedia,
+  download, sendMedia,
   // drime
   drimeReady, drimeMode, drimeThresholdMB, shouldUploadDrime, drimeUpload,
   // delivery
   deliver,
-  // constants
-  PLAY_AS_VIDEO_BELOW,
 };

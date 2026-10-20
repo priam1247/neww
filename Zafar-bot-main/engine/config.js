@@ -81,6 +81,9 @@ const cfg = {
 
   // limits
   maxSendMB: num(process.env.MAX_SEND_MB, 1500),
+  // Hard ceiling for a single download. This is NOT WhatsApp's send limit:
+  // anything over maxSendMB is delivered as a Drime link by the bot adapters.
+  maxDownloadMB: num(process.env.MAX_DOWNLOAD_MB, 4096),
   minFreeMB: num(process.env.MIN_FREE_MB, 800),
   minSampleMB: num(process.env.MIN_SAMPLE_MB, 30),        // below this = sample/trailer
   cacheMaxMB: num(process.env.CACHE_MAX_MB, 20000),
