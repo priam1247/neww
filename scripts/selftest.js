@@ -1054,7 +1054,8 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     const cmds = loadCommands();
     const names = new Set([...cmds.values()].map(c => c.name));
     for (const expected of ['song', 'ytv', 'dl', 'tiktok', 'x', 'pinterest', 'spotify',
-      'cookies', 'ytdl', 'menu', 'paper', 'sticker', 'fb', 'instagram']) {
+      'cookies', 'ytdl', 'menu', 'paper', 'sticker', 'fb', 'instagram',
+      'movie', 'series', 'providers', 'moviestatus', 'debrid']) {
       assert.ok(names.has(expected), `command missing: ${expected}`);
     }
   });

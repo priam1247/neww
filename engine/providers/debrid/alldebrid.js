@@ -7,6 +7,28 @@ const isVid = (n) => /\.(mp4|mkv|avi|mov|m4v|webm)$/i.test(n || '');
 export const pickBiggest = (files) =>
   files.filter(f => isVid(f.path)).sort((a, b) => (b.bytes || 0) - (a.bytes || 0))[0] || null;
 
+/** Account check (AllDebrid v4 `/user`). */
+export async function account() {
+  const res = await fetch(`${API}/user?agent=zafar-bot`, {
+    headers: H(), signal: AbortSignal.timeout(15000)
+  });
+  const j = await res.json().catch(() => null);
+  if (!res.ok || j?.status === 'error') {
+    throw Object.assign(new Error(j?.error?.message || `HTTP ${res.status}`), {
+      code: res.status === 401 ? 'BAD_TOKEN' : 'API', status: res.status,
+    });
+  }
+  const u = j?.data?.user || {};
+  return {
+    provider: 'alldebrid',
+    username: u.username || '',
+    premium: Boolean(u.isPremium),
+    expiration: u.premiumUntil ? new Date(u.premiumUntil * 1000).toISOString().slice(0, 10) : '',
+    points: u.points || 0,
+    type: u.isPremium ? 'premium' : 'free',
+  };
+}
+
 export async function resolve(cand, opts) {
   const up = await fetch(`${API}/magnet/upload`, {
     method: 'POST', headers: H(), body: new URLSearchParams({ magnets: cand.magnet }),
@@ -21,7 +43,11 @@ export async function resolve(cand, opts) {
     const st = await fetch(`${API}/magnet/status?id=${id}`, { headers: H(), signal: AbortSignal.timeout(15000) }).then(r => r.json());
     const m = st?.data?.magnets;
     if (m?.statusCode >= 4) {
-      files = (m.files || []).map(f => ({ path: f.n, bytes: f.s, id: f.n }));
+      // `links` is parallel to `files` — remember it, the old code fabricated
+      // an alldebrid.com/f/<id> URL that never resolves.
+      files = (m.files || []).map((f, i) => ({
+        path: f.n, bytes: f.s, link: (m.links || [])[i] || null,
+      }));
       break;
     }
   }
@@ -30,16 +56,18 @@ export async function resolve(cand, opts) {
   const chosen = opts.pickEpisode ? opts.pickEpisode(files) : pickBiggest(files);
   if (!chosen) throw new Error('ad no video file');
 
-  const unlocked = await fetch(`${API}/link/unlock?link=${encodeURIComponent(`https://alldebrid.com/f/${id}`)}`, { headers: H() })
+  let direct = chosen.link;
+  if (!direct) {
+    const fl = await fetch(`${API}/magnet/files?id=${id}`, { headers: H() }).then(r => r.json());
+    const target = (fl?.data?.magnets?.files || []).find(f => f.n === chosen.path);
+    direct = target?.l || null;
+  }
+  if (!direct) throw new Error('ad no link');
+
+  const un = await fetch(`${API}/link/unlock?link=${encodeURIComponent(direct)}`, { headers: H() })
     .then(r => r.json()).catch(() => null);
-
-  if (unlocked?.data?.link) return { url: unlocked.data.link, sizeMB: chosen.bytes / 1048576, filename: chosen.path };
-
-  const fl = await fetch(`${API}/magnet/files?id=${id}`, { headers: H() }).then(r => r.json());
-  const target = (fl?.data?.magnets?.files || []).find(f => f.n === chosen.path);
-  if (!target?.l) throw new Error('ad no link');
-  const un = await fetch(`${API}/link/unlock?link=${encodeURIComponent(target.l)}`, { headers: H() }).then(r => r.json());
-  return { url: un?.data?.link, sizeMB: chosen.bytes / 1048576, filename: chosen.path };
+  if (!un?.data?.link) throw new Error(un?.error?.message || 'ad unlock failed');
+  return { url: un.data.link, sizeMB: chosen.bytes / 1048576, filename: chosen.path };
 }
 
 export default { resolve, pickBiggest };

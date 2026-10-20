@@ -20,6 +20,24 @@ const ORDER = [
 
 export const active = () => ORDER.filter(([, has]) => has());
 
+/**
+ * Verify the configured keys against the providers themselves.
+ * Used by `.debrid` — a token that is present but rejected is worse than none.
+ * @returns {Promise<Array<{provider:string, ok:boolean, error?:string}>>}
+ */
+export async function probe() {
+  const configured = active();
+  if (!configured.length) return [];
+  return Promise.all(configured.map(async ([name, , mod]) => {
+    try {
+      const info = await mod.account();
+      return { ...info, ok: true };
+    } catch (e) {
+      return { provider: name, ok: false, error: e.code ? `${e.code}: ${e.message}` : e.message };
+    }
+  }));
+}
+
 // ── resolve a candidate through the first debrid that succeeds ─────────────
 export async function resolve(cand, opts) {
   const lk = `link:${cand.hash || cand.provider}:${cand.fileIdx ?? 0}:${opts.season ?? ''}:${opts.episode ?? ''}`;
@@ -41,4 +59,4 @@ export async function resolve(cand, opts) {
   throw lastErr || new Error('no debrid key configured (set REALDEBRID_API_KEY or ALLDEBRID_API_KEY)');
 }
 
-export default { resolve, active };
+export default { resolve, active, probe };

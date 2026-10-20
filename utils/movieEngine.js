@@ -136,6 +136,11 @@ module.exports = {
     const { metadata } = await load();
     return metadata.table();
   },
+  /** verify the configured debrid keys against the provider APIs */
+  async debridAccounts() {
+    const { debrid } = await load();
+    return debrid.probe();
+  },
   /** per-provider mirror pools: which DDL domain answered, which is benched */
   async mirrors() {
     const { mirrorReport } = await load();

@@ -10,6 +10,30 @@ const isVid = (n) => /\.(mp4|mkv|avi|mov|m4v|webm)$/i.test(n || '');
 export const pickBiggest = (files) =>
   files.filter(f => isVid(f.path)).sort((a, b) => (b.bytes || 0) - (a.bytes || 0))[0] || null;
 
+/**
+ * Account check — proves the token in .env is valid, and shows the plan.
+ * GET /user returns 401 for a bad token and 403 for an expired account.
+ */
+export async function account() {
+  const res = await fetch(`${API}/user`, { headers: H(), signal: AbortSignal.timeout(15000) });
+  if (res.status === 401 || res.status === 403) {
+    const body = await res.text().catch(() => '');
+    throw Object.assign(new Error(res.status === 401 ? 'token rejected' : 'account expired'), {
+      code: res.status === 401 ? 'BAD_TOKEN' : 'EXPIRED', status: res.status, body: body.slice(0, 120),
+    });
+  }
+  if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
+  const j = await res.json();
+  return {
+    provider: 'realdebrid',
+    username: j.username || '',
+    premium: Number(j.premium) > 0,
+    expiration: j.expiration || '',
+    points: j.points || 0,
+    type: j.type || '',
+  };
+}
+
 export async function resolve(cand, opts) {
   const add = await fetch(`${API}/torrents/addMagnet`, {
     method: 'POST', headers: H(), body: new URLSearchParams({ magnet: cand.magnet }),
@@ -47,4 +71,4 @@ export async function resolve(cand, opts) {
   return { url: un.download, sizeMB: (un.filesize || 0) / 1048576, filename: un.filename || chosen.path };
 }
 
-export default { resolve, pickBiggest };
+export default { resolve, pickBiggest, account };

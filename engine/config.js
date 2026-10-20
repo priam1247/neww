@@ -41,7 +41,8 @@ const cfg = {
   tmdbKey: process.env.TMDB_API_KEY || '98bb6b66ece431fbea8a0ee9c18ac712',
   omdbKey: process.env.OMDB_API_KEY || '',
   traktClientId: process.env.TRAKT_CLIENT_ID || '',
-  realDebridKey: process.env.REALDEBRID_API_KEY || '',
+  // DEBRID_API_KEY is accepted as a generic alias (Real-Debrid by default)
+  realDebridKey: process.env.REALDEBRID_API_KEY || process.env.DEBRID_API_KEY || '',
   allDebridKey: process.env.ALLDEBRID_API_KEY || '',
   openSubsKey: process.env.OPENSUBTITLES_API_KEY || '',
 
