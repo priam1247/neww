@@ -71,6 +71,9 @@ function sniff(head) {
   if (b.toString('ascii', 1, 4) === 'PNG') return { kind: 'image', ext: 'png', mime: 'image/png' };
   if (b.toString('ascii', 0, 3) === 'GIF') return { kind: 'image', ext: 'gif', mime: 'image/gif' };
   if (b.toString('ascii', 0, 4) === 'fMP4') return { kind: 'audio', ext: 'm4a', mime: 'audio/mp4' };
+  // MPEG-TS: 188-byte packets, sync byte 0x47 at 0 and 188. This is what an
+  // HLS download looks like when the host has no ffmpeg to remux it.
+  if (b.length > 189 && b[0] === 0x47 && b[188] === 0x47) return { kind: 'video', ext: 'ts', mime: 'video/mp2t' };
   return { kind: 'unknown', ext: 'bin', mime: 'application/octet-stream' };
 }
 

@@ -3,6 +3,10 @@
  *
  *   .song <name or link> [audio|doc]     [audio|doc] overrides config.song.sendAs
  *
+ * Quiet by design: react 📥 → ✅ (or ❌), then ONE message carrying the file.
+ * Highest-quality audio yt-dlp can get (m4a/aac first), sent as a document
+ * unless the caller explicitly asks for `audio`.
+ *
  * Pipeline (first engine that works wins):
  *   1. yt-dlp   — local, best quality, retries with several YouTube player
  *                 clients, converts to MP3 with ffmpeg (raw stream if no ffmpeg).
@@ -25,8 +29,9 @@ const providers = require('../../utils/downloadProviders');
 const youtubeSearch = require('../../utils/youtubeSearch');
 const selections = require('../../utils/selections');
 const {
-  downloadToFile, sniffFile, audioToMp3, safeName, fmtMB,
+  downloadToFile, sniffFile, safeName, fmtMB,
 } = require('../../utils/mediaTransfer');
+const log = require('../../utils/logger')('song');
 const { getTempDir, deleteTempFile } = require('../../utils/tempManager');
 
 const MAX_AUDIO_MB = Number(config.song?.maxMB) || 120;
@@ -34,45 +39,6 @@ const MAX_AUDIO_SECONDS = Number(config.song?.maxMinutes ? config.song.maxMinute
 const ENGINE_TIMEOUT = 8 * 60 * 1000;
 
 const stamp = () => `song_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-
-/** Throttled "edit this message with progress" helper. */
-function progressCard(sock, chatId, msg, initialText) {
-  let key = null;
-  let lastEdit = 0;
-  let lastText = initialText;
-  let disabled = false;
-
-  const send = sock.sendMessage(chatId, { text: initialText }, { quoted: msg })
-    .then((sent) => { key = sent?.key || null; return sent; })
-    .catch(() => { disabled = true; return null; });
-
-  return {
-    ready: send,
-    /** @param {string} text @param {{force?:boolean}} [opts] */
-    async update(text, { force = false } = {}) {
-      if (disabled || !key || text === lastText) return;
-      const now = Date.now();
-      if (!force && now - lastEdit < 4000) return;
-      lastEdit = now;
-      lastText = text;
-      try { await sock.sendMessage(chatId, { text, edit: key }); }
-      catch { disabled = true; }
-    },
-    async final(text) {
-      if (disabled || !key) {
-        try { await sock.sendMessage(chatId, { text }, { quoted: msg }); } catch { /* ignore */ }
-        return;
-      }
-      try { await sock.sendMessage(chatId, { text, edit: key }); }
-      catch { try { await sock.sendMessage(chatId, { text }, { quoted: msg }); } catch { /* ignore */ } }
-    },
-  };
-}
-
-const bar = (percent) => {
-  const filled = Math.max(0, Math.min(10, Math.round(percent / 10)));
-  return `${'█'.repeat(filled)}${'░'.repeat(10 - filled)}`;
-};
 
 const execute = async (sock, msg, args, extra) => {
     const chatId = extra?.from || msg.key.remoteJid;
@@ -116,7 +82,7 @@ const execute = async (sock, msg, args, extra) => {
           title = info.title; artist = info.uploader; duration = info.duration; thumbnail = info.thumbnail;
         } catch (e) {
           // Metadata failing is not fatal — the download attempt gives the real error.
-          console.warn('[song] metadata lookup failed:', e.message);
+          log.debug(`metadata lookup failed · ${e.message}`);
           attempts.push({ engine: 'metadata', code: YT.classify(e).code });
         }
       } else {
@@ -129,7 +95,7 @@ const execute = async (sock, msg, args, extra) => {
           return reply('❌ No results found for that search. Try a different spelling, or paste a YouTube link.');
         }
 
-        const pickerOn = config.search?.picker !== false && settings.get('searchPicker', true) !== false;
+        const pickerOn = settings.get('searchPicker', config.search?.picker === true) !== false;
         if (results.length > 1 && pickerOn && !firstHit) {
           // Let the user choose instead of silently taking the first hit.
           const listText = youtubeSearch.formatResults(results, {
@@ -170,10 +136,7 @@ const execute = async (sock, msg, args, extra) => {
         return reply(`❌ That track is ${Math.round(duration / 60)} min — the limit is ${Math.round(MAX_AUDIO_SECONDS / 60)} min.`);
       }
 
-      // ── 2. Status card (editable, shows live progress) ────────────────────
-      const card = progressCard(sock, chatId, msg, `🎵 *${shownTitle}*${durationText}\n⏳ Fetching audio…`);
-      if (thumbnail) card.ready.catch(() => {});
-
+      // ── 2. Download (silent: reactions are the only feedback) ─────────────
       // ── 3. Engine 1: yt-dlp ───────────────────────────────────────────────
       let file = null;
       let ext = 'mp3';
@@ -185,20 +148,18 @@ const execute = async (sock, msg, args, extra) => {
           maxMB: MAX_AUDIO_MB,
           maxSeconds: MAX_AUDIO_SECONDS,
           onAttempt: (name, err, info) => {
-            console.log(`[song] yt-dlp profile "${name}" failed (${info.code})`);
+            log.debug(`yt-dlp profile ${name} failed · ${info.code}`);
             attempts.push({ engine: `yt-dlp:${name}`, code: info.code });
           },
-          onProgress: (p) => card.update(`🎵 *${shownTitle}*${durationText}\n${bar(p.percent)} ${p.percent}%`),
           deadlineMs: Number(config.ytdlp?.deadlineMs) || ENGINE_TIMEOUT,
         });
         file = res.file;
         ext = res.ext;
         files.push(file);
-        card.update(`🎵 *${shownTitle}*${durationText}\n✅ Downloaded — preparing…`, { force: true });
       } catch (ytErr) {
         const info = YT.classify(ytErr);
         attempts.push({ engine: 'yt-dlp', code: info.code });
-        console.warn(`[song] yt-dlp failed (${info.code}): ${info.detail}`);
+        log.warn(`yt-dlp failed · ${info.code} · ${info.detail}`);
 
         // ── 4. Engine 2: remote providers ───────────────────────────────────
         const remoteWorthTrying = ['BOT_CHECK', 'NO_YTDLP', 'NO_FORMATS', 'FFMPEG_MISSING', 'UNKNOWN',
@@ -207,7 +168,7 @@ const execute = async (sock, msg, args, extra) => {
 
         if (!remoteAllowed || !remoteWorthTrying.includes(info.code)) throw ytErr;
 
-        await card.update('🔄 Local engine failed — trying a backup source…', { force: true });
+        await react('🔄');
         let remoteHit;
         try {
           remoteHit = await providers.resolveMedia(url, {
@@ -216,7 +177,7 @@ const execute = async (sock, msg, args, extra) => {
             onAttempt: (name, err, st) => { if (st.code !== 'OK') attempts.push({ engine: name, code: st.code }); },
           });
         } catch (providerErr) {
-          console.warn('[song] backup sources failed:', providerErr.message);
+          log.warn(`backup sources failed · ${providerErr.message}`);
           ytErr.attempts = attempts;   // report the *real* first failure plus what was tried
           throw ytErr;
         }
@@ -226,7 +187,6 @@ const execute = async (sock, msg, args, extra) => {
         const got = await downloadToFile(remoteHit.url, dest, {
           maxBytes: MAX_AUDIO_MB * 1024 * 1024,
           headers: remoteHit.headers,
-          onProgress: (p) => card.update(`🎵 *${shownTitle}* (${via})\n${bar(p.percent)} ${p.percent}%`),
         });
         files.push(dest);
         file = dest;
@@ -243,20 +203,13 @@ const execute = async (sock, msg, args, extra) => {
         throw Object.assign(new Error('the source did not return an audio file'), { code: 'BAD_SOURCE' });
       }
 
-      // ── 5. Guarantee a real MP3 when we can ───────────────────────────────
-      let finalFile = file;
-      let finalExt = sniffed.ext;
-      let mime = sniffed.mime;
-
-      if (finalExt !== 'mp3') {
-        const mp3 = await audioToMp3(file, `${outBase}_wa.mp3`);
-        if (mp3) {
-          files.push(mp3);
-          finalFile = mp3;
-          finalExt = 'mp3';
-          mime = 'audio/mpeg';
-        }
-      }
+      // ── 5. Send it untouched ──────────────────────────────────────────────
+      // No mp3 conversion: the highest quality is the stream YouTube serves
+      // (m4a/AAC or opus). Re-encoding would throw quality away — and on this
+      // host ffmpeg is not even installed.
+      const finalFile = file;
+      const finalExt = sniffed.ext;
+      const mime = sniffed.mime;
 
       const size = fs.statSync(finalFile).size;
       if (size > MAX_AUDIO_MB * 1024 * 1024) {
@@ -280,16 +233,16 @@ const execute = async (sock, msg, args, extra) => {
           document: { url: finalFile }, mimetype: mime, fileName, caption,
         }, { quoted: msg });
       }
-      await card.update(`✅ *${finalTitle}*${finalArtist ? ` — ${finalArtist}` : ''}\n📦 ${fmtMB(size)}${via !== 'yt-dlp' ? ` • via ${via}` : ''}`, { force: true });
-
       await react('✅');
     } catch (err) {
-      console.error('[song] error:', err.message);
+      log.error(`${text || 'song'} · ${YT.classify(err).code} · ${String(err.message).split('\n')[0]}`);
       const info = YT.classify(err);
       if (err.attempts && err.attempts.length) info.attempts = err.attempts;
       YT.recordFailure({ ...info, url: err.url || null });
       const summary = YT.attemptsSummary(err.attempts || info.attempts);
-      await reply(YT.friendlyError(err) + summary);
+      // one short line, never a stack of engine detail
+      const lines = String(YT.friendlyError(err) + summary).split('\n').filter(Boolean);
+      await reply(lines.slice(0, 3).join('\n'));
       await react('❌');
     } finally {
       for (const f of files) deleteTempFile(f);

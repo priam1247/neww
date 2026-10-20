@@ -444,12 +444,15 @@ async function startBot() {
   currentSock = sock;
   return sock;
 }
-// Start the bot
-console.log('🚀 Starting ZaFar Bot...\n');
-console.log(`📦 Bot Name: ${config.botName}`);
-console.log(`⚡ Prefix: ${config.prefix}`);
+// Start the bot — one aligned block instead of loose lines
 const ownerNames = Array.isArray(config.ownerName) ? config.ownerName.join(',') : config.ownerName;
-console.log(`👑 Owner: ${ownerNames}\n`);
+require('./utils/logger').banner([
+  'ZaFar Bot',
+  `name     ${config.botName}`,
+  `prefix   ${config.prefix}`,
+  `owner    ${ownerNames}`,
+  `node     ${process.version}`,
+]);
 
 // Proactively delete Puppeteer cache so it doesn't fill disk on panels
 cleanupPuppeteerCache();

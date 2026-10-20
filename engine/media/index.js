@@ -42,6 +42,8 @@ import '../providers/ddl/hdhub4u.js';
 import '../providers/ddl/fourkhdhub.js';
 import '../providers/ddl/moviesdrive.js';
 import '../providers/stream/vidlink.js';
+import '../providers/stream/vixsrc.js';
+import '../providers/stream/vaplayer.js';
 import '../providers/stream/vidsrc.js';
 import '../providers/stream/videasy.js';
 
@@ -49,7 +51,8 @@ let booted = false;
 async function boot() {
   if (booted) return;
   booted = true;
-  await cache.init();
+  // never install signal handlers here: the bot owns process lifecycle
+  await cache.init({ installSignalHandlers: false });
 }
 
 const cacheId = (meta) => meta?.imdbId || meta?.tmdbId || meta?.malId || null;
@@ -145,7 +148,7 @@ async function resolveWithLadder(media, wantQuality, buildOpts, meta, season, ep
 }
 
 // ── MOVIE ──────────────────────────────────────────────────────────────────
-export async function resolveMovie({ title, year, quality = 720, tmdbId = null, imdbId = null, item = null }) {
+export async function resolveMovie({ title, year, quality = 720, tmdbId = null, imdbId = null, item = null, exclude = null }) {
   await boot();
 
   const meta = await identify({ item, title, year, type: 'movie', tmdbId, imdbId });
@@ -159,14 +162,15 @@ export async function resolveMovie({ title, year, quality = 720, tmdbId = null, 
     query: `${meta.title} ${meta.year || ''} ${q}p`.trim(),
     old: isOld(meta.year),
     anime: metadata.looksAnime(meta),
-    maxMB: config.maxDownloadMB
+    maxMB: config.maxDownloadMB,
+    exclude
   }), meta, null, null);
 
   return { ...res, meta };
 }
 
 // ── SERIES EPISODE ─────────────────────────────────────────────────────────
-export async function resolveEpisode({ title, year, season, episode, quality = 720, tmdbId = null, imdbId = null, item = null }) {
+export async function resolveEpisode({ title, year, season, episode, quality = 720, tmdbId = null, imdbId = null, item = null, exclude = null }) {
   await boot();
 
   const meta = await identify({ item, title, year, type: 'series', tmdbId, imdbId });
@@ -183,14 +187,15 @@ export async function resolveEpisode({ title, year, season, episode, quality = 7
     pickEpisode: (files) => pickEpisodeFile(files, season, episode),
     old: isOld(meta.year),
     anime,
-    maxMB: config.maxDownloadMB
+    maxMB: config.maxDownloadMB,
+    exclude
   }), meta, season, episode);
 
   return { ...res, meta, season, episode };
 }
 
 // ── SERIES SEASON (packs) ──────────────────────────────────────────────────
-export async function resolveSeason({ title, year, season, quality = 720, tmdbId = null, imdbId = null, item = null }) {
+export async function resolveSeason({ title, year, season, quality = 720, tmdbId = null, imdbId = null, item = null, exclude = null }) {
   await boot();
 
   const meta = await identify({ item, title, year, type: 'series', tmdbId, imdbId });
@@ -202,7 +207,8 @@ export async function resolveSeason({ title, year, season, quality = 720, tmdbId
     query: seasonQuery(meta.title, meta.year, season),
     old: isOld(meta.year),
     anime: metadata.looksAnime(meta),
-    maxMB: 1e9
+    maxMB: 1e9,
+    exclude
   }), meta, season, null);
 
   return { ...res, meta, season };

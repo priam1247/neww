@@ -111,7 +111,13 @@ function duBytes(dir) {
 }
 
 // ── lifecycle ──────────────────────────────────────────────────────────────
+let initialized = false;
 async function init({ installSignalHandlers = true } = {}) {
+  // Idempotent: the bot bridge initialises the cache first (no signal
+  // handlers), then resolveMovie() booted the engine again and added
+  // process.exit handlers that fought utils/cleanup.js.
+  if (initialized) return;
+  initialized = true;
   fs.mkdirSync(config.tempDir, { recursive: true });
   const restored = restore();
   if (restored) clog.info(`restored ${restored} cache entries from disk`);

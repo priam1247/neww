@@ -989,35 +989,39 @@ async function downloadAudio(url, { outBase, maxMB = 200, maxSeconds = 0, onAtte
 
   const sizeLimit = caps.maxFilesize ? ['--max-filesize', `${maxMB}M`] : [];
 
-  const convertArgs = () => [
-    '-f', 'bestaudio[ext=m4a]/bestaudio/best',
-    ...(ffmpegWorks ? ['--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0', '--ffmpeg-location', ffmpeg] : []),
+  // ── 1. THE OFFICIAL AUDIO, UNTOUCHED ─────────────────────────────────────
+  // Highest quality = whatever YouTube serves: m4a (AAC) first, opus second.
+  // No re-encode, therefore no ffmpeg needed and no generation loss.
+  const rawArgs = () => [
+    '-f', 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio[ext=webm]/bestaudio/best',
     ...durationFilter,
     ...sizeLimit,
     '-o', `${base}.%(ext)s`, url,
   ];
 
   try {
-    const { profile, attempts } = await runWithProfiles(url, convertArgs, { onAttempt, onProgress, deadlineMs });
+    const { profile, attempts } = await runWithProfiles(url, rawArgs, { onAttempt, onProgress, deadlineMs });
     const file = findProduced(base);
     if (!file) throw Object.assign(new Error('yt-dlp produced no audio file'), { code: 'NO_FORMATS' });
-    return { file, ext: path.extname(file).slice(1).toLowerCase(), profile, attempts };
+    return { file, ext: path.extname(file).slice(1).toLowerCase(), profile, attempts, transcoded: false };
   } catch (err) {
     const info = classify(err);
-    if (info.code !== 'FFMPEG_MISSING' && info.code !== 'NO_FORMATS') throw err;
+    // Only a missing raw audio stream is worth converting for; bot-checks and
+    // network problems would fail exactly the same way.
+    if (!ffmpegWorks || (info.code !== 'NO_FORMATS' && info.code !== 'FFMPEG_MISSING')) throw err;
 
-    // No ffmpeg (or a format we cannot convert): grab the raw audio stream.
-    console.warn('[ytdlp] audio conversion unavailable, downloading the raw audio stream instead');
-    const rawArgs = () => [
-      '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
+    console.warn('[ytdlp] no raw audio stream — re-encoding to mp3 instead');
+    const convertArgs = () => [
+      '-f', 'bestaudio[ext=m4a]/bestaudio/best',
+      '--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0', '--ffmpeg-location', ffmpeg,
       ...durationFilter,
       ...sizeLimit,
       '-o', `${base}.%(ext)s`, url,
     ];
-    const { profile, attempts } = await runWithProfiles(url, rawArgs, { onAttempt, onProgress, deadlineMs });
+    const { profile, attempts } = await runWithProfiles(url, convertArgs, { onAttempt, onProgress, deadlineMs });
     const file = findProduced(base);
     if (!file) throw Object.assign(new Error('yt-dlp produced no audio file'), { code: 'NO_FORMATS' });
-    return { file, ext: path.extname(file).slice(1).toLowerCase(), profile, attempts };
+    return { file, ext: path.extname(file).slice(1).toLowerCase(), profile, attempts, transcoded: true };
   }
 }
 

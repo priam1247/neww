@@ -36,7 +36,7 @@ function register(p) {
     lastOk: 0,
     emaMs: 0                    // exponential moving average latency
   });
-  rlog.debug(`registered provider: ${p.id} (tier ${p.tier})`);
+  rlog.debug(`registered ${p.id} · tier ${p.tier}`);
   return p;
 }
 
@@ -62,7 +62,7 @@ function recordWin(id, ms) {
   const h = health.get(id); if (!h) return;
   h.wins++; h.total++; h.fails = 0; h.lastOk = Date.now();
   h.emaMs = h.emaMs ? h.emaMs * 0.8 + ms * 0.2 : ms;
-  if (h.state !== 'closed') rlog.info(`${id} recovered — breaker closed`);
+  if (h.state !== 'closed') rlog.info(`${id} recovered · breaker closed`);
   h.state = 'closed'; h.probes = 0; h.openUntil = 0;
   metrics.bump('provider.win', { provider: id });
 }
@@ -81,7 +81,7 @@ function recordFail(id, err) {
     const backoff = Math.min(OPEN_MAX_MS, OPEN_BASE_MS * 2 ** Math.max(0, h.fails - FAIL_THRESHOLD));
     h.state = 'open';
     h.openUntil = Date.now() + backoff;
-    rlog.warn(`⚡ ${id} tripped — open ${Math.round(backoff / 1000)}s (${h.lastErr})`);
+    rlog.warn(`${id} tripped · open ${Math.round(backoff / 1000)}s · ${h.lastErr}`);
     emit(EVENTS.CANDIDATE_REJECTED, { provider: id, reason: 'breaker tripped', error: h.lastErr });
   }
 }

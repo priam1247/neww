@@ -196,15 +196,22 @@ async function download(url, dest, { headers = {}, maxBytes, onProgress } = {}) 
  *
  * @returns {Promise<{as:'document', bytes:number}>}
  */
+const MIME_BY_EXT = {
+  mp4: 'video/mp4', m4v: 'video/mp4', mkv: 'video/x-matroska',
+  webm: 'video/webm', avi: 'video/x-msvideo', ts: 'video/mp2t',
+};
+
 async function sendMedia(sock, chatId, msg, { file, title = '', caption = '' } = {}) {
   const stat = fs.statSync(file);
   const name = safeName(title || path.basename(file, path.extname(file)), 'video');
-  const fileName = `${name}${path.extname(file) || '.mp4'}`;
+  const ext = (path.extname(file) || '.mp4').replace('.', '').toLowerCase();
+  const fileName = `${name}.${ext}`;
   const text = caption || `🎬 *${name}*\n📦 ${fmtMB(stat.size)}`;
 
   await sock.sendMessage(chatId, {
     document: { url: file },
-    mimetype: 'video/mp4',
+    // an HLS source without ffmpeg lands as .ts — say so instead of lying
+    mimetype: MIME_BY_EXT[ext] || 'video/mp4',
     fileName,
     caption: text,
   }, { quoted: msg });

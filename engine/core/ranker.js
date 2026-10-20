@@ -48,8 +48,10 @@ export function rank(cands, opts) {
       // seeds, log-scaled so 5000 seeds isn't 50× better than 500
       if (c.kind === 'torrent') s += Math.log10((c.seeds || 0) + 1) * 28;
 
-      // size sanity (continuous)
-      s += sizeScore(c.sizeMB || 0, win, maxMB);
+      // size sanity (continuous) — a stream has no size until it downloads,
+      // so it must not be punished for the 0 it reports
+      if (c.kind === 'hls' || !c.sizeMB) s += 10;
+      else s += sizeScore(c.sizeMB, win, maxMB);
 
       // codec + audio
       if (c.codec === config.preferCodec) s += 15;

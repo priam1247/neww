@@ -10,5 +10,8 @@ temp/
 data/
 *.log
 
+# runtime settings written by the bot itself
+database/media_settings.json
+
 # local secrets
 .env

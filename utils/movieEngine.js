@@ -197,6 +197,7 @@ module.exports = {
     return rememberFile(...args);
   },
   /** stream a resolved source to disk (stall guard + resume + retries) */
+  /** @returns {Promise<{bytes:number, file:string}>} file = what actually landed on disk */
   async download(res, file, onProgress) {
     await load();
     const { download } = await import(pathToFileURL(path.join(ENGINE, 'media', 'downloader.js')).href);
