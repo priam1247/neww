@@ -113,9 +113,28 @@ module.exports = {
   // All-Debrid) — without one the engine automatically uses the free
   // DDL/stream tiers only, so .movie/.series still work out of the box.
   movies: {
+    // ── metadata sources ──────────────────────────────────────────────────
+    // TMDB is the primary source (free key). Everything below it is a fallback
+    // and none of them is required: the engine uses whatever answers.
     tmdbKey: env.TMDB_API_KEY || '98bb6b66ece431fbea8a0ee9c18ac712',
+    omdbKey: env.OMDB_API_KEY || '',                 // optional: ratings/runtime
+    traktClientId: env.TRAKT_CLIENT_ID || '',        // optional: trending/ids
+    metadata: {
+      cinemeta: env.META_CINEMETA !== '0',           // keyless (Stremio)
+      imdb: env.META_IMDB !== '0',                   // keyless suggestions / bulk index
+      tvmaze: env.META_TVMAZE !== '0',               // keyless episode guides
+      omdb: env.META_OMDB !== '0',
+      trakt: env.META_TRAKT !== '0',
+      anime: env.META_ANIME !== '0',                 // Jikan + AniList
+    },
+    imdbIndexFile: env.IMDB_INDEX_FILE || 'temp/imdb-index.tsv',   // optional bulk dump index
+
+    // ── debrid (unlocks the torrent tier) ─────────────────────────────────
     realDebridKey: env.REALDEBRID_API_KEY || '',
     allDebridKey: env.ALLDEBRID_API_KEY || '',
+
+    // 1080 → 720 → 480 instead of failing when a quality has no source
+    qualityFallback: env.QUALITY_FALLBACK !== '0',
 
     defaultQuality: Number(env.MOVIE_QUALITY || 720),
     maxSendMB: Number(env.MOVIE_MAX_MB || 1500),      // WhatsApp document ceiling

@@ -9,7 +9,8 @@ A command-driven WhatsApp bot built with Baileys. It supports past-paper lookup,
 .series <title> s01e03 [quality]       Download one episode
 .series <title> s01 1-6 [quality]      Download an episode range
 .series <title> s01 full               Season pack (link when it is huge)
-.providers                             Movie/series source health
+.info <title> [series]                 Metadata + provider ids + which sources answered
+.providers                             Movie/series source health (download + metadata)
 .moviestatus                           Engine counters, cache and queue
 .paper <course-code> [module] [year]   Search and send past papers
 .paper browse [course-code]            Browse available courses/modules
@@ -54,22 +55,54 @@ It is written as ES modules (its own `package.json` sets `"type": "module"`), so
 the CommonJS bot loads it with a dynamic `import()` through
 `utils/movieEngine.js`; `config.js` is the single place to configure it.
 
+### Metadata sources (all 8, merged into one item)
+
+A title can come from any of these; results are merged per film, so one title
+appears once with **every** id the download providers need. A source that is
+down, rate-limited or has no key is skipped — never fatal.
+
+| Source | Needs | Covers | Gives |
+|---|---|---|---|
+| **TMDB** | free key | movies + TV, all years | tmdb id, imdb id, episode guide, posters |
+| **Cinemeta** (Stremio) | nothing | movies + TV | **imdb id + tmdb id**, posters, ratings |
+| **IMDb** | nothing | everything | imdb id, title, year (suggestion API) |
+| **IMDb bulk dump** | nothing (opt-in) | every title ever made | imdb id, offline, no rate limits |
+| **TVMaze** | nothing | TV only | episode count, air dates, niche shows |
+| **OMDb** | free key | movies + TV | IMDb rating, runtime, cast |
+| **Trakt** | free client id | movies + TV | trending, ids for odd titles |
+| **Jikan** (MAL) | nothing | anime | mal id, episode count, alt titles |
+| **AniList** | nothing | anime | romaji titles, second index |
+
+```bash
+# optional: full offline IMDb index from the official datasets (~200 MB dump,
+# streamed, ~50 MB RAM). The engine uses it automatically — no restart needed.
+node scripts/imdb-index.js
+```
+
+What that buys you: `.movie` / `.series` keep working when TMDB is down or has no
+match — Cinemeta alone returns both ids, and the torrent indexers only need the
+IMDb one. `.info <title>` shows exactly which ids and sources answered.
+
 How a request flows:
 
 ```text
 .movie / .series
-   └─ TMDB search (numbered picker when ambiguous)
+   └─ metadata: TMDB → Cinemeta → IMDb → TVMaze → OMDb → Trakt → Jikan → AniList
+        (merged per title; numbered picker when ambiguous)
    └─ engine queue (1 heavy job at a time, fair per chat)
         ├─ tier 1  torrent  knaben · torrentio · yts · eztv · nyaa · apibay · solidtorrents
         ├─ tier 2  ddl      hdhub4u · 4khdhub · moviesdrive → locker resolution → direct file
         └─ tier 3  stream   vidlink · vidsrc · videasy → HLS
+   └─ quality ladder: 1080 → 720 → 480 (and up when only 4K exists)
    └─ verification: real size, container magic bytes, ffprobe quality check
    └─ streamed download (resume + stall guard) → document upload → LRU cache
 ```
 
 Requirements and behaviour:
 
-* **TMDB key** — required for titles/posters. `config.movies.tmdbKey` or `TMDB_API_KEY`.
+* **TMDB key** — the primary metadata source (`config.movies.tmdbKey` / `TMDB_API_KEY`).
+  Not a hard requirement any more: without it the bot runs on Cinemeta + IMDb +
+  TVMaze (`.providers` shows which sources are live).
 * **Debrid is optional.** Real-Debrid / All-Debrid unlock the torrent tier (best
   quality). Without a key the torrent tier is skipped automatically and the bot
   uses the free DDL and stream tiers; `.providers` shows exactly what is live.
@@ -83,9 +116,12 @@ Requirements and behaviour:
 Troubleshooting:
 
 ```text
-.providers        which sources are live / tripped, and whether debrid is configured
+.info <title>     ids + which metadata sources answered (diagnose "no source found")
+.providers        download sources live/tripped + metadata sources live/disabled
 .moviestatus      resolves, tier wins, verification rejects, cache + queue depth
 MOVIE_DRY_RUN=1   resolve and print the link without downloading
+QUALITY_FALLBACK=0   disable the 1080→720→480 ladder
+META_CINEMETA=0 / META_IMDB=0 / META_TVMAZE=0 / META_ANIME=0   switch a source off
 ```
 
 Tests (offline — local HTTP host + injected provider, no internet needed):
@@ -113,6 +149,8 @@ Environment variables can override the defaults in `config.js`. Common settings 
 PREFIX OWNER_NUMBER ADMIN_NUMBERS OWNER_NAME BOT_NAME SESSION_NAME SESSION_ID PAIR_NUMBER
 DRIME_API_TOKEN DRIME_BASE_URL DRIME_PAPERS_FOLDER_ID DRIME_PAPERS_FOLDER_HASH DRIME_WORKSPACE_ID
 TMDB_API_KEY REALDEBRID_API_KEY ALLDEBRID_API_KEY MOVIE_QUALITY MOVIE_MAX_MB MOVIE_BATCH_LIMIT MOVIE_DRY_RUN
+OMDB_API_KEY TRAKT_CLIENT_ID IMDB_INDEX_FILE QUALITY_FALLBACK
+META_CINEMETA META_IMDB META_TVMAZE META_OMDB META_TRAKT META_ANIME
 GIFTED_API_KEY GIFTED_API_URL TELEGRAM_BOT_TOKEN
 YOUTUBE_COOKIES YOUTUBE_COOKIES_FILE YTDLP_PROXY YTDLP_DEADLINE_MS
 COBALT_INSTANCES COBALT_USE_DEFAULTS SONG_SEND_AS SONG_MAX_MINUTES SEARCH_PICKER SEARCH_RESULTS
