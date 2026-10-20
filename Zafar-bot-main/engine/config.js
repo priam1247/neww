@@ -76,8 +76,8 @@ const cfg = {
   // storage (all inside the bot's ./temp)
   tempDir: process.env.TEMP_DIR || './temp/movies',
   jobDir: process.env.JOB_DIR || './temp/movies',
-  cacheFile: process.env.CACHE_FILE || './temp/movie-cache.json',
-  dataDir: process.env.DATA_DIR || './temp/movie-data',
+  cacheFile: process.env.CACHE_FILE || './temp/movies/cache.json',
+  dataDir: process.env.DATA_DIR || './temp/movies/data',
 
   // limits
   maxSendMB: num(process.env.MAX_SEND_MB, 1500),

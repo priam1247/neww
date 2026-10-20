@@ -6,7 +6,9 @@
  *
  * Flow: TMDB search (numbered picker when the title is ambiguous) → the engine
  * cascades torrent → DDL → stream sources → the file is streamed to disk with
- * live progress → sent as a document → kept in the LRU cache for instant resends.
+ * live progress → handed to the bot's own delivery path (`utils/movieHost`):
+ * playable video when small, document when big, Drime Cloud link when it is
+ * too large for WhatsApp → kept in the LRU cache for instant resends.
  *
  * Everything heavy runs inside the engine's fair queue, so a movie download can
  * never starve .song/.paper or another chat.
@@ -18,6 +20,7 @@ const config = require('../../config');
 const engine = require('../../utils/movieEngine');
 const selections = require('../../utils/selections');
 const { progressCard, progressLine } = require('../../utils/cards');
+const host = require('../../utils/movieHost');
 
 const QUALITY_RX = /^(480|720|1080|2160|4k)$/i;
 const MOVIES = () => config.movies || {};
@@ -30,7 +33,8 @@ const qualityOf = (token) => {
 
 function parseArgs(args) {
   const rest = [];
-  let quality = MOVIES().defaultQuality || 720;
+  // default quality follows the bot: config.movies → media settings → config.video
+  let quality = MOVIES().defaultQuality || host.defaultQuality();
 
   for (const a of args) {
     if (QUALITY_RX.test(a)) { quality = qualityOf(a); continue; }
@@ -107,8 +111,10 @@ async function deliver(sock, msg, extra, meta, job) {
 
       if (MOVIES().dryRun) return { res: resolved, file: null };
 
+      // The download cap is not WhatsApp's send cap: big files are handed to
+      // the bot's Drime account instead of being refused.
       const sizeMB = Number(resolved.sizeMB) || 0;
-      const maxMB = MOVIES().maxSendMB || 1500;
+      const maxMB = host.maxDownloadMB();
       if (sizeMB && sizeMB > maxMB) return { res: resolved, file: null, tooBig: sizeMB };
 
       if (resolved.kind === 'cache' && resolved.file && fs.existsSync(resolved.file)) {
@@ -133,7 +139,11 @@ async function deliver(sock, msg, extra, meta, job) {
       return card.final(`🔗 *${meta.title}* (dry-run)\n${res.url || '(cached)'}\n📡 ${res.provider} · tier ${res.tier}`);
     }
     if (jobResult.tooBig) {
-      return card.final(`📦 *${meta.title}* is ${jobResult.tooBig.toFixed(0)} MB — over the ${MOVIES().maxSendMB} MB send limit.\n🔗 ${res.url || '(cached file)'}`);
+      return card.final(
+        `📦 *${meta.title}* is ${jobResult.tooBig.toFixed(0)} MB — over the ${host.maxDownloadMB()} MB download cap.\n` +
+        `🔗 ${res.url || '(cached file)'}\n` +
+        `_raise MOVIE_MAX_DOWNLOAD_MB to fetch it anyway_`
+      );
     }
     if (jobResult.cached) await card.update('⚡ already downloaded — sending from cache…', { force: true });
 
@@ -145,14 +155,22 @@ async function deliver(sock, msg, extra, meta, job) {
       `💾 ${(stat.size / 1048576).toFixed(0)} MB · ${shownQuality}p${note}\n` +
       `📡 ${res.provider}${res.tier !== undefined ? ` · tier ${res.tier}` : ''}`;
 
-    await sock.sendMessage(chatId, {
-      document: { url: file },
-      mimetype: 'video/mp4',
-      fileName: path.basename(file),
+    // Delivery goes through the bot's adapter: same video/document rule as
+    // .dl, and a Drime link when the file is too big for WhatsApp.
+    const delivered = await host.deliver(sock, chatId, msg, {
+      file,
+      title: meta.title,
       caption,
-    }, { quoted: msg });
+      onProgress: (sentBytes, totalBytes) => {
+        const pct = totalBytes ? Math.round((sentBytes / totalBytes) * 100) : 0;
+        card.update(`${label}\n☁️ saving to Drime… ${pct}%`, { force: pct === 100 });
+      },
+    });
 
-    await card.final(`✅ *${meta.title}${meta.year ? ` (${meta.year})` : ''}* sent — ${(stat.size / 1048576).toFixed(0)} MB`);
+    await card.final(
+      `✅ *${meta.title}${meta.year ? ` (${meta.year})` : ''}* sent — ${(stat.size / 1048576).toFixed(0)} MB` +
+      (delivered.as === 'link' ? `\n☁️ Drime link: ${delivered.link}` : '')
+    );
   } catch (e) {
     console.error('[movie]', e.message);
     await card.final(`❌ *${meta.title}*\n${String(e.message || '').split('\n').slice(0, 6).join('\n')}`);

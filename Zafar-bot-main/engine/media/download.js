@@ -19,6 +19,7 @@ import { formatBytes } from '../utils/format.js';
 import { freeBytes, ensureDir, which, sanitize as sanitizeName } from '../utils/disk.js';
 import { emit, EVENTS } from '../core/events.js';
 import { metrics } from '../core/metrics.js';
+import { ffmpegPath, downloadFallback } from '../host.js';
 
 export const sanitize = (name, q, s, e) => {
   const base = sanitizeName(name);
@@ -30,7 +31,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // HLS -> mp4 via ffmpeg, straight to disk
 export async function hlsToFile(url, dest, onProgress, { headers = {} } = {}) {
-  const ffmpeg = await which('ffmpeg');
+  // Prefer the binary the bot itself verified (system → user install →
+  // ffmpeg-static); fall back to a PATH lookup so the engine still works alone.
+  const ffmpeg = (await ffmpegPath()) || await which('ffmpeg');
   if (!ffmpeg) throw new Error('ffmpeg required for HLS sources (apt install ffmpeg)');
   ensureDir(path.dirname(dest));
   cache.markActive(dest);
@@ -159,6 +162,17 @@ export async function httpToFile(url, dest, { onProgress, onAbort, headers = {} 
         lastErr = e;
         const stalled = e.name === 'AbortError' || /aborted|stalled/i.test(e.message || '');
         if (attempt >= config.downloadRetries) {
+          // Last resort: the bot's own downloader (different TLS/agent stack).
+          // Some DDL mirrors reject Node's fetch fingerprint but serve axios.
+          try {
+            fs.rmSync(dest, { force: true });     // restart clean: host has no resume
+          } catch { /* ignore */ }
+          const viaHost = await downloadFallback(url, dest, { headers, onProgress });
+          if (viaHost && viaHost.bytes > 0) {
+            metrics.bump('download.bytes', {}, viaHost.bytes);
+            emit(EVENTS.DOWNLOAD_DONE, { dest, bytes: viaHost.bytes });
+            return { bytes: viaHost.bytes, viaHost: true };
+          }
           if (stalled) throw new Error('download stalled — the source stopped sending data');
           throw e;
         }
