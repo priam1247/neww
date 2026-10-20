@@ -7,6 +7,29 @@
  * panel) keep working exactly as before.
  */
 
+// ── .env loader (no dependency) ────────────────────────────────────────────
+// The engine has its own loader, but the bot's config is read first, so a key
+// placed in .env (e.g. REALDEBRID_API_KEY) has to be picked up here too.
+// .env is git-ignored on purpose: never commit real keys.
+(function loadDotEnv(file = '.env') {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const p = path.resolve(process.cwd(), file);
+    if (!fs.existsSync(p)) return;
+    for (const line of fs.readFileSync(p, 'utf8').split('\n')) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const i = t.indexOf('=');
+      if (i < 1) continue;
+      const k = t.slice(0, i).trim();
+      let v = t.slice(i + 1).trim();
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+      if (process.env[k] === undefined) process.env[k] = v;
+    }
+  } catch { /* non-fatal */ }
+})();
+
 const env = process.env;
 const list = (raw, fallback) => String(raw || fallback).split(',').map(s => s.trim()).filter(Boolean);
 
@@ -132,7 +155,8 @@ module.exports = {
     imdbIndexFile: env.IMDB_INDEX_FILE || 'temp/imdb-index.tsv',   // optional bulk dump index
 
     // ── debrid (unlocks the torrent tier) ─────────────────────────────────
-    realDebridKey: env.REALDEBRID_API_KEY || '',
+    // DEBRID_API_KEY is accepted as a generic alias (Real-Debrid by default)
+    realDebridKey: env.REALDEBRID_API_KEY || env.DEBRID_API_KEY || '',
     allDebridKey: env.ALLDEBRID_API_KEY || '',
 
     // 1080 → 720 → 480 instead of failing when a quality has no source

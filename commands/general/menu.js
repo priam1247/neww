@@ -42,7 +42,7 @@ module.exports = {
       m += `└─ _search: reply with a number to pick_\n`;
       m += `└─ .sticker  .viewonce\n`;
       m += `└─ .instagram  .fb\n`;
-      m += `└─ .info  .providers  .moviestatus  (movie engine)\n`;
+      m += `└─ .info  .providers  .moviestatus  .debrid  (movie engine)\n`;
       m += `└─ .tgsticker  .tgpack\n`;
 
       m += `◈ GENERAL\n`;
