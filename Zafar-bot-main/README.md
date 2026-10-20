@@ -5,6 +5,12 @@ A command-driven WhatsApp bot built with Baileys. It supports past-paper lookup,
 ## Commands
 
 ```text
+.movie <title> [year] [quality]        Download a movie (480/720/1080/2160)
+.series <title> s01e03 [quality]       Download one episode
+.series <title> s01 1-6 [quality]      Download an episode range
+.series <title> s01 full               Season pack (link when it is huge)
+.providers                             Movie/series source health
+.moviestatus                           Engine counters, cache and queue
 .paper <course-code> [module] [year]   Search and send past papers
 .paper browse [course-code]            Browse available courses/modules
 .countpapers                           Count papers in the vault
@@ -41,6 +47,54 @@ npm run selftest
 
 The test suite uses a fake yt-dlp executable and mocked WhatsApp/API responses; it does not validate live WhatsApp, YouTube, Drime, or third-party service behavior.
 
+## Movies & series
+
+`.movie` and `.series` are powered by a self-contained engine in `engine/`.
+It is written as ES modules (its own `package.json` sets `"type": "module"`), so
+the CommonJS bot loads it with a dynamic `import()` through
+`utils/movieEngine.js`; `config.js` is the single place to configure it.
+
+How a request flows:
+
+```text
+.movie / .series
+   └─ TMDB search (numbered picker when ambiguous)
+   └─ engine queue (1 heavy job at a time, fair per chat)
+        ├─ tier 1  torrent  knaben · torrentio · yts · eztv · nyaa · apibay · solidtorrents
+        ├─ tier 2  ddl      hdhub4u · 4khdhub · moviesdrive → locker resolution → direct file
+        └─ tier 3  stream   vidlink · vidsrc · videasy → HLS
+   └─ verification: real size, container magic bytes, ffprobe quality check
+   └─ streamed download (resume + stall guard) → document upload → LRU cache
+```
+
+Requirements and behaviour:
+
+* **TMDB key** — required for titles/posters. `config.movies.tmdbKey` or `TMDB_API_KEY`.
+* **Debrid is optional.** Real-Debrid / All-Debrid unlock the torrent tier (best
+  quality). Without a key the torrent tier is skipped automatically and the bot
+  uses the free DDL and stream tiers; `.providers` shows exactly what is live.
+* Files are staged in `temp/movies/` (kept out of the paper/media temp flow) and
+  are indexed by an LRU that survives restarts. A file still downloading is never
+  swept away.
+* Episode batches run one episode at a time (`MOVIE_BATCH_LIMIT`, default 10).
+* `.movie <title>` shows a numbered list when several films match — the bot
+  downloads exactly the one you pick, never "result 1" silently.
+
+Troubleshooting:
+
+```text
+.providers        which sources are live / tripped, and whether debrid is configured
+.moviestatus      resolves, tier wins, verification rejects, cache + queue depth
+MOVIE_DRY_RUN=1   resolve and print the link without downloading
+```
+
+Tests (offline — local HTTP host + injected provider, no internet needed):
+
+```bash
+npm test
+npm run test:movies
+```
+
 ## Media downloads
 
 The local yt-dlp engine is tried first. If it cannot handle a source, configured remote fallback providers may be used. Downloads have size/time limits, are staged in the ignored `temp/` directory, and are cleaned after each job and periodically.
@@ -58,6 +112,7 @@ Environment variables can override the defaults in `config.js`. Common settings 
 ```text
 PREFIX OWNER_NUMBER ADMIN_NUMBERS OWNER_NAME BOT_NAME SESSION_NAME SESSION_ID PAIR_NUMBER
 DRIME_API_TOKEN DRIME_BASE_URL DRIME_PAPERS_FOLDER_ID DRIME_PAPERS_FOLDER_HASH DRIME_WORKSPACE_ID
+TMDB_API_KEY REALDEBRID_API_KEY ALLDEBRID_API_KEY MOVIE_QUALITY MOVIE_MAX_MB MOVIE_BATCH_LIMIT MOVIE_DRY_RUN
 GIFTED_API_KEY GIFTED_API_URL TELEGRAM_BOT_TOKEN
 YOUTUBE_COOKIES YOUTUBE_COOKIES_FILE YTDLP_PROXY YTDLP_DEADLINE_MS
 COBALT_INSTANCES COBALT_USE_DEFAULTS SONG_SEND_AS SONG_MAX_MINUTES SEARCH_PICKER SEARCH_RESULTS

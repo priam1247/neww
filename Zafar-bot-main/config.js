@@ -107,6 +107,35 @@ module.exports = {
   // QR — useful when the bot host and your WhatsApp phone are the same device.
   pairNumber: env.PAIR_NUMBER || '265894016453',
 
+  // ─── Movies & series (.movie / .series) ──────────────────────────────────
+  // The engine needs a free TMDB key (themoviedb.org) for titles/posters.
+  // Torrent sources additionally need a debrid account (Real-Debrid or
+  // All-Debrid) — without one the engine automatically uses the free
+  // DDL/stream tiers only, so .movie/.series still work out of the box.
+  movies: {
+    tmdbKey: env.TMDB_API_KEY || '98bb6b66ece431fbea8a0ee9c18ac712',
+    realDebridKey: env.REALDEBRID_API_KEY || '',
+    allDebridKey: env.ALLDEBRID_API_KEY || '',
+
+    defaultQuality: Number(env.MOVIE_QUALITY || 720),
+    maxSendMB: Number(env.MOVIE_MAX_MB || 1500),      // WhatsApp document ceiling
+    minFreeMB: Number(env.MOVIE_MIN_FREE_MB || 800),  // refuse a download below this
+    region: env.REGION || 'US',
+    episodeBatchLimit: Number(env.MOVIE_BATCH_LIMIT || 10),
+
+    // engine storage — stays inside the bot's ./temp folder
+    tempDir: env.MOVIE_TEMP_DIR || 'temp/movies',
+    cacheFile: env.MOVIE_CACHE_FILE || 'temp/movie-cache.json',
+    dataDir: env.MOVIE_DATA_DIR || 'temp/movie-data',
+
+    queueConcurrency: Number(env.MOVIE_CONCURRENCY || 1),
+    jobTimeoutMs: Number(env.MOVIE_JOB_TIMEOUT_MS || 30 * 60 * 1000),
+    dryRun: env.MOVIE_DRY_RUN === '1',                // resolve only, send the link
+
+    // torrents need debrid; set to false to keep trying anyway
+    skipTorrentWithoutDebrid: env.SKIP_TORRENT_WITHOUT_DEBRID !== 'false',
+  },
+
   // ─── Drime Cloud Storage (drime.cloud) ───────────────────────────────────
   // Replaces the old Google Drive + Service Account setup. Get an access
   // token from Drime Cloud → Account Settings → Developers.
