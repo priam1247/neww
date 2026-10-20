@@ -1,0 +1,14 @@
+# dependencies
+node_modules/
+
+# WhatsApp credentials — never commit
+session/
+*.session/
+
+# runtime scratch (also used by the movie/series engine)
+temp/
+data/
+*.log
+
+# local secrets
+.env
