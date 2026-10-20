@@ -111,7 +111,7 @@ function duBytes(dir) {
 }
 
 // ── lifecycle ──────────────────────────────────────────────────────────────
-async function init() {
+async function init({ installSignalHandlers = true } = {}) {
   fs.mkdirSync(config.tempDir, { recursive: true });
   const restored = restore();
   if (restored) clog.info(`restored ${restored} cache entries from disk`);
@@ -120,8 +120,13 @@ async function init() {
     sweepTimer = setInterval(() => { sweep(); persist(); }, 30 * 60e3);
     sweepTimer.unref?.();
   }
-  process.on('SIGINT', () => { persist(); process.exit(0); });
-  process.on('SIGTERM', () => { persist(); process.exit(0); });
+  // Only when the engine owns the process. Embedded in the bot these handlers
+  // would fight the bot's own shutdown logic (utils/cleanup.js), so the bridge
+  // passes installSignalHandlers:false and the bot keeps full control.
+  if (installSignalHandlers) {
+    process.on('SIGINT', () => { persist(); process.exit(0); });
+    process.on('SIGTERM', () => { persist(); process.exit(0); });
+  }
 }
 
 async function sweep() {

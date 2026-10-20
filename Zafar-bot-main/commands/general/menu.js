@@ -32,14 +32,9 @@ module.exports = {
       m += `└─ .countpapers\n`;
       m += `└─ .refreshpapers 👑\n`;
 
-      m += `◈ MOVIES & SERIES\n`;
-      m += `└─ .movie <title> [year] [480|720|1080|2160]\n`;
-      m += `└─ .series <title> s01e03 [quality]\n`;
-      m += `└─ .series <title> s01 1-6  |  s01 full\n`;
-      m += `└─ .info <title> [series]  → ids + sources\n`;
-      m += `└─ .providers  .moviestatus\n`;
-
       m += `◈ MEDIA\n`;
+      m += `└─ .movie <title> [year] [480-2160]  → film\n`;
+      m += `└─ .series <title> s01e03 | s01 1-6 | s01 full\n`;
       m += `└─ .song <name/link> [audio|doc]  → MP3\n`;
       m += `└─ .ytv <name/link> [144-1080]  → MP4\n`;
       m += `└─ .dl <any link> [audio|720]  → any site\n`;
@@ -47,6 +42,7 @@ module.exports = {
       m += `└─ _search: reply with a number to pick_\n`;
       m += `└─ .sticker  .viewonce\n`;
       m += `└─ .instagram  .fb\n`;
+      m += `└─ .info  .providers  .moviestatus  (movie engine)\n`;
       m += `└─ .tgsticker  .tgpack\n`;
 
       m += `◈ GENERAL\n`;

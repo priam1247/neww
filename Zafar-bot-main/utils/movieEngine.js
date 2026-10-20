@@ -45,8 +45,10 @@ function applyConfig() {
   // paths — always inside the bot's own temp folder
   setIfEmpty('TEMP_DIR', abs(m.tempDir || 'temp/movies'));
   setIfEmpty('JOB_DIR', abs(m.tempDir || 'temp/movies'));
-  setIfEmpty('CACHE_FILE', abs(m.cacheFile || 'temp/movie-cache.json'));
-  setIfEmpty('DATA_DIR', abs(m.dataDir || 'temp/movie-data'));
+  // bookkeeping stays inside temp/movies/: the bot's own cleanup only deletes
+  // loose files in temp/, so nothing of the engine's can be swept away
+  setIfEmpty('CACHE_FILE', abs(m.cacheFile || 'temp/movies/cache.json'));
+  setIfEmpty('DATA_DIR', abs(m.dataDir || 'temp/movies/data'));
 
   // behaviour
   setIfEmpty('MAX_SEND_MB', m.maxSendMB);
@@ -70,8 +72,10 @@ function load() {
     applyConfig();
     const entry = pathToFileURL(path.join(ENGINE, 'media', 'index.js')).href;
     enginePromise = import(entry)
-      .then((mod) => {
+      .then(async (mod) => {
         loaded = mod;
+        // embedded mode: never install the engine's own SIGINT/SIGTERM handlers
+        try { await mod.cache.init({ installSignalHandlers: false }); } catch (e) { /* non-fatal */ }
         return mod;
       })
       .catch((err) => {
@@ -163,6 +167,11 @@ module.exports = {
   },
 
   // ── files ───────────────────────────────────────────────────────────────
+  /** boot the engine once, without installing process-wide signal handlers */
+  async boot() {
+    const { cache } = await load();
+    await cache.init({ installSignalHandlers: false });
+  },
   async targetFile(...args) {
     const { targetFile } = await load();
     return targetFile(...args);

@@ -144,8 +144,8 @@ module.exports = {
 
     // engine storage — stays inside the bot's ./temp folder
     tempDir: env.MOVIE_TEMP_DIR || 'temp/movies',
-    cacheFile: env.MOVIE_CACHE_FILE || 'temp/movie-cache.json',
-    dataDir: env.MOVIE_DATA_DIR || 'temp/movie-data',
+    cacheFile: env.MOVIE_CACHE_FILE || 'temp/movies/cache.json',
+    dataDir: env.MOVIE_DATA_DIR || 'temp/movies/data',
 
     queueConcurrency: Number(env.MOVIE_CONCURRENCY || 1),
     jobTimeoutMs: Number(env.MOVIE_JOB_TIMEOUT_MS || 30 * 60 * 1000),
