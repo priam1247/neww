@@ -149,7 +149,14 @@ async function run(url, { timeout, retries, json, headers, cookies, ...rest }) {
     } catch (e) {
       const { code, detail } = describeError(e);
       const ms = Date.now() - started;
-      lastErr = Object.assign(e, { code, detail, ms, host });
+      // Never mutate the thrown error: AbortError is a DOMException whose
+      // `code`/`name` are getter-only, so Object.assign(e, {code}) used to
+      // throw "Cannot set property code … which has only a getter" — that is
+      // how a plain timeout was reported as a provider error.
+      lastErr = Object.assign(new Error(e?.message || detail), {
+        code, detail, ms, host, cause: e,
+        ...(e?.status ? { status: e.status } : {}),
+      });
       const retryable = !(e.status && e.status >= 400 && e.status < 500 && e.status !== 429)
         && code !== 'CF_WALL' && code !== 'BAD_URL';
       if (!retryable) {

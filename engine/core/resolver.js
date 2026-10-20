@@ -23,8 +23,29 @@ import { emit, EVENTS } from './events.js';
 import { log } from './log.js';
 
 const rlog = log.child('resolver');
-const TIERS = [[1], [2], [3]];          // torrents → DDL → streams
+// torrents (debrid, instant when cached) → streams (keyless, host-independent)
+// → DDL (scraped hosts that keep dying). Streams used to sit last, so a dead
+// DDL tier cost ~15s on every single request before the working tier was tried.
+const TIERS = [[1], [3], [2]];
 const MAX_PER_TIER = 6;
+
+// Not every source deserves the same patience:
+//   tier 1 debrid → two candidates, 40s each (a cached torrent answers fast)
+//   tier 3 stream → the whole tier is already capped by the hedge deadline
+const TIER_LIMITS = {
+  1: { candidates: 2, perCandidateMs: 40_000 },
+  2: { candidates: 4, perCandidateMs: 25_000 },
+  3: { candidates: 6, perCandidateMs: 30_000 },
+};
+
+const withDeadline = (promise, ms, label) => {
+  let timer;
+  const limit = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(Object.assign(new Error(`${label} timed out`), { code: 'DEADLINE' })), ms);
+    timer.unref?.();
+  });
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
+};
 
 // ── stale-on-error cache ───────────────────────────────────────────────────
 // A tier that answered five minutes ago is still better than "no source" when
@@ -175,11 +196,20 @@ async function resolve(media, opts = {}) {
     if (!raw.length) continue;
     sawCandidates = true;
 
-    const ranked = rank(raw, opts).slice(0, MAX_PER_TIER);
+    const limits = TIER_LIMITS[tier[0]] || { candidates: MAX_PER_TIER, perCandidateMs: 30_000 };
+    const ranked = rank(raw, opts).slice(0, limits.candidates);
 
     for (const cand of ranked) {
+      if (opts.deadline && Date.now() > opts.deadline) {
+        reasons.push('time budget exceeded — stopped trying sources');
+        break;
+      }
       try {
-        const out = await resolveCandidate(cand, opts);
+        const out = await withDeadline(
+          resolveCandidate(cand, opts),
+          limits.perCandidateMs,
+          `${cand.provider} resolve`,
+        );
         cache.lset(`${cand.hash || cand.provider}:${cand.fileIdx ?? 0}:${opts.season ?? ''}:${opts.episode ?? ''}`, out.url);
         cache.ndel(cacheKey);                       // it exists after all
         metrics.bump(`tier.${tier[0]}`);

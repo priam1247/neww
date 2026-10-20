@@ -1187,6 +1187,38 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     assert.notStrictEqual(a, b, 'UA did not rotate');
   });
 
+
+  console.log('\n── 20. failure diagnostics ──');
+
+  await test('a request timeout is reported as TIMEOUT (DOMException code is read-only)', async () => {
+    const http = require('http');
+    const server = http.createServer(() => { /* never answers */ });
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const { req } = await import(pathToFileURL(path.join(REPO, 'engine/core/http.js')).href);
+    try {
+      await assert.rejects(
+        () => req(`http://127.0.0.1:${server.address().port}/hang`, { timeout: 250, retries: 0 }),
+        (e) => {
+          assert.ok(!/getter/i.test(e.message), `mutated a DOMException: ${e.message}`);
+          assert.strictEqual(e.code, 'TIMEOUT');
+          return true;
+        },
+      );
+    } finally { server.close(); }
+  });
+
+  await test('a failed download suggests the film the user probably meant', async () => {
+    const engine = require(path.join(REPO, 'utils/movieEngine.js'));
+    const alts = await engine.alternatives([
+      { title: 'Infinity Wars', year: '2018', source: 'tmdb', popularity: 1.14 },
+      { title: 'Infinity Wars', year: '2018', source: 'imdb', popularity: 909012 },
+      { title: 'Avengers: Infinity War', year: '2018', source: 'imdb', popularity: 563 },
+    ], { chosen: { title: 'Infinity Wars', year: '2018' } });
+
+    assert.strictEqual(alts.length, 1, `wrong suggestions: ${JSON.stringify(alts)}`);
+    assert.strictEqual(alts[0].title, 'Avengers: Infinity War');
+  });
+
   // ─── summary ────────────────────────────────────────────────────────────────
   console.log(`\n${'─'.repeat(52)}`);
   if (failures.length) {
