@@ -171,9 +171,19 @@ async function deliver(sock, msg, extra, meta, job) {
 
     await react('✅');
   } catch (e) {
-    log.error(`${meta.title} · ${e.code || 'FAIL'} · ${String(e.message).split('\n')[0]}`);
+    // full message: the logger collapses the bullets onto one line, so the
+    // reason (dead host, quality mismatch, no candidates) stays visible
+    log.error(`${meta.title}${meta.year ? ` (${meta.year})` : ''} · ${e.code || 'FAIL'} · ${e.message}`);
     await react('❌');
-    await say(shortError(e));
+    // A bare "no source" is useless when the title matched a 0-vote ghost:
+    // say what it matched and offer the film the user probably meant.
+    const alts = await engine.alternatives(job.matches, { chosen: meta }).catch(() => []);
+    const matched = `*${meta.title}*${meta.year ? ` (${meta.year})` : ''}`;
+    const hint = alts.length
+      ? `\n💡 Did you mean *${alts[0].title}*${alts[0].year ? ` (${alts[0].year})` : ''}?` +
+        `\n→ ${config.prefix}movie ${alts[0].title.toLowerCase()}${alts[0].year ? ` ${alts[0].year}` : ''}`
+      : '';
+    await say(`❌ No source for ${matched}.${hint}`);
   }
 }
 
@@ -198,10 +208,12 @@ module.exports = {
       // exact single hit (or an explicit year) → go straight to the download
       if (matches.length === 1 || job.year) {
         const best = (job.year && matches.find(m => String(m.year) === String(job.year))) || matches[0];
+        job.matches = matches;
         return deliver(sock, msg, extra, best, job);
       }
 
       // otherwise let the user pick instead of silently grabbing results[0]
+      job.matches = matches;
       return offerChoices(sock, msg, extra, matches, job, 'movie');
     } catch (e) {
       log.error(`${job.title || 'search'} · ${e.code || 'FAIL'} · ${String(e.message).split('\n')[0]}`);

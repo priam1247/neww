@@ -320,7 +320,7 @@ async function deliver(sock, msg, extra, meta, job) {
       await sendEpisode(sock, msg, chatId, file, meta, season, ep, job.quality, res);
       sent++;
     } catch (e) {
-      log.error(`${meta.title} ${tag} · ${e.code || 'FAIL'} · ${String(e.message || '').split('\n')[0]}`);
+      log.error(`${meta.title} ${tag} · ${e.code || 'FAIL'} · ${e.message}`);
       failures.push(`${tag}: ${String(e.message || '').split('\n')[0]}`);
     }
   }
@@ -329,9 +329,14 @@ async function deliver(sock, msg, extra, meta, job) {
   if (!failures.length) return react('✅');
 
   await react(sent ? '⚠️' : '❌');
+  const alts = sent ? [] : await engine.alternatives(job.matches, { chosen: meta }).catch(() => []);
+  const hint = alts.length
+    ? `\n💡 Did you mean *${alts[0].title}*${alts[0].year ? ` (${alts[0].year})` : ''}?` +
+      `\n→ ${config.prefix}series ${alts[0].title.toLowerCase()} s${pad(season)}`
+    : '';
   return say(
     `⚠️ *${meta.title}* S${pad(season)} — ${sent}/${episodes.length} sent\n` +
-    failures.slice(0, 3).map(f => `• ${f}`).join('\n')
+    failures.slice(0, 3).map(f => `• ${f}`).join('\n') + hint
   );
 }
 
@@ -361,6 +366,7 @@ module.exports = {
     try {
       const matches = await engine.searchTv(job.title, job.year || undefined);
       if (!matches.length) return extra.reply(`❌ No series found for *${job.title}*.`);
+      job.matches = matches;
 
       if (matches.length === 1) return deliver(sock, msg, extra, matches[0], job);
       return offerChoices(sock, msg, extra, matches, job);

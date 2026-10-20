@@ -44,7 +44,15 @@ class VixSrc extends Provider {
       ? `${BASE}/api/tv/${tmdb}/${opts.season ?? 1}/${opts.episode ?? 1}`
       : `${BASE}/api/movie/${tmdb}`;
 
-    const api = await req(apiUrl, { headers: HEADERS });
+    // A 404 means "this title is not in their catalogue", not "the host is
+    // down" — it must not trip the breaker for 30s.
+    let api;
+    try {
+      api = await req(apiUrl, { headers: HEADERS, coalesce: true });
+    } catch (e) {
+      if (e.status === 404) return [];
+      throw e;
+    }
     const src = api?.src;
     if (!src) return [];
 

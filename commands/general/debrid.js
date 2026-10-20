@@ -11,6 +11,7 @@
 
 const config = require('../../config');
 const engine = require('../../utils/movieEngine');
+const log = require('../../utils/logger')('debrid');
 
 const mask = (key) => (key ? `${key.slice(0, 4)}…${key.slice(-4)} (${key.length} chars)` : 'not set');
 
@@ -39,6 +40,11 @@ const debridCommand = {
     try {
       const rows = await engine.debridAccounts();
       if (!rows.length) return extra.reply('🔑 key present but the engine sees no active debrid — restart the bot.');
+
+      for (const r of rows) {
+        if (r.ok) log.info(`${r.provider} · ${r.username || 'account'} · ${r.premium ? 'premium' : 'free'}` + (r.expiration ? ` until ${String(r.expiration).slice(0, 10)}` : ''));
+        else log.warn(`${r.provider} · ${r.error}`);
+      }
 
       const lines = rows.map(r => {
         if (!r.ok) {

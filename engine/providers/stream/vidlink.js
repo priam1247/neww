@@ -58,6 +58,11 @@ class VidLink extends Provider {
       : `movie/${token}`;
 
     const data = await req(`https://vidlink.pro/api/b/${path}?multiLang=0`, { headers: HEADERS });
+    if (!data || !data.stream) {
+      // The token step is the usual culprit (enc-dec blocked from this IP, or
+      // the raw id fallback). Say so instead of silently returning nothing.
+      throw new Error(token === String(tmdb) ? 'no token (enc-dec unreachable)' : 'empty response');
+    }
     const qualities = data?.stream?.qualities || {};
     const out = [];
 

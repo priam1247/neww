@@ -136,6 +136,31 @@ module.exports = {
     const { metadata } = await load();
     return metadata.table();
   },
+  /**
+   * Better-known alternatives to an item, used when a download fails.
+   * "Infinity Wars" matches a 0-vote entry on TMDB while IMDb knows the film
+   * the user meant — saying so beats a bare "no source".
+   * @returns {Promise<Array<{title:string, year:string, fame:number}>>}
+   */
+  async alternatives(items, { chosen = null, limit = 2 } = {}) {
+    const fame = (m) => {
+      const pop = Number(m.popularity) || 0;
+      const rating = Number(m.rating) || 0;
+      // IMDb reports a popularity RANK (smaller is bigger); TMDB reports a score
+      if (m.source === 'imdb' || pop > 1000) return pop ? 500000 / pop : 0;
+      return pop + rating * 3;
+    };
+    const key = (m) => `${m.imdbId || ''}${m.tmdbId || ''}${m.title || ''}`;
+    const chosenKey = chosen ? key(chosen) : null;
+
+    return (items || [])
+      .filter(m => m && m.title && key(m) !== chosenKey)
+      .map(m => ({ title: m.title, year: m.year || '', type: m.type || null, fame: fame(m) }))
+      .filter(m => m.fame >= 8)
+      .sort((a, b) => b.fame - a.fame)
+      .slice(0, limit);
+  },
+
   /** verify the configured debrid keys against the provider APIs */
   async debridAccounts() {
     const { debrid } = await load();

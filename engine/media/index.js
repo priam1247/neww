@@ -128,10 +128,14 @@ async function resolveWithLadder(media, wantQuality, buildOpts, meta, season, ep
   const want = Number(wantQuality) || 720;
   const ladder = qualityLadder(want);
   const failures = [];
+  // One wall clock for the whole ladder: the old code gave every quality its
+  // own full set of provider timeouts, so a failure could run for minutes.
+  const deadline = Date.now() + (config.resolveBudgetMs || 120_000);
 
   for (const q of ladder) {
+    if (Date.now() > deadline) { failures.push(`${q}p: skipped (time budget)`); continue; }
     try {
-      const opts = buildOpts(q);
+      const opts = { ...buildOpts(q), deadline };
       const res = await resolver.resolve(media, opts);
       return { ...res, meta, season, episode, quality: q, requestedQuality: want, downgraded: q !== want };
     } catch (e) {

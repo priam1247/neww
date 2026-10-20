@@ -122,6 +122,9 @@ const cfg = {
   jobTimeoutMs: num(process.env.JOB_TIMEOUT_MS, 15 * 60_000),
   providerTimeoutMs: num(process.env.PROVIDER_TIMEOUT_MS, 12_000),
   tierTimeoutMs: num(process.env.TIER_TIMEOUT_MS, 15_000),
+  // Hard wall for one resolve attempt (all qualities, all tiers). Without it a
+  // debrid tier that keeps polling could hold a command for minutes.
+  resolveBudgetMs: num(process.env.RESOLVE_BUDGET_MS, 120_000),
   verifyTimeoutMs: num(process.env.VERIFY_TIMEOUT_MS, 12_000),
   torrentResolveTimeoutMs: num(process.env.TORRENT_RESOLVE_TIMEOUT_MS, 120_000),
   searchMemoTTLms: num(process.env.SEARCH_MEMO_TTL_MS, 5 * 60_000),
