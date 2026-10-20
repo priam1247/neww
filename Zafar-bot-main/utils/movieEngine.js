@@ -67,6 +67,7 @@ function applyConfig() {
 
   // behaviour
   setIfEmpty('MAX_SEND_MB', m.maxSendMB);
+  setIfEmpty('MAX_DOWNLOAD_MB', m.maxDownloadMB);
   setIfEmpty('MIN_FREE_MB', m.minFreeMB);
   setIfEmpty('REGION', m.region || 'US');
   setIfEmpty('CONCURRENCY', m.queueConcurrency);

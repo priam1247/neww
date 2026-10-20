@@ -8,6 +8,9 @@
  *
  * Episodes are resolved one at a time through the engine's fair queue, so a
  * 10-episode batch can never block .song / .paper / other chats.
+ *
+ * Quiet by design: reactions (⏳ → ✅ / ❌) instead of chat spam, one file
+ * message per episode, and one short line only if something failed.
  */
 
 const fs = require('fs');
@@ -15,7 +18,6 @@ const path = require('path');
 const config = require('../../config');
 const engine = require('../../utils/movieEngine');
 const selections = require('../../utils/selections');
-const { progressCard, progressLine } = require('../../utils/cards');
 const host = require('../../utils/movieHost');
 
 const QUALITY_RX = /^(480|720|1080|2160|4k)$/i;
@@ -119,8 +121,8 @@ async function offerChoices(sock, msg, extra, matches, job) {
   });
 }
 
-/** Send one finished file through the bot's delivery path. */
-async function sendEpisode(sock, msg, chatId, file, meta, season, episode, quality, res, onProgress) {
+/** Send one finished file through the bot's delivery path (document, like .song). */
+async function sendEpisode(sock, msg, chatId, file, meta, season, episode, quality, res) {
   const stat = fs.statSync(file);
   const tag = `S${pad(season)}E${pad(episode)}`;
   const shownQuality = res.quality || quality;
@@ -134,7 +136,6 @@ async function sendEpisode(sock, msg, chatId, file, meta, season, episode, quali
     file,
     title: `${meta.title} ${tag}`,
     caption,
-    onProgress,
   });
 
   return stat.size;
@@ -143,8 +144,10 @@ async function sendEpisode(sock, msg, chatId, file, meta, season, episode, quali
 async function deliverSeasonPack(sock, msg, extra, meta, job) {
   const chatId = extra.from;
   const season = job.season || 1;
-  const card = progressCard(sock, chatId, msg,
-    `📦 *${meta.title}* S${pad(season)} full\n🔎 looking for a season pack…`);
+  const react = (emoji) => sock.sendMessage(chatId, { react: { text: emoji, key: msg.key } }).catch(() => {});
+  const say = (text) => sock.sendMessage(chatId, { text }, { quoted: msg });
+
+  await react('⏳');
 
   try {
     // resolve + (if it fits) download inside one queue slot
@@ -167,43 +170,39 @@ async function deliverSeasonPack(sock, msg, extra, meta, job) {
         return { res: resolved, file: resolved.file };
       }
 
-      await card.update('⬇️ downloading pack…', { force: true });
       const dest = await engine.targetFile(meta.title, meta.year, job.quality, season, null);
-      await engine.download(resolved, dest, (got, total) =>
-        card.update(`📦 ${meta.title} S${pad(season)}\n${progressLine(got, total)}`));
+      await engine.download(resolved, dest);
       return { res: resolved, file: dest };
     }, { timeoutMs: MOVIES().jobTimeoutMs });
 
     const { res, file } = out;
 
-    if (MOVIES().dryRun) return card.final(`🔗 ${meta.title} S${pad(season)}\n${res.url || '(cached)'}`);
+    if (MOVIES().dryRun) {
+      await react('🔗');
+      return say(`🔗 ${meta.title} S${pad(season)}\n${res.url || '(cached)'}`);
+    }
 
     if (!file) {
       const sizeMB = Number(out.sizeMB ?? res.sizeMB) || 0;
-      const maxMB = MOVIES().maxSendMB || 1500;
-      return card.final(
-        `📦 *${meta.title}* S${pad(season)} pack ready${sizeMB ? ` — ${sizeMB.toFixed(0)} MB` : ''}\n` +
-        `${sizeMB > maxMB ? `_too large to send (limit ${maxMB} MB)_\n` : ''}🔗 ${res.url}`
+      const maxMB = host.maxDownloadMB();
+      await react('🔗');
+      return say(
+        `📦 *${meta.title}* S${pad(season)} pack${sizeMB ? ` — ${sizeMB.toFixed(0)} MB` : ''}\n` +
+        `${sizeMB > maxMB ? `_too large to download (cap ${maxMB} MB)_\n` : ''}🔗 ${res.url}`
       );
     }
 
-    const delivered = await host.deliver(sock, chatId, msg, {
+    await host.deliver(sock, chatId, msg, {
       file,
       title: `${meta.title} S${pad(season)}`,
       caption: `📺 *${meta.title}* — S${pad(season)} pack`,
-      onProgress: (sentBytes, totalBytes) => {
-        const pct = totalBytes ? Math.round((sentBytes / totalBytes) * 100) : 0;
-        card.update(`📦 *${meta.title}* S${pad(season)}\n☁️ saving to Drime… ${pct}%`, { force: pct === 100 });
-      },
     });
 
-    return card.final(
-      `✅ *${meta.title}* S${pad(season)} pack sent` +
-      (delivered.as === 'link' ? `\n☁️ ${delivered.link}` : '')
-    );
+    return react('✅');
   } catch (e) {
     console.error('[series] pack', e.message);
-    return card.final(`❌ season pack failed\n${String(e.message || '').split('\n')[0]}`);
+    await react('❌');
+    return say(`❌ *${meta.title}* S${pad(season)} pack\n${String(e.message || '').split('\n')[0]}`);
   }
 }
 
@@ -238,8 +237,10 @@ async function deliver(sock, msg, extra, meta, job) {
     }
   }
 
-  const card = progressCard(sock, chatId, msg,
-    `📺 *${meta.title}* S${pad(season)} — ${episodes.length} episode(s) @ ${job.quality}p\n⏳ starting…`);
+  const react = (emoji) => sock.sendMessage(chatId, { react: { text: emoji, key: msg.key } }).catch(() => {});
+  const say = (text) => sock.sendMessage(chatId, { text }, { quoted: msg });
+
+  await react('⏳');
 
   let sent = 0;
   const failures = [];
@@ -247,9 +248,6 @@ async function deliver(sock, msg, extra, meta, job) {
   for (const ep of episodes) {
     const tag = `S${pad(season)}E${pad(ep)}`;
     try {
-      const pos = await engine.queuePosition(chatId);
-      await card.update(`📺 *${meta.title}* ${tag}\n${pos ? `⏳ queued (position ${pos})…` : '🔎 searching sources…'}`, { force: true });
-
       // resolve + download in ONE queue slot so a batch stays sequential
       const done = await engine.enqueue(chatId, `${meta.title} ${tag}`, async () => {
         const resolved = await engine.resolveEpisode({
@@ -259,7 +257,7 @@ async function deliver(sock, msg, extra, meta, job) {
 
         if (MOVIES().dryRun) return { res: resolved, file: null };
 
-        const maxMB = MOVIES().maxSendMB || 1500;
+        const maxMB = host.maxDownloadMB();
         if (resolved.sizeMB && resolved.sizeMB > maxMB) return { res: resolved, tooLarge: resolved.sizeMB };
 
         if (resolved.kind === 'cache' && resolved.file && fs.existsSync(resolved.file)) {
@@ -267,10 +265,7 @@ async function deliver(sock, msg, extra, meta, job) {
         }
 
         const dest = await engine.targetFile(meta.title, meta.year, job.quality, season, ep);
-        await card.update(`📺 *${meta.title}* ${tag}\n📡 ${resolved.provider} (tier ${resolved.tier})\n⬇️ starting…`, { force: true });
-        await engine.download(resolved, dest, (got, total) => {
-          card.update(`📺 *${meta.title}* ${tag}\n📡 ${resolved.provider} (tier ${resolved.tier})\n${progressLine(got, total)}`);
-        });
+        await engine.download(resolved, dest);
 
         const size = fs.statSync(dest).size;
         if (!size) throw new Error('download produced an empty file');
@@ -281,40 +276,33 @@ async function deliver(sock, msg, extra, meta, job) {
       const { res, file } = done;
 
       if (MOVIES().dryRun) {
-        await card.update(`🔗 ${tag} (dry-run): ${res.url || '(cached)'}`);
+        await say(`🔗 ${tag}: ${res.url || '(cached)'}`);
         sent++;
         continue;
       }
 
       if (done.tooLarge) {
-        await sock.sendMessage(chatId, {
-          text: `📦 *${meta.title}* ${tag} is ${done.tooLarge.toFixed(0)} MB — over the ${MOVIES().maxSendMB} MB limit\n🔗 ${res.url}`,
-        }, { quoted: msg });
+        await say(`📦 *${tag}* is ${done.tooLarge.toFixed(0)} MB — over the ${host.maxDownloadMB()} MB download cap`);
         failures.push(`${tag}: too large`);
         continue;
       }
 
-      await sendEpisode(sock, msg, chatId, file, meta, season, ep, job.quality, res,
-        (sentBytes, totalBytes) => {
-          const pct = totalBytes ? Math.round((sentBytes / totalBytes) * 100) : 0;
-          card.update(`📺 *${meta.title}* ${tag}\n☁️ saving to Drime… ${pct}%`);
-        });
+      await sendEpisode(sock, msg, chatId, file, meta, season, ep, job.quality, res);
       sent++;
-
-      if (ep !== to) await card.update(`✅ ${tag} sent (${sent}/${episodes.length})\n▶️ next episode…`, { force: true });
     } catch (e) {
       console.error(`[series] ${tag}`, e.message);
       failures.push(`${tag}: ${String(e.message || '').split('\n')[0]}`);
-      await card.update(`⚠️ ${tag} failed — continuing…`, { force: true });
     }
   }
 
-  const summary = [
-    `${sent ? '✅' : '❌'} *${meta.title}* S${pad(season)} — ${sent}/${episodes.length} sent`,
-    failures.length ? `\n_Failed:_\n${failures.slice(0, 5).map(f => `• ${f}`).join('\n')}` : '',
-  ].join('');
+  // Silence on success (the files are the answer); one short line on failure.
+  if (!failures.length) return react('✅');
 
-  return card.final(summary);
+  await react(sent ? '⚠️' : '❌');
+  return say(
+    `⚠️ *${meta.title}* S${pad(season)} — ${sent}/${episodes.length} sent\n` +
+    failures.slice(0, 3).map(f => `• ${f}`).join('\n')
+  );
 }
 
 module.exports = {

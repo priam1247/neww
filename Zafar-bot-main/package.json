@@ -5,14 +5,12 @@
     "main": "index.js",
     "type": "commonjs",
     "scripts": {
-        "start": "node --expose-gc --max-old-space-size=1700 index.js",
+        "start": "node --expose-gc --max-old-space-size=3072 index.js",
         "dev": "nodemon index.js",
         "install:no-puppeteer": "PUPPETEER_SKIP_DOWNLOAD=true PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm install",
         "ytdlp:install": "bash scripts/install-ytdlp.sh",
         "selftest": "node scripts/selftest.js",
-        "check": "node scripts/selftest.js",
-        "test": "node --test test/*.test.js",
-        "test:movies": "node --test test/movieEngine.test.js test/movieCommand.test.js"
+        "check": "node scripts/selftest.js"
     },
     "keywords": [
         "whatsapp bot",

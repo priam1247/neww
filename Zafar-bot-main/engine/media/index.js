@@ -159,7 +159,7 @@ export async function resolveMovie({ title, year, quality = 720, tmdbId = null, 
     query: `${meta.title} ${meta.year || ''} ${q}p`.trim(),
     old: isOld(meta.year),
     anime: metadata.looksAnime(meta),
-    maxMB: config.maxSendMB
+    maxMB: config.maxDownloadMB
   }), meta, null, null);
 
   return { ...res, meta };
@@ -183,7 +183,7 @@ export async function resolveEpisode({ title, year, season, episode, quality = 7
     pickEpisode: (files) => pickEpisodeFile(files, season, episode),
     old: isOld(meta.year),
     anime,
-    maxMB: config.maxSendMB
+    maxMB: config.maxDownloadMB
   }), meta, season, episode);
 
   return { ...res, meta, season, episode };

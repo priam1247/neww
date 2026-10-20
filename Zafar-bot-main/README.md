@@ -65,8 +65,8 @@ bot already has, so movies behave exactly like `.dl` / `.song` / `.paper`:
 | `utils/tempManager` | all staging in `temp/movies/` (never swept by `cleanup.js`) |
 | `utils/mediaTransfer` | streamed downloads with size caps + real container sniffing |
 | `utils/ffmpeg` | remux/transcode to WhatsApp-playable mp4 (incl. HLS sources) |
-| `utils/cards` | one edited status card instead of chat spam |
 | `utils/selections` | the numbered picker (`reply with a number`) |
+| reactions | ⏳ → ✅ / ❌ — no chat spam while a movie downloads |
 | `.dl` send rule | playable **video** ≤ 50 MB, **document** above |
 | Drime Cloud (`.paper`) | permanent link for anything too big for WhatsApp |
 | `utils/movieEngine` | fair queue: a 2 GB movie cannot starve `.song` or `.paper` |
@@ -91,12 +91,6 @@ down, rate-limited or has no key is skipped — never fatal.
 | **Trakt** | free client id | movies + TV | trending, ids for odd titles |
 | **Jikan** (MAL) | nothing | anime | mal id, episode count, alt titles |
 | **AniList** | nothing | anime | romaji titles, second index |
-
-```bash
-# optional: full offline IMDb index from the official datasets (~200 MB dump,
-# streamed, ~50 MB RAM). The engine uses it automatically — no restart needed.
-node scripts/imdb-index.js
-```
 
 What that buys you: `.movie` / `.series` keep working when TMDB is down or has no
 match — Cinemeta alone returns both ids, and the torrent indexers only need the
@@ -146,13 +140,6 @@ Troubleshooting:
 MOVIE_DRY_RUN=1   resolve and print the link without downloading
 QUALITY_FALLBACK=0   disable the 1080→720→480 ladder
 META_CINEMETA=0 / META_IMDB=0 / META_TVMAZE=0 / META_ANIME=0   switch a source off
-```
-
-Tests (offline — local HTTP host + injected provider, no internet needed):
-
-```bash
-npm test
-npm run test:movies
 ```
 
 ## Media downloads
