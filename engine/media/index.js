@@ -27,6 +27,7 @@ import { parseRelease, matchesEpisode } from '../core/release.js';
 import { pickEpisodeFile, episodeQuery, seasonQuery } from '../core/tv.js';
 import { sanitize } from './download.js';
 import { log } from '../core/log.js';
+import { mirrorReport } from '../core/mirrors.js';
 
 const mlog = log.child('media');
 
@@ -230,9 +231,9 @@ export function rememberFile(meta, quality, season, episode, file, sizeMB) {
   return true;
 }
 
-export { boot, cache, config, tv, parseRelease, matchesEpisode, tmdb, metadata, debrid, resolver, registry, queue, mlog };
+export { boot, cache, config, tv, parseRelease, matchesEpisode, tmdb, metadata, debrid, resolver, registry, queue, mlog, mirrorReport };
 export default {
   boot, identify, resolveMovie, resolveEpisode, resolveSeason,
   targetFile, rememberFile, qualityLadder,
-  cache, config, tmdb, metadata, resolver, debrid, registry, queue
+  cache, config, tmdb, metadata, resolver, debrid, registry, queue, mirrorReport
 };

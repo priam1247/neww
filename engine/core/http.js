@@ -39,6 +39,24 @@ export function describeError(e) {
 export const jar = new Jar();
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// ── user-agent rotation ────────────────────────────────────────────────────
+// Several DDL/CDN edges key their block rules off a stale UA string. Rotating
+// between real browser UAs gets past the naive ones; callers can still force
+// a specific UA through headers.
+const UA_POOL = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0',
+];
+let uaCursor = 0;
+export const nextUserAgent = () => UA_POOL[uaCursor++ % UA_POOL.length];
+
+// ── in-flight coalescing ───────────────────────────────────────────────────
+// Ten people asking for the same title must not mean ten identical scrapes.
+// Only plain JSON calls are coalesced: raw responses can be read once.
+const INFLIGHT_JSON = new Map();
+
 // ── per-host inflight limiter (prevents hammering one site) ───────────────
 const inflight = new Map();           // host -> current count
 const MAX_PER_HOST = Number(process.env.MAX_PER_HOST || 4);
@@ -60,6 +78,11 @@ function release(host) {
 }
 
 // ── core request with retries + backoff jitter ────────────────────────────
+/**
+ * GET/JSON a provider endpoint.
+ * Identical concurrent JSON calls are coalesced (one upstream request), so ten
+ * users searching the same title cost one scrape.
+ */
 export async function req(url, opts = {}) {
   const {
     timeout = config.providerTimeoutMs,
@@ -67,9 +90,24 @@ export async function req(url, opts = {}) {
     json = true,
     headers = {},
     cookies = true,                    // attach/send jar cookies automatically
+    coalesce = true,                   // share identical concurrent JSON calls
     ...rest
   } = opts;
 
+  const shareable = coalesce && json === true
+    && (!rest.method || String(rest.method).toUpperCase() === 'GET');
+  if (!shareable) return run(url, { timeout, retries, json, headers, cookies, ...rest });
+
+  const key = `${url}|${JSON.stringify(headers)}|${cookies ? jar.headerFor(url) || '' : ''}`;
+  const inflight = INFLIGHT_JSON.get(key);
+  if (inflight) return inflight;
+
+  const task = run(url, { timeout, retries, json, headers, cookies, ...rest });
+  INFLIGHT_JSON.set(key, task);
+  try { return await task; } finally { INFLIGHT_JSON.delete(key); }
+}
+
+async function run(url, { timeout, retries, json, headers, cookies, ...rest }) {
   let host = 'invalid-url';
   try { host = new URL(url).hostname; } catch { throw Object.assign(new Error('bad URL'), { code: 'BAD_URL' }); }
   const t0 = Date.now();
@@ -80,7 +118,7 @@ export async function req(url, opts = {}) {
     try {
       await acquire(host);
       try {
-        const h = { 'user-agent': config.userAgent, accept: '*/*', ...headers };
+        const h = { 'user-agent': headers['user-agent'] || nextUserAgent(), accept: '*/*', ...headers };
         if (cookies) {
           const c = jar.headerFor(url);
           if (c) h.cookie = c;

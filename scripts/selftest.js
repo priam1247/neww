@@ -1133,6 +1133,59 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     assert.ok(err && !err.includes('\n') && err.includes('boom'), `bad error line: ${err}`);
   });
 
+
+  console.log('\n── 19. mirror failover, request coalescing, stale cache ──');
+
+  await test('mirror pool fails over and benches a domain that never answers', async () => {
+    const { withMirrors, mirrorReport } = await import(pathToFileURL(path.join(REPO, 'engine/core/mirrors.js')).href);
+
+    // 1. a dead first mirror must not cost the request
+    let aliveHits = 0;
+    const out = await withMirrors('unit-pool-a', ['https://dead.example', 'https://alive.example'], async (base) => {
+      if (base.includes('dead')) throw new Error('ENOTFOUND');
+      aliveHits++;
+      return [{ ok: true }];
+    });
+    assert.ok(out.length === 1 && aliveHits === 1, 'failover did not reach the live mirror');
+
+    // 2. an all-dead pool trips the breaker after 3 rounds instead of hammering
+    const deadOnly = ['https://one.invalid', 'https://two.invalid'];
+    for (let i = 0; i < 3; i++) {
+      await assert.rejects(() => withMirrors('unit-pool-b', deadOnly, async () => { throw new Error('ECONNRESET'); }));
+    }
+    const report = mirrorReport().find(p => p.provider === 'unit-pool-b');
+    assert.ok(report, 'no report for the dead pool');
+    assert.ok(report.mirrors.every(m => m.state === 'open'), `mirrors not benched: ${JSON.stringify(report.mirrors)}`);
+
+    // 3. half-open probe after the cooldown, not immediately
+    assert.ok(report.mirrors.every(m => m.fails >= 3), 'failure counts not tracked');
+  });
+
+  await test('identical concurrent JSON requests are coalesced', async () => {
+    const http = require('http');
+    let hits = 0;
+    const server = http.createServer((req, res) => {
+      hits++;
+      setTimeout(() => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true}'); }, 100);
+    });
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${server.address().port}/same`;
+    try {
+      const { req } = await import(pathToFileURL(path.join(REPO, 'engine/core/http.js')).href);
+      const [a, b, c] = await Promise.all([req(url), req(url), req(url)]);
+      assert.strictEqual(hits, 1, `hit upstream ${hits} times`);
+      assert.ok(a.ok && b.ok && c.ok, 'coalesced responses lost their body');
+    } finally { server.close(); }
+  });
+
+  await test('a rotating user-agent is used when the caller does not pin one', async () => {
+    const { nextUserAgent } = await import(pathToFileURL(path.join(REPO, 'engine/core/http.js')).href);
+    const a = nextUserAgent();
+    const b = nextUserAgent();
+    assert.ok(/^Mozilla\/5\.0/.test(a) && /^Mozilla\/5\.0/.test(b), 'UA pool is not browser-shaped');
+    assert.notStrictEqual(a, b, 'UA did not rotate');
+  });
+
   // ─── summary ────────────────────────────────────────────────────────────────
   console.log(`\n${'─'.repeat(52)}`);
   if (failures.length) {

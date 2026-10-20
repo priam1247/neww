@@ -26,10 +26,42 @@ const rlog = log.child('resolver');
 const TIERS = [[1], [2], [3]];          // torrents → DDL → streams
 const MAX_PER_TIER = 6;
 
+// ── stale-on-error cache ───────────────────────────────────────────────────
+// A tier that answered five minutes ago is still better than "no source" when
+// every mirror is having a bad minute. Fresh for 15 min, reusable for 6 h.
+const FRESH_MS = 15 * 60_000;
+const STALE_MS = 6 * 60 * 60_000;
+const tierCache = new Map();            // key -> { value, freshUntil, staleUntil }
+
+const tierKey = (tier, media, opts) =>
+  `${tier}|${media.type}|${media.imdbId || media.tmdbId || media.title}|` +
+  `${opts.season ?? ''}|${opts.episode ?? ''}|${opts.want ?? ''}`;
+
+function tierCacheGet(key) {
+  const hit = tierCache.get(key);
+  if (!hit) return { state: 'miss' };
+  const now = Date.now();
+  if (now < hit.freshUntil) return { state: 'fresh', value: hit.value };
+  if (now < hit.staleUntil) return { state: 'stale', value: hit.value };
+  tierCache.delete(key);
+  return { state: 'miss' };
+}
+
+function tierCacheSet(key, value) {
+  if (!value?.length) return;
+  if (tierCache.size > 300) tierCache.clear();
+  const now = Date.now();
+  tierCache.set(key, { value, freshUntil: now + FRESH_MS, staleUntil: now + STALE_MS });
+}
+
 async function searchTier(tier, media, opts) {
   const skip = new Set(opts.exclude || []);
   const live = liveProviders({ tier: tier[0], type: media.type }).filter(p => !skip.has(p.id));
-  if (!live.length) return [];
+  if (!live.length) {
+    // every provider is benched — a cached answer still beats a refusal
+    const cached = tierCacheGet(tierKey(tier[0], media, opts));
+    return cached.state === 'miss' ? [] : cached.value;
+  }
 
   const t0 = Date.now();
   // Stream providers do 2–3 chained HTTP calls (token → api → manifest), so the
@@ -56,6 +88,16 @@ async function searchTier(tier, media, opts) {
   );
 
   const cands = results.flat().filter(Boolean);
+  const ck = tierKey(tier[0], media, opts);
+  if (cands.length) tierCacheSet(ck, cands);
+  else {
+    const cached = tierCacheGet(ck);
+    if (cached.state === 'stale') {
+      metrics.bump('search.stale');
+      rlog.info(`tier ${tier[0]}: live sources empty — reusing cached results`);
+      return cached.value;
+    }
+  }
   metrics.bump('search.ok');
   if (!cands.length) metrics.bump('search.empty');
   metrics.time(`tier.${tier[0]}`, Date.now() - t0);
