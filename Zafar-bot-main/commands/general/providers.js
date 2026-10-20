@@ -10,6 +10,7 @@
 
 const config = require('../../config');
 const engine = require('../../utils/movieEngine');
+const host = require('../../utils/movieHost');
 
 const TIER_NAME = { 1: 'torrent', 2: 'ddl', 3: 'stream' };
 
@@ -54,6 +55,7 @@ const providersCommand = {
         '',
         `🔑 TMDB: ${m.tmdbKey ? 'set' : 'MISSING'}`,
         `🔑 debrid: ${debrid.length ? debrid.join(', ') : 'none — torrents skipped, free sources only'}`,
+        `🧩 host: ${host.statusLine()}`,
         '',
         `🗂 *Metadata* (${metaRows.filter(s => s.enabled).length}/${metaRows.length} live)`,
         '',
@@ -93,6 +95,7 @@ const statusCommand = {
         `uptime      ${minutes}m`,
         `queue       ${q.running} running / ${q.queued} waiting`,
         `metadata    ${metaRows.filter(s => s.enabled).length}/${metaRows.length} sources live`,
+        `host        ${host.statusLine()}`,
         `searches    ${g('search.ok')} ok / ${g('search.empty')} empty`,
         `resolves    ${g('resolve.ok')} ok / ${g('resolve.fail')} fail`,
         `tier wins   t1 ${g('tier.1')} · t2 ${g('tier.2')} · t3 ${g('tier.3')}`,

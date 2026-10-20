@@ -55,6 +55,25 @@ It is written as ES modules (its own `package.json` sets `"type": "module"`), so
 the CommonJS bot loads it with a dynamic `import()` through
 `utils/movieEngine.js`; `config.js` is the single place to configure it.
 
+### It runs *inside* the bot, not next to it
+
+`utils/movieHost.js` is the adapter that makes the engine use everything this
+bot already has, so movies behave exactly like `.dl` / `.song` / `.paper`:
+
+| The bot already has | Movies & series use it for |
+|---|---|
+| `utils/tempManager` | all staging in `temp/movies/` (never swept by `cleanup.js`) |
+| `utils/mediaTransfer` | streamed downloads with size caps + real container sniffing |
+| `utils/ffmpeg` | remux/transcode to WhatsApp-playable mp4 (incl. HLS sources) |
+| `utils/cards` | one edited status card instead of chat spam |
+| `utils/selections` | the numbered picker (`reply with a number`) |
+| `.dl` send rule | playable **video** ≤ 50 MB, **document** above |
+| Drime Cloud (`.paper`) | permanent link for anything too big for WhatsApp |
+| `utils/movieEngine` | fair queue: a 2 GB movie cannot starve `.song` or `.paper` |
+
+If one of those helpers is missing the engine keeps working and only loses that
+one capability — `.movie` can never take the rest of the bot down with it.
+
 ### Metadata sources (all 8, merged into one item)
 
 A title can come from any of these; results are merged per film, so one title
@@ -106,9 +125,14 @@ Requirements and behaviour:
 * **Debrid is optional.** Real-Debrid / All-Debrid unlock the torrent tier (best
   quality). Without a key the torrent tier is skipped automatically and the bot
   uses the free DDL and stream tiers; `.providers` shows exactly what is live.
-* Files are staged in `temp/movies/` (kept out of the paper/media temp flow) and
-  are indexed by an LRU that survives restarts. A file still downloading is never
-  swept away.
+* Files are staged in `temp/movies/` — inside the bot's own temp dir, in a
+  subfolder `cleanup.js` never touches — and are indexed by an LRU that survives
+  restarts. A file still downloading is never swept away.
+* **Big files are delivered, not refused.** Anything above `DRIME_MOVIES_MB`
+  (default: `video.maxMB`, 300 MB) is uploaded to the same Drime Cloud account
+  `.paper` uses — documented S3 multipart flow — and the chat gets the file plus
+  a permanent link. `DRIME_MOVIES=off` disables it, `=always` uploads every
+  title. Upload progress shows in the same status card as the download.
 * Episode batches run one episode at a time (`MOVIE_BATCH_LIMIT`, default 10).
 * `.movie <title>` shows a numbered list when several films match — the bot
   downloads exactly the one you pick, never "result 1" silently.
@@ -151,6 +175,7 @@ DRIME_API_TOKEN DRIME_BASE_URL DRIME_PAPERS_FOLDER_ID DRIME_PAPERS_FOLDER_HASH D
 TMDB_API_KEY REALDEBRID_API_KEY ALLDEBRID_API_KEY MOVIE_QUALITY MOVIE_MAX_MB MOVIE_BATCH_LIMIT MOVIE_DRY_RUN
 OMDB_API_KEY TRAKT_CLIENT_ID IMDB_INDEX_FILE QUALITY_FALLBACK
 META_CINEMETA META_IMDB META_TVMAZE META_OMDB META_TRAKT META_ANIME
+MOVIE_MAX_DOWNLOAD_MB DRIME_MOVIES DRIME_MOVIES_MB DRIME_MOVIES_FOLDER_ID
 GIFTED_API_KEY GIFTED_API_URL TELEGRAM_BOT_TOKEN
 YOUTUBE_COOKIES YOUTUBE_COOKIES_FILE YTDLP_PROXY YTDLP_DEADLINE_MS
 COBALT_INSTANCES COBALT_USE_DEFAULTS SONG_SEND_AS SONG_MAX_MINUTES SEARCH_PICKER SEARCH_RESULTS

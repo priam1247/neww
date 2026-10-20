@@ -27,9 +27,24 @@ const setIfEmpty = (key, value) => {
   process.env[key] = String(value);
 };
 
+/** The bot's own temp dir (utils/tempManager) — the single place it cleans. */
+function hostTempDir() {
+  try {
+    // eslint-disable-next-line global-require
+    return require('./tempManager').getTempDir();
+  } catch {
+    return path.join(ROOT, 'temp');
+  }
+}
+
 function applyConfig() {
   const m = config.movies || {};
   const abs = (p) => (path.isAbsolute(p) ? p : path.join(ROOT, p));
+  // Follow the bot: if it keeps temp somewhere else (TMPDIR, mounted disk),
+  // the movie files live in a `movies/` subfolder of that same place.
+  const movieTemp = m.tempDir && m.tempDir !== 'temp/movies'
+    ? abs(m.tempDir)
+    : path.join(hostTempDir(), 'movies');
 
   // keys
   setIfEmpty('TMDB_API_KEY', m.tmdbKey);
@@ -43,12 +58,12 @@ function applyConfig() {
   setIfEmpty('ALLDEBRID_API_KEY', m.allDebridKey);
 
   // paths — always inside the bot's own temp folder
-  setIfEmpty('TEMP_DIR', abs(m.tempDir || 'temp/movies'));
-  setIfEmpty('JOB_DIR', abs(m.tempDir || 'temp/movies'));
+  setIfEmpty('TEMP_DIR', movieTemp);
+  setIfEmpty('JOB_DIR', movieTemp);
   // bookkeeping stays inside temp/movies/: the bot's own cleanup only deletes
   // loose files in temp/, so nothing of the engine's can be swept away
-  setIfEmpty('CACHE_FILE', abs(m.cacheFile || 'temp/movies/cache.json'));
-  setIfEmpty('DATA_DIR', abs(m.dataDir || 'temp/movies/data'));
+  setIfEmpty('CACHE_FILE', abs(m.cacheFile || path.join(movieTemp, 'cache.json')));
+  setIfEmpty('DATA_DIR', abs(m.dataDir || path.join(movieTemp, 'data')));
 
   // behaviour
   setIfEmpty('MAX_SEND_MB', m.maxSendMB);

@@ -137,8 +137,20 @@ module.exports = {
     qualityFallback: env.QUALITY_FALLBACK !== '0',
 
     defaultQuality: Number(env.MOVIE_QUALITY || 720),
-    maxSendMB: Number(env.MOVIE_MAX_MB || 1500),      // WhatsApp document ceiling
+    // WhatsApp send ceiling (used by the engine's own ranking) …
+    maxSendMB: Number(env.MOVIE_MAX_MB || 1500),
+    // … and the download cap. Above maxSendMB files are still sent: the bot
+    // puts anything bigger than drimeThresholdMB on Drime and posts the link.
+    maxDownloadMB: Number(env.MOVIE_MAX_DOWNLOAD_MB || 4096),
     minFreeMB: Number(env.MOVIE_MIN_FREE_MB || 800),  // refuse a download below this
+
+    // ── Drime Cloud delivery (the same account .paper uses) ───────────────
+    // 'off'    → never upload
+    // 'big'    → upload only files above drimeThresholdMB (default)
+    // 'always' → every finished movie/episode gets a permanent Drime link
+    drimeUpload: (env.DRIME_MOVIES || 'big').toLowerCase(),
+    drimeThresholdMB: Number(env.DRIME_MOVIES_MB || 0),   // 0 = use video.maxMB
+    drimeFolderId: Number(env.DRIME_MOVIES_FOLDER_ID || 0), // 0 = Drime root
     region: env.REGION || 'US',
     episodeBatchLimit: Number(env.MOVIE_BATCH_LIMIT || 10),
 

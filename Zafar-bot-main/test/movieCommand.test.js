@@ -3,7 +3,8 @@
  *
  * TMDB is stubbed (no internet in CI) but everything else is real: the command
  * parsing, the queue, the streamed download from a local HTTP server, the
- * document upload call and the progress-card edits.
+ * delivery call (host adapter: video for small files, document for big ones)
+ * and the progress-card edits.
  */
 
 const { test, before, after } = require('node:test');
@@ -64,6 +65,9 @@ after(async () => {
   try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
+/** The single media message the host adapter sent (video ≤50 MB, else document). */
+const mediaSent = (sock) => sock.sent.filter(m => m.content?.document || m.content?.video);
+
 /** Fake Baileys socket that records every call. */
 function fakeSock() {
   const sent = [];
@@ -114,7 +118,7 @@ async function stubBridge({ movieMatches, tvMatches, fileUrl }) {
   return bridge;
 }
 
-test('.movie downloads the resolved file and sends it as a document', async () => {
+test('.movie downloads the resolved file and sends it through the host adapter', async () => {
   const bridge = await stubBridge({
     movieMatches: [{ tmdbId: 1, title: 'Inception', year: '2010', poster: null }],
     tvMatches: [],
@@ -127,12 +131,14 @@ test('.movie downloads the resolved file and sends it as a document', async () =
 
   await cmd.execute(sock, msg, ['inception', '2010', '1080'], fakeExtra());
 
-  const docs = sock.sent.filter(m => m.content?.document);
-  assert.equal(docs.length, 1, `expected one document, got ${sock.sent.length} messages`);
+  const docs = mediaSent(sock);
+  assert.equal(docs.length, 1, `expected one media message, got ${sock.sent.length} messages`);
   assert.match(docs[0].content.caption, /Inception/);
   assert.match(docs[0].content.caption, /1080p/);
   assert.equal(docs[0].content.mimetype, 'video/mp4');
-  assert.ok(fs.existsSync(docs[0].content.document.url), 'file must exist on disk');
+  // the tiny fixture is under 50 MB, so the bot's own rule sends it playable
+  assert.ok(docs[0].content.video, 'small files are sent as playable video, like .dl');
+  assert.ok(fs.existsSync(docs[0].content.video.url), 'file must exist on disk');
 
   // progress card was created and edited
   const edits = sock.sent.filter(m => m.content?.edit);
@@ -170,7 +176,7 @@ test('.movie offers a numbered picker when several titles match', async () => {
 
   sock.sent.length = 0;
   await picked.entry.run(sock, msg, fakeExtra('222@s.whatsapp.net'), picked.item);
-  const docs = sock.sent.filter(m => m.content?.document);
+  const docs = mediaSent(sock);
   assert.equal(docs.length, 1);
 });
 
@@ -187,7 +193,7 @@ test('.series downloads every episode of a range', async () => {
 
   await cmd.execute(sock, msg, ['the', 'boys', 's02', '1-3', '720'], fakeExtra('333@s.whatsapp.net'));
 
-  const docs = sock.sent.filter(m => m.content?.document);
+  const docs = mediaSent(sock);
   assert.equal(docs.length, 3, 'three episodes expected');
   assert.match(docs[0].content.caption, /S02E01/);
   assert.match(docs[2].content.caption, /S02E03/);

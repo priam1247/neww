@@ -16,6 +16,7 @@ const config = require('../../config');
 const engine = require('../../utils/movieEngine');
 const selections = require('../../utils/selections');
 const { progressCard, progressLine } = require('../../utils/cards');
+const host = require('../../utils/movieHost');
 
 const QUALITY_RX = /^(480|720|1080|2160|4k)$/i;
 const MOVIES = () => config.movies || {};
@@ -32,7 +33,7 @@ const help = (P) =>
 
 function parseArgs(args) {
   const rest = [];
-  let quality = MOVIES().defaultQuality || 720;
+  let quality = MOVIES().defaultQuality || host.defaultQuality();
 
   for (const a of args) {
     if (QUALITY_RX.test(a)) { quality = /^4k$/i.test(a) ? 2160 : Number(a); continue; }
@@ -118,8 +119,8 @@ async function offerChoices(sock, msg, extra, matches, job) {
   });
 }
 
-/** Send one finished file as a document. */
-async function sendEpisode(sock, msg, chatId, file, meta, season, episode, quality, res) {
+/** Send one finished file through the bot's delivery path. */
+async function sendEpisode(sock, msg, chatId, file, meta, season, episode, quality, res, onProgress) {
   const stat = fs.statSync(file);
   const tag = `S${pad(season)}E${pad(episode)}`;
   const shownQuality = res.quality || quality;
@@ -129,12 +130,12 @@ async function sendEpisode(sock, msg, chatId, file, meta, season, episode, quali
     `💾 ${(stat.size / 1048576).toFixed(0)} MB · ${shownQuality}p${note}\n` +
     `📡 ${res.provider}${res.tier !== undefined ? ` · tier ${res.tier}` : ''}`;
 
-  await sock.sendMessage(chatId, {
-    document: { url: file },
-    mimetype: 'video/mp4',
-    fileName: path.basename(file),
+  await host.deliver(sock, chatId, msg, {
+    file,
+    title: `${meta.title} ${tag}`,
     caption,
-  }, { quoted: msg });
+    onProgress,
+  });
 
   return stat.size;
 }
@@ -186,14 +187,20 @@ async function deliverSeasonPack(sock, msg, extra, meta, job) {
       );
     }
 
-    await sock.sendMessage(chatId, {
-      document: { url: file },
-      mimetype: 'video/mp4',
-      fileName: path.basename(file),
+    const delivered = await host.deliver(sock, chatId, msg, {
+      file,
+      title: `${meta.title} S${pad(season)}`,
       caption: `📺 *${meta.title}* — S${pad(season)} pack`,
-    }, { quoted: msg });
+      onProgress: (sentBytes, totalBytes) => {
+        const pct = totalBytes ? Math.round((sentBytes / totalBytes) * 100) : 0;
+        card.update(`📦 *${meta.title}* S${pad(season)}\n☁️ saving to Drime… ${pct}%`, { force: pct === 100 });
+      },
+    });
 
-    return card.final(`✅ *${meta.title}* S${pad(season)} pack sent`);
+    return card.final(
+      `✅ *${meta.title}* S${pad(season)} pack sent` +
+      (delivered.as === 'link' ? `\n☁️ ${delivered.link}` : '')
+    );
   } catch (e) {
     console.error('[series] pack', e.message);
     return card.final(`❌ season pack failed\n${String(e.message || '').split('\n')[0]}`);
@@ -287,7 +294,11 @@ async function deliver(sock, msg, extra, meta, job) {
         continue;
       }
 
-      await sendEpisode(sock, msg, chatId, file, meta, season, ep, job.quality, res);
+      await sendEpisode(sock, msg, chatId, file, meta, season, ep, job.quality, res,
+        (sentBytes, totalBytes) => {
+          const pct = totalBytes ? Math.round((sentBytes / totalBytes) * 100) : 0;
+          card.update(`📺 *${meta.title}* ${tag}\n☁️ saving to Drime… ${pct}%`);
+        });
       sent++;
 
       if (ep !== to) await card.update(`✅ ${tag} sent (${sent}/${episodes.length})\n▶️ next episode…`, { force: true });
