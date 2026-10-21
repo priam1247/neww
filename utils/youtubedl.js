@@ -1032,6 +1032,7 @@ async function downloadAudio(url, { outBase, maxMB = 200, maxSeconds = 0, onAtte
  */
 async function downloadVideo(url, { height = 720, outBase, maxMB = 300, maxSeconds = 3600, onAttempt, onProgress, deadlineMs } = {}) {
   const ffmpeg = getFfmpeg();
+  const ffmpegWorks = getFfmpeg.works();
   const caps = capabilities();
   const base = outBase || path.join(getTempDir(), `video_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
   const h = Number(height) || 720;
@@ -1040,19 +1041,43 @@ async function downloadVideo(url, { height = 720, outBase, maxMB = 300, maxSecon
     ? [caps.matchFilter, `duration <?${Math.floor(maxSeconds)}`]
     : [];
 
-  const buildArgs = () => [
-    '-f', `bv*[vcodec^=avc1][height<=${h}]+ba[ext=m4a]/b[ext=mp4][height<=${h}]/bv*[height<=${h}]+ba/b[height<=${h}]/b`,
-    '--merge-output-format', 'mp4',
-    '--ffmpeg-location', ffmpeg,
-    ...(caps.maxFilesize ? ['--max-filesize', `${maxMB}M`] : []),
-    ...durationFilter,
-    '-o', `${base}.%(ext)s`, url,
-  ];
+  // A video-only stream is worse than useless when ffmpeg is missing: the file
+  // arrives without sound. Two hard rules below:
+  //   • every selector requires an audio track (vcodec!=none AND acodec!=none)
+  //   • merging is only attempted when ffmpeg actually runs on this host
+  const sizeFilter = caps.maxFilesize ? ['--max-filesize', `${maxMB}M`] : [];
+
+  const progressive = [
+    `b[ext=mp4][height<=${h}][vcodec!=none][acodec!=none]`,
+    `b[height<=${h}][vcodec!=none][acodec!=none]`,
+    'b[vcodec!=none][acodec!=none]',
+  ].join('/');
+
+  const merged = [
+    `bv*[vcodec^=avc1][height<=${h}]+ba[ext=m4a]/bv*[height<=${h}]+ba`,
+    `b[ext=mp4][height<=${h}][vcodec!=none][acodec!=none]`,
+    `b[height<=${h}][vcodec!=none][acodec!=none]`,
+  ].join('/');
+
+  const buildArgs = () => (ffmpegWorks
+    ? [
+      '-f', merged,
+      '--merge-output-format', 'mp4',
+      '--ffmpeg-location', ffmpeg,
+      ...sizeFilter, ...durationFilter,
+      '-o', `${base}.%(ext)s`, url,
+    ]
+    : [
+      // No ffmpeg → only progressive (video+audio in one stream).
+      '-f', progressive,
+      ...sizeFilter, ...durationFilter,
+      '-o', `${base}.%(ext)s`, url,
+    ]);
 
   const { profile, attempts } = await runWithProfiles(url, buildArgs, { onAttempt, onProgress, deadlineMs });
   const file = findProduced(base);
   if (!file) throw Object.assign(new Error('yt-dlp produced no video file (size or duration limit)'), { code: 'NO_FORMATS' });
-  return { file, profile, attempts };
+  return { file, profile, attempts, hasAudio: true };
 }
 
 // ─── DIAGNOSTICS (.ytdl) ──────────────────────────────────────────────────────

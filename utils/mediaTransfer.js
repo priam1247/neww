@@ -150,11 +150,14 @@ async function downloadToFile(url, dest, {
 async function audioToMp3(input, output = path.join(getTempDir(), `mp3_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp3`)) {
   if (!getFfmpeg.works()) return null;
   try {
+    // Highest MP3 quality LAME can produce: VBR V0 (~245–320 kbps), keeping
+    // the source sample rate instead of resampling down to 44.1 kHz.
     await execFileAsync(getFfmpeg(), [
       '-y', '-hide_banner', '-loglevel', 'error',
-      '-i', input, '-vn', '-ac', '2', '-b:a', '128k', '-ar', '44100',
+      '-i', input, '-vn', '-ac', '2',
+      '-codec:a', 'libmp3lame', '-q:a', '0', '-compression_level', '0',
       '-f', 'mp3', output,
-    ], { timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
+    ], { timeout: 20 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
 
     if (fs.existsSync(output) && fs.statSync(output).size > 1024) return output;
     deleteTempFile(output);
@@ -193,13 +196,17 @@ async function ensureWhatsAppMp4(input, output, { timeoutMs = 20 * 60 * 1000 } =
   }
   if (!stderr) return input; // ffmpeg could not probe it — send whatever we got
 
-  await execFileAsync(ff, [
-    '-y', '-i', input, '-map', '0:v:0', '-map', '0:a:0?',
-    '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-    '-c:v', 'libx264', '-profile:v', 'main', '-preset', 'veryfast', '-crf', '26', '-pix_fmt', 'yuv420p',
-    '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', output,
-  ], { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 });
-  return output;
+  try {
+    await execFileAsync(ff, [
+      '-y', '-i', input, '-map', '0:v:0', '-map', '0:a:0?',
+      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+      '-c:v', 'libx264', '-profile:v', 'main', '-preset', 'veryfast', '-crf', '26', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', output,
+    ], { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 });
+    if (fs.existsSync(output) && fs.statSync(output).size > 1024) return output;
+  } catch { /* conversion failed — send the original rather than nothing */ }
+  deleteTempFile(output);
+  return input;
 }
 
 /** Filesystem-safe file name. */

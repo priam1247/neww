@@ -4,8 +4,8 @@
  *   .song <name or link> [audio|doc]     [audio|doc] overrides config.song.sendAs
  *
  * Quiet by design: react 📥 → ✅ (or ❌), then ONE message carrying the file.
- * Highest-quality audio yt-dlp can get (m4a/aac first), sent as a document
- * unless the caller explicitly asks for `audio`.
+ * Highest-quality audio yt-dlp can get (m4a/aac first), converted to MP3 at
+ * LAME V0 and sent as a document unless the caller explicitly asks for `audio`.
  *
  * Pipeline (first engine that works wins):
  *   1. yt-dlp   — local, best quality, retries with several YouTube player
@@ -29,7 +29,7 @@ const providers = require('../../utils/downloadProviders');
 const youtubeSearch = require('../../utils/youtubeSearch');
 const selections = require('../../utils/selections');
 const {
-  downloadToFile, sniffFile, safeName, fmtMB,
+  downloadToFile, sniffFile, audioToMp3, safeName, fmtMB,
 } = require('../../utils/mediaTransfer');
 const log = require('../../utils/logger')('song');
 const { getTempDir, deleteTempFile } = require('../../utils/tempManager');
@@ -203,13 +203,27 @@ const execute = async (sock, msg, args, extra) => {
         throw Object.assign(new Error('the source did not return an audio file'), { code: 'BAD_SOURCE' });
       }
 
-      // ── 5. Send it untouched ──────────────────────────────────────────────
-      // No mp3 conversion: the highest quality is the stream YouTube serves
-      // (m4a/AAC or opus). Re-encoding would throw quality away — and on this
-      // host ffmpeg is not even installed.
-      const finalFile = file;
-      const finalExt = sniffed.ext;
-      const mime = sniffed.mime;
+      // ── 5. Deliver an MP3, at the best quality this host can produce ──────
+      // The source stream is already the highest-quality audio YouTube serves
+      // (m4a/AAC ~256k, or opus). We convert that to MP3 at LAME V0 (~245–320
+      // kbps, no downsampling) when ffmpeg is available — that is the best MP3
+      // that can exist. Without ffmpeg the untouched stream is sent instead of
+      // refusing the request (and its real extension is kept, never a fake .mp3).
+      let finalFile = file;
+      let finalExt = sniffed.ext;
+      let mime = sniffed.mime;
+
+      if (finalExt !== 'mp3' && sniffed.kind === 'audio') {
+        const mp3 = await audioToMp3(file, `${outBase}_hq.mp3`);
+        if (mp3) {
+          files.push(mp3);
+          finalFile = mp3;
+          finalExt = 'mp3';
+          mime = 'audio/mpeg';
+        } else {
+          log.debug(`${sniffed.ext} kept as-is · ffmpeg unavailable for mp3`);
+        }
+      }
 
       const size = fs.statSync(finalFile).size;
       if (size > MAX_AUDIO_MB * 1024 * 1024) {

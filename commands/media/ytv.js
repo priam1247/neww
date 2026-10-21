@@ -10,8 +10,9 @@
  *           cookie/proxy aware, streamed to disk (RAM stays flat).
  * Engine 2: remote providers (Gifted / cobalt) when the host IP is refused.
  *
+ * Quiet by design: ⏳ → file → ✅ (or ❌ + one short line). No progress card.
+ *
  * Upgrades over the old build:
- *   • live progress in the chat (editable status card),
  *   • automatic quality fallback when the requested size is too big,
  *   • one shared deadline so a hopeless job cannot hang for an hour,
  *   • the real failure reason instead of "blocked in your region".
@@ -29,6 +30,7 @@ const {
   downloadToFile, ensureWhatsAppMp4, safeName, fmtMB,
 } = require('../../utils/mediaTransfer');
 const { getTempDir, deleteTempFile } = require('../../utils/tempManager');
+const log = require('../../utils/logger')('ytv');
 
 // ─── LIMITS (config.video, see config.js) ────────────────────────────────────
 const MAX_VIDEO_MB   = Number(config.video?.maxMB) || 300;   // disk holds the file + Baileys' encrypted copy
@@ -53,38 +55,6 @@ function sweep(prefix) {
       if (f.startsWith(prefix)) deleteTempFile(path.join(dir, f));
     }
   } catch { /* ignore */ }
-}
-
-/** Throttled editable status card. */
-function progressCard(sock, chatId, msg, initialText) {
-  let key = null;
-  let lastEdit = 0;
-  let lastText = initialText;
-  let disabled = false;
-
-  sock.sendMessage(chatId, { text: initialText }, { quoted: msg })
-    .then((sent) => { key = sent?.key || null; })
-    .catch(() => { disabled = true; });
-
-  return {
-    async update(text, { force = false } = {}) {
-      if (disabled || !key || text === lastText) return;
-      const now = Date.now();
-      if (!force && now - lastEdit < 4000) return;
-      lastEdit = now;
-      lastText = text;
-      try { await sock.sendMessage(chatId, { text, edit: key }); }
-      catch { disabled = true; }
-    },
-    async final(text) {
-      if (disabled || !key) {
-        try { await sock.sendMessage(chatId, { text }, { quoted: msg }); } catch { /* ignore */ }
-        return;
-      }
-      try { await sock.sendMessage(chatId, { text, edit: key }); }
-      catch { try { await sock.sendMessage(chatId, { text }, { quoted: msg }); } catch { /* ignore */ } }
-    },
-  };
 }
 
 const execute = async (sock, msg, args, extra) => {
@@ -177,13 +147,9 @@ const execute = async (sock, msg, args, extra) => {
 
   const stamp = `ytv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const outBase = path.join(getTempDir(), stamp);
-  const shownTitle = title || 'video';
-  const durationText = duration ? ` • ${Math.floor(duration / 60)}:${String(duration % 60).padStart(2, '0')}` : '';
-  let card = null;
 
   try {
-    await react('📥');
-    card = progressCard(sock, chatId, msg, `🎬 *${shownTitle}*${durationText}\n⏳ Fetching (${height}p)…`);
+    await react('⏳');
 
     // ── Download: yt-dlp first, with automatic quality fallback ────────────
     let file = null;
@@ -194,10 +160,7 @@ const execute = async (sock, msg, args, extra) => {
 
     for (let i = 0; i < candidates.length && !file; i++) {
       const q = candidates[i];
-      if (i > 0) {
-        await card.update(`📉 ${candidates[i - 1]}p was too big — trying *${q}p*…`, { force: true });
-        sweep(stamp);
-      }
+      if (i > 0) { sweep(stamp); await react('📉'); }
       try {
         const res = await YT.downloadVideo(query, {
           height: q,
@@ -206,18 +169,16 @@ const execute = async (sock, msg, args, extra) => {
           maxSeconds: MAX_MINUTES * 60,
           deadlineMs: Math.max(20000, deadlineAt - Date.now()),
           onAttempt: (name, err, info) => {
-            console.log(`[ytv] yt-dlp profile "${name}" failed (${info.code})`);
+            log.debug(`yt-dlp profile ${name} failed · ${info.code}`);
             attempts.push({ engine: `yt-dlp:${name}`, code: info.code });
           },
-          onProgress: (p) => card.update(`🎬 *${shownTitle}*${durationText}\n${bar(p.percent)} ${p.percent}% • ${q}p`),
         });
         file = res.file;
         height = q;
-        card.update(`🎬 *${shownTitle}*${durationText}\n✅ Downloaded — preparing…`, { force: true });
       } catch (e) {
         const info = YT.classify(e);
         attempts.push({ engine: `yt-dlp:${q}p`, code: info.code });
-        console.warn(`[ytv] yt-dlp failed at ${q}p (${info.code}): ${info.detail}`);
+        log.warn(`yt-dlp failed at ${q}p · ${info.code} · ${info.detail}`);
         ytErr = e;
         // Only a size problem is worth a lower quality; anything else is final.
         if (!['TOO_BIG', 'NO_FORMATS', 'UNKNOWN'].includes(info.code)) break;
@@ -234,7 +195,7 @@ const execute = async (sock, msg, args, extra) => {
 
       if (ytErr && (!remoteAllowed || !remoteWorthTrying.includes(info.code))) throw ytErr;
 
-      await card.update('🔄 Local engine failed — trying a backup source…', { force: true });
+      await react('🔄');
 
       let remoteHit = null;
       try {
@@ -245,7 +206,7 @@ const execute = async (sock, msg, args, extra) => {
           onAttempt: (name, err, st) => { if (st.code !== 'OK') attempts.push({ engine: name, code: st.code }); },
         });
       } catch (providerErr) {
-        console.warn('[ytv] backup sources failed:', providerErr.message);
+        log.warn(`backup sources failed · ${providerErr.message}`);
         if (ytErr) throw ytErr;
         throw Object.assign(new Error('all download engines failed'), { code: 'NO_PROVIDERS', attempts });
       }
@@ -255,11 +216,10 @@ const execute = async (sock, msg, args, extra) => {
       const got = await downloadToFile(remoteHit.url, dest, {
         maxBytes: MAX_VIDEO_MB * 1024 * 1024,
         headers: remoteHit.headers,
-        onProgress: (p) => card.update(`🎬 *${shownTitle}* (${via})\n${bar(p.percent)} ${p.percent}%`),
       });
       file = dest;
       title = title || remoteHit.title;
-      console.log(`[ytv] downloaded via ${via} (${got.sniff.kind}/${got.sniff.ext})`);
+      log.info(`via ${via} · ${got.sniff.kind}/${got.sniff.ext}`);
     }
 
     if (!file || !fs.existsSync(file) || fs.statSync(file).size < 10 * 1024) {
@@ -269,8 +229,7 @@ const execute = async (sock, msg, args, extra) => {
       throw Object.assign(new Error('video too large'), { code: 'TOO_BIG' });
     }
 
-    // ── Make it playable in WhatsApp ───────────────────────────────────────
-    await card.update(`🎬 *${shownTitle}*\n🎛️ Converting for WhatsApp…`, { force: true });
+    // ── Make it playable in WhatsApp (no-op without ffmpeg) ────────────────
     const ready = await ensureWhatsAppMp4(file, path.join(getTempDir(), `${stamp}_wa.mp4`));
     const size = fs.statSync(ready).size;
     const name = safeName(title, 'video');
@@ -282,17 +241,17 @@ const execute = async (sock, msg, args, extra) => {
     } else {
       await sock.sendMessage(chatId, { video: { url: ready }, mimetype: 'video/mp4', caption }, { quoted: msg });
     }
-    await card.update(`✅ *${name}* sent\n📦 ${fmtMB(size)} • ${height}p${via !== 'yt-dlp' ? ` • via ${via}` : ''}`, { force: true });
     await react('✅');
   } catch (err) {
-    console.error('[ytv] error:', err.message);
+    log.error(`${title || query || 'video'} · ${YT.classify(err).code} · ${String(err.message).split('\n')[0]}`);
     const info = YT.classify(err);
     const merged = attempts.length ? attempts : (err.attempts || info.attempts);
+    // one short line on failure, never a wall of engine detail
     if (err.code === 'TOO_BIG') {
-      await (card ? card.final : say)(`❌ Video is larger than ${MAX_VIDEO_MB} MB even at the lowest quality.\nTry \`.ytv <link> 360\` or a shorter video.`);
+      await say(`❌ Too large even at the lowest quality — try \`.ytv <link> 360\` or a shorter video.`);
     } else {
-      const summary = YT.attemptsSummary(merged);
-      await (card ? card.final : say)(YT.friendlyError(err) + summary);
+      const lines = String(YT.friendlyError(err) + YT.attemptsSummary(merged)).split('\n').filter(Boolean);
+      await say(lines.slice(0, 3).join('\n'));
     }
     await react('❌');
   } finally {

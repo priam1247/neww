@@ -22,7 +22,6 @@ A command-driven WhatsApp bot built with Baileys. It supports past-paper lookup,
 .spotify <Spotify URL or artist - title>
 .instagram <URL>   .fb <Facebook URL>
 .sticker (reply to media)   .viewonce (reply to view-once media)
-.tgpack / .tgsticker
 .menu / .ping
 ```
 

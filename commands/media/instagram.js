@@ -135,7 +135,7 @@ module.exports = {
         try {
           const providers = require('../../utils/downloadProviders');
           const hit = await providers.resolveMedia(text, { kind: 'video', timeoutMs: 20000 });
-          await extra.reply('⏳ Primary source failed — using a backup source…');
+          await sock.sendMessage(extra.from, { react: { text: '🔄', key: msg.key } }).catch(() => {});
           const buf = await fetchMedia(hit.url);
           const type = sniffType(buf) || (hit.ext === 'jpg' || hit.ext === 'png' ? 'image' : 'video');
           const caption = `*DOWNLOADED BY ${config.botName.toUpperCase()}*`;

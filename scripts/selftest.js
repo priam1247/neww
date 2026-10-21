@@ -300,8 +300,10 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     const res = await YT.downloadAudio('https://www.youtube.com/watch?v=dQw4w9WgXcQ', { maxMB: 100, outBase: path.join(sandbox, 'a1') });
     assert.ok(fs.existsSync(res.file), 'no file produced');
     assert.strictEqual(MT.sniffFile(res.file).kind, 'audio', `sniffed as ${MT.sniffFile(res.file).kind}`);
-    const ffmpeg = require(path.join(REPO, 'utils/ffmpeg.js')).works();
-    if (ffmpeg) assert.strictEqual(res.ext, 'mp3', 'ffmpeg is available but nothing was converted to mp3');
+    // The raw stream is kept on purpose (no generation loss): the MP3 step
+    // happens once, at send time, and only when ffmpeg can actually do it.
+    assert.ok(['m4a', 'mp3', 'webm'].includes(res.ext), `unexpected ext: ${res.ext}`);
+    assert.strictEqual(res.transcoded, false, 'audio was re-encoded during download');
   });
 
   await test('downloadVideo: succeeds and honours the requested height', async () => {

@@ -21,6 +21,16 @@ const FFMPEG_CANDIDATES = () => [
   '/usr/local/bin/ffmpeg',
   path.join(os.homedir(), '.local', 'bin', 'ffmpeg'),
   (() => { try { return require('ffmpeg-static'); } catch { return null; } })(),
+  // @ffmpeg-installer ships the binary INSIDE a platform package, so it works
+  // on panels that block npm install scripts (which is what killed
+  // ffmpeg-static here). This is what makes .song → mp3 and merged .ytv
+  // possible on the Pterodactyl image.
+  (() => {
+    try {
+      const inst = require('@ffmpeg-installer/ffmpeg');
+      return inst && inst.path ? inst.path : null;
+    } catch { return null; }
+  })(),
 ].filter(Boolean);
 
 let cached = null;
