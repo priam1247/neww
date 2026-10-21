@@ -67,6 +67,8 @@ module.exports = {
     ipv4: true,                                  // force IPv4 (IPv6 egress is often blocked)
     noCheckCertificates: true,                   // many free hosts ship an outdated CA bundle
     updateOnBotCheck: true,                      // self-update yt-dlp once per run after a bot-check
+    fragments: Number(env.YTDLP_FRAGMENTS || 4),
+    autoUpdateHours: Number(env.YTDLP_AUTO_UPDATE_HOURS ?? 24),
     // Total time one .song/.ytv job may spend trying player clients before it
     // gives up (prevents a hopeless download from hanging for an hour).
     deadlineMs: Number(env.YTDLP_DEADLINE_MS || 45 * 60 * 1000),
@@ -115,6 +117,14 @@ module.exports = {
     // WhatsApp documents top out at 2 GB; anything over 50 MB goes as a document.
     maxMB: Number(env.VIDEO_MAX_MB || 2000),
     maxMinutes: Number(env.VIDEO_MAX_MINUTES || 0),   // 0 = no length limit
+  },
+  media: {
+    sendCacheDays: Number(env.MEDIA_SEND_CACHE_DAYS ?? 7),
+    progressCard: !/^(0|false|no|off)$/i.test(String(env.MEDIA_PROGRESS_CARD ?? 'true')),
+  },
+  queue: {
+    light: Math.max(1, Math.floor(Number(env.QUEUE_LIGHT) || 3)),
+    heavy: Math.max(1, Math.floor(Number(env.QUEUE_HEAVY) || 2)),
   },
 
   messages: {

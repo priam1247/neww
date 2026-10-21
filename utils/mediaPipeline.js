@@ -19,6 +19,9 @@ const config = require('../config');
 const YT = require('./youtubedl');
 const settings = require('./mediaSettings');
 const providers = require('./downloadProviders');
+const sendCache = require('./sendCache');
+const jobQueue = require('./jobQueue');
+const { createProgress } = require('./progressCard');
 const {
   downloadToFile, sniffFile, audioToMp3, tagMp3, ensureWhatsAppMp4, safeName, fmtMB,
 } = require('./mediaTransfer');
@@ -46,6 +49,7 @@ function parseOptions(args, defaults = {}) {
     const token = String(rest[i] || '').toLowerCase();
     if (['audio', 'mp3', 'song', 'music'].includes(token)) { kind = 'audio'; rest.splice(i, 1); continue; }
     if (['video', 'mp4', 'vid', 'hd'].includes(token)) { kind = 'video'; rest.splice(i, 1); continue; }
+    if (['image', 'img', 'photo'].includes(token)) { kind = 'image'; rest.splice(i, 1); continue; }
     if (QUALITIES.includes(Number(token.replace(/p$/, '')))) { height = Number(token.replace(/p$/, '')); rest.splice(i, 1); continue; }
     break; // the first non-option token is the link itself
   }
@@ -53,10 +57,10 @@ function parseOptions(args, defaults = {}) {
 }
 
 /** Last resort for links yt-dlp does not know: fetch the URL itself if it is a media file. */
-async function downloadDirect(url, dest, maxMB) {
+async function downloadDirect(url, dest, maxMB, onProgress) {
   if (!/^https?:\/\//i.test(String(url || ''))) return null;
   try {
-    const got = await downloadToFile(url, dest, { maxBytes: maxMB * 1024 * 1024 });
+    const got = await downloadToFile(url, dest, { maxBytes: maxMB * 1024 * 1024, onProgress });
     if (['video', 'audio', 'image'].includes(got?.sniff?.kind)) return dest;
   } catch (e) {
     console.warn('[media] direct download failed:', e.message);
@@ -65,13 +69,23 @@ async function downloadDirect(url, dest, maxMB) {
   return null;
 }
 
+function normalizedUrl(url) {
+  try {
+    const parsed = new URL(String(url));
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return String(url || '').trim();
+  }
+}
+
 /**
  * Download `url` and send it to the chat. Never throws for "unsupported"
  * reasons without explaining them; always cleans up its temp files.
  *
  * @param {object} opts
  * @param {string} opts.url
- * @param {'audio'|'video'} [opts.kind]
+ * @param {'audio'|'video'|'image'} [opts.kind]
  * @param {number} [opts.height]
  * @param {string} [opts.title]  known title (e.g. from Spotify metadata)
  * @param {string} [opts.author]
@@ -80,19 +94,38 @@ async function downloadDirect(url, dest, maxMB) {
  */
 async function downloadAndSend(sock, msg, extra, {
   url, kind = 'video', height = 720, title = '', author = '', attempts = [],
+  lane = null, cache = true, skipCache = false, waited = false,
 } = {}) {
   const chatId = extra?.from || msg.key.remoteJid;
   const say = (text) => sock.sendMessage(chatId, { text }, { quoted: msg });
   const react = (emoji) => sock.sendMessage(chatId, { react: { text: emoji, key: msg.key } }).catch(() => {});
+  const cacheKey = cache ? `dl:${normalizedUrl(url)}:${kind}` : null;
+
+  if (!skipCache && cacheKey && await sendCache.replay(sock, chatId, msg, cacheKey)) {
+    await react('✅');
+    return { sent: true, kind, via: 'cache' };
+  }
+
+  if (lane) {
+    let queued = false;
+    return jobQueue.runInLane(lane, () => downloadAndSend(sock, msg, extra, {
+      url, kind, height, title, author, attempts, cache, skipCache: true, waited: queued,
+    }), async () => {
+      queued = true;
+      await react('⏳');
+    });
+  }
 
   const stamp = `${kind === 'audio' ? 'aud' : 'dl'}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const outBase = path.join(getTempDir(), stamp);
   const files = [];
   const release = holdTemp(stamp);
+  const progress = config.media?.progressCard !== false
+    ? createProgress(sock, chatId, msg, { label: 'Downloading' })
+    : null;
 
   try {
-    // Quiet by design: the reaction is the only progress signal.
-    await react('⏳');
+    if (!waited) await react('⏳');
 
     // Best-effort metadata (the download attempt reports the real problems).
     if (!title) {
@@ -118,16 +151,17 @@ async function downloadAndSend(sock, msg, extra, {
         console.log(`[media] yt-dlp profile "${name}" failed (${info.code})`);
         attempts.push({ engine: `yt-dlp:${name}`, code: info.code });
       };
+      const onProgress = progress ? (p) => progress.update({ pct: p.percent, speed: p.speed, stage: 'downloading' }) : undefined;
       if (kind === 'audio') {
         const res = await YT.downloadAudio(url, {
-          outBase, maxMB: MAX_AUDIO_MB, onAttempt,
+          outBase, maxMB: MAX_AUDIO_MB, onAttempt, onProgress,
           deadlineMs: Math.max(20000, deadlineAt - Date.now()),
         });
         file = res.file;
       } else {
         const res = await YT.downloadVideo(url, {
           height, outBase, maxMB: MAX_VIDEO_MB, maxSeconds: MAX_MINUTES * 60,
-          onAttempt, deadlineMs: Math.max(20000, deadlineAt - Date.now()),
+          onAttempt, onProgress, deadlineMs: Math.max(20000, deadlineAt - Date.now()),
         });
         file = res.file;
       }
@@ -138,7 +172,8 @@ async function downloadAndSend(sock, msg, extra, {
       console.warn(`[media] yt-dlp failed (${info.code}): ${info.detail}`);
 
       const direct = ['UNSUPPORTED_URL', 'NO_FORMATS', 'UNKNOWN'].includes(info.code)
-        ? await downloadDirect(url, `${outBase}_direct.bin`, kind === 'audio' ? MAX_AUDIO_MB : MAX_VIDEO_MB)
+        ? await downloadDirect(url, `${outBase}_direct.bin`, kind === 'audio' ? MAX_AUDIO_MB : MAX_VIDEO_MB,
+          progress ? (p) => progress.update({ pct: p.percent, stage: 'downloading' }) : undefined)
         : null;
       if (direct) {
         files.push(direct);
@@ -172,6 +207,7 @@ async function downloadAndSend(sock, msg, extra, {
         const got = await downloadToFile(remoteHit.url, dest, {
           maxBytes: (kind === 'audio' ? MAX_AUDIO_MB : MAX_VIDEO_MB) * 1024 * 1024,
           headers: remoteHit.headers,
+          onProgress: progress ? (p) => progress.update({ pct: p.percent, stage: 'downloading' }) : undefined,
         });
         files.push(dest);
         file = dest;
@@ -191,11 +227,13 @@ async function downloadAndSend(sock, msg, extra, {
     if (sniffed.kind === 'image') {
       const size = fs.statSync(file).size;
       if (size > MAX_VIDEO_MB * 1024 * 1024) throw Object.assign(new Error('image too large'), { code: 'TOO_BIG' });
-      await sock.sendMessage(chatId, {
+      progress?.update({ stage: 'uploading' });
+      const sent = await sock.sendMessage(chatId, {
         image: { url: file },
         mimetype: sniffed.mime,
         caption: `🖼️ *${safeName(title, 'image')}*${author ? `\n👤 ${author}` : ''}\n📦 ${fmtMB(size)}${viaText}`,
       }, { quoted: msg });
+      if (cacheKey) sendCache.remember(cacheKey, sent);
       await react('✅');
       return { sent: true, kind: 'image', via };
     }
@@ -226,9 +264,13 @@ async function downloadAndSend(sock, msg, extra, {
 
       // Documents by default — the filename is where the artist/song name live.
       if (String(config.song?.sendAs || 'document').toLowerCase() === 'audio') {
-        await sock.sendMessage(chatId, { audio: { url: finalFile }, mimetype: mime, ptt: false, fileName }, { quoted: msg });
+        progress?.update({ stage: 'uploading' });
+        const sent = await sock.sendMessage(chatId, { audio: { url: finalFile }, mimetype: mime, ptt: false, fileName }, { quoted: msg });
+        if (cacheKey) sendCache.remember(cacheKey, sent);
       } else {
-        await sock.sendMessage(chatId, { document: { url: finalFile }, mimetype: mime, fileName, caption }, { quoted: msg });
+        progress?.update({ stage: 'uploading' });
+        const sent = await sock.sendMessage(chatId, { document: { url: finalFile }, mimetype: mime, fileName, caption }, { quoted: msg });
+        if (cacheKey) sendCache.remember(cacheKey, sent);
       }
       await react('✅');
       return { sent: true, kind: 'audio', via };
@@ -245,9 +287,13 @@ async function downloadAndSend(sock, msg, extra, {
     const caption = `🎬 *${title || name}*${author ? `\n👤 ${author}` : ''}\n📦 ${fmtMB(size)} • ${height}p${viaText}`;
 
     if (size > AS_DOC_ABOVE) {
-      await sock.sendMessage(chatId, { document: { url: ready }, mimetype: 'video/mp4', fileName: `${name}.mp4`, caption }, { quoted: msg });
+      progress?.update({ stage: 'uploading' });
+      const sent = await sock.sendMessage(chatId, { document: { url: ready }, mimetype: 'video/mp4', fileName: `${name}.mp4`, caption }, { quoted: msg });
+      if (cacheKey) sendCache.remember(cacheKey, sent);
     } else {
-      await sock.sendMessage(chatId, { video: { url: ready }, mimetype: 'video/mp4', caption }, { quoted: msg });
+      progress?.update({ stage: 'uploading' });
+      const sent = await sock.sendMessage(chatId, { video: { url: ready }, mimetype: 'video/mp4', caption }, { quoted: msg });
+      if (cacheKey) sendCache.remember(cacheKey, sent);
     }
     await react('✅');
     return { sent: true, kind: 'video', via };
@@ -266,6 +312,7 @@ async function downloadAndSend(sock, msg, extra, {
     // (callers would only end up printing the same thing twice).
     return { sent: false, kind, via: 'none', code: info.code, error: err };
   } finally {
+    await progress?.done();
     release();
     for (const f of files) deleteTempFile(f);
     try {

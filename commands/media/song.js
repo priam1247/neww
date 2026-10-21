@@ -3,7 +3,7 @@
  *
  *   .song <name or link> [audio|doc]     [audio|doc] overrides config.song.sendAs
  *
- * Quiet by design: react 📥 → ✅ (or ❌), then ONE message carrying the file.
+ * Quiet by design: reactions and one file message; long jobs get a progress card.
  * Highest-quality audio yt-dlp can get (m4a/aac first), converted to MP3 at
  * LAME V0 and sent as a document unless the caller explicitly asks for `audio`.
  *
@@ -28,6 +28,9 @@ const settings = require('../../utils/mediaSettings');
 const providers = require('../../utils/downloadProviders');
 const youtubeSearch = require('../../utils/youtubeSearch');
 const selections = require('../../utils/selections');
+const sendCache = require('../../utils/sendCache');
+const jobQueue = require('../../utils/jobQueue');
+const { createProgress } = require('../../utils/progressCard');
 const {
   downloadToFile, sniffFile, audioToMp3, tagMp3, safeName, fmtMB,
 } = require('../../utils/mediaTransfer');
@@ -91,23 +94,14 @@ const execute = async (sock, msg, args, extra) => {
     const outBase = path.join(getTempDir(), id);
     const files = [];
     const attempts = [];
+    let progress = null;
 
     try {
-      await react('📥');
-
       // ── 1. Resolve to a YouTube URL + metadata ────────────────────────────
       let url = null, title = '', artist = '', duration = 0, thumbnail = '';
 
       if (YT.isYouTubeUrl(text)) {
         url = YT.normalizeYouTubeUrl(text);
-        try {
-          const info = await YT.getInfo(url, { timeout: 45000 });
-          title = info.title; artist = info.uploader; duration = info.duration; thumbnail = info.thumbnail;
-        } catch (e) {
-          // Metadata failing is not fatal — the download attempt gives the real error.
-          log.debug(`metadata lookup failed · ${e.message}`);
-          attempts.push({ engine: 'metadata', code: YT.classify(e).code });
-        }
       } else {
         const maxResults = Number(config.search?.maxResults) || 5;
         const results = await youtubeSearch.searchYouTube(text, { limit: maxResults });
@@ -121,6 +115,7 @@ const execute = async (sock, msg, args, extra) => {
         const pickerOn = settings.get('searchPicker', config.search?.picker === true) !== false;
         if (results.length > 1 && pickerOn && !firstHit) {
           // Let the user choose instead of silently taking the first hit.
+          void YT.getInfo(results[0].url).catch(() => {});
           const listText = youtubeSearch.formatResults(results, {
             header: `🔎 *Results for "${text}"*`,
             note: `Reply with a number (1-${results.length}) to download, or *cancel*.\n_Next time, add --first to skip this step._`,
@@ -153,13 +148,37 @@ const execute = async (sock, msg, args, extra) => {
         });
       }
 
+      const videoId = YT.youtubeId(url);
+      const cacheKey = videoId ? `song:${videoId}:${sendAs}` : null;
+      if (cacheKey && await sendCache.replay(sock, chatId, msg, cacheKey)) {
+        await react('✅');
+        return;
+      }
+
+      if (!title || !duration) {
+        try {
+          const info = await YT.getInfo(url, { timeout: 45000 });
+          title = title || info.title; artist = artist || info.uploader;
+          duration = duration || info.duration; thumbnail = thumbnail || info.thumbnail;
+        } catch (e) {
+          log.debug(`metadata lookup failed · ${e.message}`);
+          attempts.push({ engine: 'metadata', code: YT.classify(e).code });
+        }
+      }
+
       const shownTitle = title || 'song';
       const durationText = duration ? ` (${Math.floor(duration / 60)}:${String(duration % 60).padStart(2, '0')})` : '';
       if (duration && duration > MAX_AUDIO_SECONDS) {
         return reply(`❌ That track is ${Math.round(duration / 60)} min — the limit is ${Math.round(MAX_AUDIO_SECONDS / 60)} min.`);
       }
 
-      // ── 2. Download (silent: reactions are the only feedback) ─────────────
+      return await jobQueue.runInLane('light', async () => {
+      await react('📥');
+      progress = config.media?.progressCard !== false
+        ? createProgress(sock, chatId, msg, { label: 'Downloading' })
+        : null;
+
+      // ── 2. Download (a delayed card shows progress on longer jobs) ────────
       // ── 3. Engine 1: yt-dlp ───────────────────────────────────────────────
       let file = null;
       let ext = 'mp3';
@@ -174,6 +193,7 @@ const execute = async (sock, msg, args, extra) => {
             log.debug(`yt-dlp profile ${name} failed · ${info.code}`);
             attempts.push({ engine: `yt-dlp:${name}`, code: info.code });
           },
+          onProgress: progress ? (p) => progress.update({ pct: p.percent, speed: p.speed, stage: 'downloading' }) : undefined,
           deadlineMs: Number(config.ytdlp?.deadlineMs) || ENGINE_TIMEOUT,
         });
         file = res.file;
@@ -210,6 +230,7 @@ const execute = async (sock, msg, args, extra) => {
         const got = await downloadToFile(remoteHit.url, dest, {
           maxBytes: MAX_AUDIO_MB * 1024 * 1024,
           headers: remoteHit.headers,
+          onProgress: progress ? (p) => progress.update({ pct: p.percent, stage: 'downloading' }) : undefined,
         });
         files.push(dest);
         file = dest;
@@ -275,16 +296,23 @@ const execute = async (sock, msg, args, extra) => {
         + `\n📦 ${fmtMB(size)}${via !== 'yt-dlp' ? ` • via ${via}` : ''}`;
 
       if (sendAs === 'audio') {
-        await sock.sendMessage(chatId, {
+        progress?.update({ stage: 'uploading' });
+        const sent = await sock.sendMessage(chatId, {
           audio: { url: finalFile }, mimetype: mime, ptt: false, fileName,
         }, { quoted: msg });
+        if (cacheKey) sendCache.remember(cacheKey, sent);
       } else {
         // 'document' keeps the exact "Title - Artist.mp3" filename.
-        await sock.sendMessage(chatId, {
+        progress?.update({ stage: 'uploading' });
+        const sent = await sock.sendMessage(chatId, {
           document: { url: finalFile }, mimetype: mime, fileName, caption,
         }, { quoted: msg });
+        if (cacheKey) sendCache.remember(cacheKey, sent);
       }
       await react('✅');
+      }, async () => {
+        await react('⏳');
+      });
     } catch (err) {
       log.error(`${text || 'song'} · ${YT.classify(err).code} · ${String(err.message).split('\n')[0]}`);
       const info = YT.classify(err);
@@ -296,6 +324,7 @@ const execute = async (sock, msg, args, extra) => {
       await reply(lines.slice(0, 3).join('\n'));
       await react('❌');
     } finally {
+      if (progress) await progress.done();
       for (const f of files) deleteTempFile(f);
       // yt-dlp may leave .part / .ytdl files or a differently-named stream.
       try {

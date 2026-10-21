@@ -16,7 +16,7 @@ const TIER_NAME = { 1: 'torrent', 2: 'ddl', 3: 'stream' };
 
 const providersCommand = {
   name: 'providers',
-  aliases: ['sources', 'health'],
+  aliases: ['sources'],
   category: 'general',
   description: 'Movie/series source health',
   usage: '.providers',

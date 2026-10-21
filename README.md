@@ -54,7 +54,7 @@ npm run ytdlp:install
 npm start
 ```
 
-The bot needs a WhatsApp session. Set `SESSION_ID` or use the pairing flow (`PAIR_NUMBER`); session credentials are stored under the configured session directory and must not be committed. The bot also needs ffmpeg for conversions. Install it on the host if `ffmpeg-static` cannot run there.
+The bot needs a WhatsApp session. Set `SESSION_ID` or use the pairing flow (`PAIR_NUMBER`); session credentials are stored under the configured session directory and must not be committed. The bot also needs ffmpeg for conversions. Install it on the host if the packaged fallback cannot run there.
 
 Run offline regression tests with:
 

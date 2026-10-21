@@ -2,7 +2,7 @@
  * ffmpeg resolver — single source of truth.
  *
  * Delegates to utils/converter.js, which probes every realistic location
- * (FFMPEG_PATH env → system ffmpeg → user install → ffmpeg-static) and returns
+ * (FFMPEG_PATH env → system ffmpeg → user install → packaged fallback) and returns
  * the first binary that actually runs on this host.
  */
 

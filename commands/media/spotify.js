@@ -69,6 +69,8 @@ module.exports = {
         title: track.artists ? `${track.title} - ${track.artists}` : track.title,
         author: track.artists,
         attempts: [{ engine: 'spotify+yt-dlp', code: 'OK' }],
+        lane: 'light',
+        cache: false,
       });
     } catch (e) {
       console.error('[spotify] error:', e.message);

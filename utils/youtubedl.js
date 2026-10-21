@@ -54,6 +54,8 @@ const extractVideoId = (text) => {
   return m ? m[1] : null;
 };
 
+const youtubeId = (url) => extractVideoId(url);
+
 /** Pull the first http(s) URL out of a text blob. */
 const extractUrl = (text) => {
   const m = String(text || '').match(/https?:\/\/[^\s"'<>]+/);
@@ -599,7 +601,7 @@ function spawnYtdlp(args, { timeout = 120000, onProgress } = {}) {
       if (!Number.isFinite(done) || !Number.isFinite(size) || size <= 0) return;
       onProgress({
         percent: Math.max(0, Math.min(100, Math.round((done / size) * 100))),
-        speed: Number(speed) || 0,
+        speed: Number.isFinite(Number(speed)) ? Number(speed) : String(speed || '').trim(),
         eta: Number(eta) || 0,
       });
     };
@@ -730,7 +732,7 @@ const HINTS = {
   UNAVAILABLE: '❌ This video is unavailable — deleted, removed by the uploader, or a dead link.',
   TOO_LONG: '❌ That media is longer than the limit this bot allows.',
   TOO_BIG: '❌ That file is bigger than the size limit set for this bot — try a lower quality (e.g. `.ytv <link> 360`).',
-  FFMPEG_MISSING: '❌ *ffmpeg* is missing on this host, so the audio/video cannot be converted.\nFix: `apt install ffmpeg` (Termux: `pkg install ffmpeg`), or run `npm install` so ffmpeg-static is present.',
+  FFMPEG_MISSING: '❌ *ffmpeg* is missing on this host, so the audio/video cannot be converted.\nFix: `apt install ffmpeg` (Termux: `pkg install ffmpeg`), or run `npm install` to install the packaged fallback.',
   UNSUPPORTED_URL: '❌ That link is not a media page the downloader understands (or the site is not supported).\nSupported: YouTube, TikTok, Instagram, Facebook, X/Twitter, Reddit, SoundCloud and ~1000 more — paste the link to the *post/video*, not to a profile or a search page.',
   NO_FORMATS: '❌ YouTube returned no downloadable stream for that video. Try a different quality (e.g. 360p) or another video.',
   NO_AUDIO: '❌ YouTube only gave this server a video stream *without sound*. Try another quality (e.g. `.ytv <link> 360`) or add cookies with `.cookies set`.',
@@ -781,7 +783,7 @@ const remember = (err, url, attempts) => {
  * Video metadata via yt-dlp (no download).
  * @returns {Promise<{title:string,duration:number,uploader:string,thumbnail:string,id:string}>}
  */
-async function getInfo(url, { timeout = 60000 } = {}) {
+async function fetchInfo(url, { timeout = 60000 } = {}) {
   const caps = capabilities();
   const args = [...baseArgs(), '--skip-download'];
   if (caps.noCheckFormats) args.push('--no-check-formats');
@@ -819,6 +821,38 @@ async function getInfo(url, { timeout = 60000 } = {}) {
     }
     throw last;
   }
+}
+
+const INFO_CACHE_TTL_MS = 10 * 60 * 1000;
+const INFO_CACHE_MAX = 100;
+const infoCache = new Map();
+
+function getInfo(url, options = {}) {
+  const key = String(url || '');
+  const now = Date.now();
+  const cached = infoCache.get(key);
+  if (cached && now - cached.ts < INFO_CACHE_TTL_MS) {
+    infoCache.delete(key);
+    infoCache.set(key, cached);
+    return cached.promise || Promise.resolve(cached.value);
+  }
+  if (cached) infoCache.delete(key);
+
+  const entry = { ts: now, promise: null, value: null };
+  entry.promise = fetchInfo(url, options).then((value) => {
+    if (infoCache.get(key) === entry) {
+      entry.value = value;
+      entry.promise = null;
+      entry.ts = Date.now();
+    }
+    return value;
+  }).catch((error) => {
+    if (infoCache.get(key) === entry) infoCache.delete(key);
+    throw error;
+  });
+  infoCache.set(key, entry);
+  while (infoCache.size > INFO_CACHE_MAX) infoCache.delete(infoCache.keys().next().value);
+  return entry.promise;
 }
 
 /**
@@ -920,6 +954,29 @@ function assertProduced(outBase, stdout, what) {
 }
 
 let _autoUpdated = false;
+let _autoUpdateScheduled = false;
+
+function scheduleAutoUpdate() {
+  if (_autoUpdateScheduled) return false;
+  const hours = Number(config.ytdlp?.autoUpdateHours ?? 24);
+  if (!Number.isFinite(hours) || hours <= 0) return false;
+  _autoUpdateScheduled = true;
+
+  const runUpdate = async () => {
+    try {
+      if (!await update({ quick: true })) console.warn('[ytdlp] scheduled auto-update did not find a working version');
+    } catch (error) {
+      console.warn('[ytdlp] scheduled auto-update failed:', error.message || error);
+    }
+  };
+  const timer = setTimeout(() => {
+    void runUpdate();
+    const interval = setInterval(() => { void runUpdate(); }, hours * 60 * 60 * 1000);
+    interval.unref?.();
+  }, 5 * 60 * 1000);
+  timer.unref?.();
+  return true;
+}
 
 /**
  * Run one download with the escalating client profiles, under a global deadline
@@ -1023,6 +1080,9 @@ async function downloadAudio(url, { outBase, maxMB = 200, maxSeconds = 0, onAtte
     : [];
 
   const sizeLimit = caps.maxFilesize ? ['--max-filesize', `${maxMB}M`] : [];
+  const fragments = caps.concurrentFragments
+    ? ['--concurrent-fragments', String(Math.max(1, Number(config.ytdlp?.fragments) || 4))]
+    : [];
 
   // ── 1. THE OFFICIAL AUDIO, UNTOUCHED ─────────────────────────────────────
   // Highest quality = whatever YouTube serves: m4a (AAC) first, opus second.
@@ -1031,11 +1091,14 @@ async function downloadAudio(url, { outBase, maxMB = 200, maxSeconds = 0, onAtte
     '-f', 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio[ext=webm]/bestaudio/best',
     ...durationFilter,
     ...sizeLimit,
+    ...fragments,
     '-o', `${base}.%(ext)s`, url,
   ];
 
   try {
-    const { profile, attempts, stdout } = await runWithProfiles(url, rawArgs, { onAttempt, onProgress, deadlineMs });
+    const { profile, attempts, stdout } = await runWithProfiles(url, rawArgs, {
+      onAttempt, onProgress, progress: Boolean(onProgress), deadlineMs,
+    });
     const file = assertProduced(base, stdout, 'audio');
     return { file, ext: path.extname(file).slice(1).toLowerCase(), profile, attempts, transcoded: false };
   } catch (err) {
@@ -1050,9 +1113,12 @@ async function downloadAudio(url, { outBase, maxMB = 200, maxSeconds = 0, onAtte
       '--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0', '--ffmpeg-location', ffmpeg,
       ...durationFilter,
       ...sizeLimit,
+      ...fragments,
       '-o', `${base}.%(ext)s`, url,
     ];
-    const { profile, attempts, stdout } = await runWithProfiles(url, convertArgs, { onAttempt, onProgress, deadlineMs });
+    const { profile, attempts, stdout } = await runWithProfiles(url, convertArgs, {
+      onAttempt, onProgress, progress: Boolean(onProgress), deadlineMs,
+    });
     const file = assertProduced(base, stdout, 'audio');
     return { file, ext: path.extname(file).slice(1).toLowerCase(), profile, attempts, transcoded: true };
   }
@@ -1081,6 +1147,9 @@ async function downloadVideo(url, { height = 720, outBase, maxMB = 300, maxSecon
   //   • merging is only attempted when ffmpeg actually runs on this host,
   //   • the result is probed and a file without an audio stream is rejected.
   const sizeFilter = caps.maxFilesize ? ['--max-filesize', `${maxMB}M`] : [];
+  const fragments = caps.concurrentFragments
+    ? ['--concurrent-fragments', String(Math.max(1, Number(config.ytdlp?.fragments) || 4))]
+    : [];
 
   const progressive = [
     `b[ext=mp4][height<=${h}][vcodec!=none][acodec!=none]`,
@@ -1100,13 +1169,15 @@ async function downloadVideo(url, { height = 720, outBase, maxMB = 300, maxSecon
   const argsFor = (selector) => () => [
     '-f', selector,
     ...(ffmpegWorks ? ['--merge-output-format', 'mp4', '--ffmpeg-location', ffmpeg] : []),
-    ...sizeFilter, ...durationFilter,
+    ...sizeFilter, ...durationFilter, ...fragments,
     '-o', `${base}.%(ext)s`, url,
   ];
 
   const startedAt = Date.now();
   const totalDeadline = deadlineMs || Number(config.ytdlp?.deadlineMs) || 10 * 60 * 1000;
-  const first = await runWithProfiles(url, argsFor(ffmpegWorks ? merged : progressive), { onAttempt, onProgress, deadlineMs: totalDeadline });
+  const first = await runWithProfiles(url, argsFor(ffmpegWorks ? merged : progressive), {
+    onAttempt, onProgress, progress: Boolean(onProgress), deadlineMs: totalDeadline,
+  });
   let file = assertProduced(base, first.stdout, 'video');
 
   if (!ffmpegWorks) return { file, profile: first.profile, attempts: first.attempts, hasAudio: null };
@@ -1121,7 +1192,9 @@ async function downloadVideo(url, { height = 720, outBase, maxMB = 300, maxSecon
   console.warn('[ytdlp] downloaded video has no audio track — retrying with a progressive (audio+video) stream');
   try { fs.unlinkSync(file); } catch { /* ignore */ }
   const remaining = Math.max(20000, totalDeadline - (Date.now() - startedAt));
-  const second = await runWithProfiles(url, argsFor(progressive), { onAttempt, onProgress, deadlineMs: remaining });
+  const second = await runWithProfiles(url, argsFor(progressive), {
+    onAttempt, onProgress, progress: Boolean(onProgress), deadlineMs: remaining,
+  });
   file = assertProduced(base, second.stdout, 'video');
   info = await probeMedia(file);
   if (info.probed && !info.hasAudio) {
@@ -1171,9 +1244,9 @@ async function diagnostics() {
 
 module.exports = {
   // helpers
-  isYouTubeUrl, extractVideoId, extractUrl, normalizeYouTubeUrl,
+  isYouTubeUrl, extractVideoId, youtubeId, extractUrl, normalizeYouTubeUrl,
   // engine
-  resolveCommand, version, ensureInstalled, update, run, spawnYtdlp,
+  resolveCommand, version, ensureInstalled, update, scheduleAutoUpdate, run, spawnYtdlp,
   getInfo, probeRaw, searchVideos, downloadAudio, downloadVideo, runWithProfiles, findProduced,
   capabilities, disableImpersonation, setMinimalBaseArgs, usingMinimalBaseArgs,
   // cookies

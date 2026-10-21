@@ -499,6 +499,7 @@ require('./utils/logger').banner([
 
 // Proactively delete Puppeteer cache so it doesn't fill disk on panels
 cleanupPuppeteerCache();
+require('./utils/youtubedl').scheduleAutoUpdate();
 
 startBot().catch(err => {
   console.error('Error starting bot:', err);

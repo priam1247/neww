@@ -10,7 +10,8 @@
  *   5. a full .song download against a *fake* yt-dlp (success, bot-check,
  *      profile escalation, timeout),
  *   6. remote providers (Gifted / cobalt) against a local stub API,
- *   7. that every command module loads.
+ *   7. persistent send caching, media queues and delayed progress cards,
+ *   8. that every command module loads.
  *
  * Everything runs in a throwaway directory; nothing in the repo is modified.
  */
@@ -68,6 +69,7 @@ if (args.includes('--help')) {
   console.log('Usage: yt-dlp [OPTIONS] URL');
   for (const f of ['--js-runtimes','--remote-components','--impersonate','--extractor-retries',
                    '--no-check-formats','--match-filters','--force-ipv4','--no-check-certificates',
+                   '--concurrent-fragments',
                    '--max-filesize','--newline','--progress-template','--progress','--print',
                    '--extract-audio','--audio-format','--cookies','--proxy','--retries','--socket-timeout',
                    '--fragment-retries','--no-playlist','--user-agent','--socket-timeout','--add-header']) {
@@ -153,6 +155,11 @@ process.env.FAKE_YTDLP = 'success';
 const YT = require(path.join(REPO, 'utils/youtubedl.js'));
 const MT = require(path.join(REPO, 'utils/mediaTransfer.js'));
 const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
+const config = require(path.join(REPO, 'config.js'));
+config.media.sendCacheDays = 0;
+const sendCache = require(path.join(REPO, 'utils/sendCache.js'));
+const jobQueue = require(path.join(REPO, 'utils/jobQueue.js'));
+const { createProgress } = require(path.join(REPO, 'utils/progressCard.js'));
 
 (async () => {
   console.log('\n── 1. yt-dlp discovery & capabilities ──');
@@ -319,6 +326,36 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     assert.ok(dl, 'height cap not passed to yt-dlp');
   });
 
+  await test('downloadAudio and downloadVideo use configured concurrent fragments', async () => {
+    const lastArgs = () => JSON.parse(fs.readFileSync(CALLS, 'utf8').trim().split('\n').pop());
+    await YT.downloadAudio('https://www.youtube.com/watch?v=fragments-a', {
+      maxMB: 100, outBase: path.join(sandbox, 'fragments-a'),
+    });
+    let args = lastArgs();
+    let idx = args.indexOf('--concurrent-fragments');
+    assert.ok(idx >= 0, `audio args missing the flag: ${args.join(' ')}`);
+    assert.strictEqual(args[idx + 1], '4');
+
+    await YT.downloadVideo('https://www.youtube.com/watch?v=fragments-v', {
+      height: 480, outBase: path.join(sandbox, 'fragments-v'),
+    });
+    args = lastArgs();
+    idx = args.indexOf('--concurrent-fragments');
+    assert.ok(idx >= 0, `video args missing the flag: ${args.join(' ')}`);
+    assert.strictEqual(args[idx + 1], '4');
+  });
+
+  await test('getInfo coalesces concurrent metadata requests and caches results', async () => {
+    const url = 'https://www.youtube.com/watch?v=metadata-cache-test';
+    const before = fs.readFileSync(CALLS, 'utf8').trim().split('\n').length;
+    const [first, second] = await Promise.all([YT.getInfo(url), YT.getInfo(url)]);
+    await YT.getInfo(url);
+    const afterLines = fs.readFileSync(CALLS, 'utf8').trim().split('\n');
+    const calls = afterLines.slice(before).filter((line) => JSON.parse(line).includes(url));
+    assert.strictEqual(calls.length, 1, 'metadata was fetched more than once');
+    assert.strictEqual(first.title, second.title);
+  });
+
   await test('bot-check is reported as BOT_CHECK, not a region block', async () => {
     process.env.FAKE_YTDLP = 'botcheck';
     let caught = null;
@@ -476,8 +513,10 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
   // A WhatsApp socket that records everything the bot tried to send.
   function mockSock() {
     const sent = [];
+    const relayed = [];
     return {
       sent,
+      relayed,
       user: { id: '1234:5@s.whatsapp.net' },
       async sendMessage(jid, content) {
         if (content && content.react) return { key: { id: 'react' } };
@@ -490,6 +529,9 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
         } catch { /* ignore */ }
         sent.push(content);
         return { key: { id: `msg-${sent.length}`, remoteJid: jid } };
+      },
+      async relayMessage(jid, message, options) {
+        relayed.push({ jid, message, options });
       },
     };
   }
@@ -514,6 +556,133 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
   }
 
   const textOf = (entry) => (entry && (entry.text || entry.caption || '')) || '';
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  console.log('\n── 8. cache, queues and delayed progress ──');
+
+  await test('youtubeId handles supported YouTube URL forms', () => {
+    const id = 'dQw4w9WgXcQ';
+    for (const url of [
+      `https://www.youtube.com/watch?v=${id}`,
+      `https://youtu.be/${id}`,
+      `https://www.youtube.com/shorts/${id}`,
+      `https://music.youtube.com/watch?v=${id}`,
+      `https://www.youtube.com/embed/${id}`,
+    ]) assert.strictEqual(YT.youtubeId(url), id, url);
+  });
+
+  await test('send cache remembers and replays the decoded media message', async () => {
+    config.media.sendCacheDays = 7;
+    sendCache.clear();
+    const key = 'cache:roundtrip';
+    const sentWAMessage = {
+      message: {
+        documentMessage: {
+          url: 'https://example.invalid/media.mp4',
+          mimetype: 'video/mp4',
+          fileName: 'cached.mp4',
+          contextInfo: { stanzaId: 'old-context' },
+        },
+      },
+    };
+    assert.strictEqual(sendCache.remember(key, sentWAMessage), true);
+    const sock = mockSock();
+    assert.strictEqual(await sendCache.replay(sock, 'chat@s.whatsapp.net', mockMsg('quote'), key), true);
+    assert.strictEqual(sock.relayed.length, 1);
+    assert.strictEqual(sock.relayed[0].jid, 'chat@s.whatsapp.net');
+    assert.ok(sock.relayed[0].options.messageId, 'relay message ID is missing');
+    const media = sock.relayed[0].message.documentMessage;
+    assert.strictEqual(media.fileName, 'cached.mp4');
+    assert.strictEqual(media.mimetype, 'video/mp4');
+    assert.notStrictEqual(media.contextInfo?.stanzaId, 'old-context');
+  });
+
+  await test('send cache treats entries older than the configured TTL as misses', async () => {
+    sendCache.clear();
+    sendCache.remember('cache:expired', { message: { documentMessage: { fileName: 'old.mp4' } } });
+    const now = Date.now;
+    Date.now = () => now() + 8 * 24 * 60 * 60 * 1000;
+    try {
+      assert.strictEqual(await sendCache.replay(mockSock(), 'chat@s.whatsapp.net', null, 'cache:expired'), false);
+      assert.strictEqual(sendCache.count(), 0);
+    } finally {
+      Date.now = now;
+    }
+  });
+
+  await test('send cache deletes an entry after relay failure', async () => {
+    sendCache.clear();
+    sendCache.remember('cache:relay-failure', { message: { documentMessage: { fileName: 'bad.mp4' } } });
+    const sock = { user: { id: '1234:5@s.whatsapp.net' }, async relayMessage() { throw new Error('relay failed'); } };
+    assert.strictEqual(await sendCache.replay(sock, 'chat@s.whatsapp.net', null, 'cache:relay-failure'), false);
+    assert.strictEqual(sendCache.count(), 0);
+  });
+
+  await test('send cache evicts the least recently used entries at 500', async () => {
+    config.media.sendCacheDays = 7;
+    sendCache.clear();
+    try {
+      const message = { message: { documentMessage: { fileName: 'cached.mp4' } } };
+      for (let i = 0; i < 501; i++) sendCache.remember(`cache:lru:${i}`, message);
+      assert.strictEqual(sendCache.count(), 500);
+      assert.strictEqual(await sendCache.replay(mockSock(), 'chat@s.whatsapp.net', null, 'cache:lru:0'), false);
+      assert.strictEqual(await sendCache.replay(mockSock(), 'chat@s.whatsapp.net', null, 'cache:lru:500'), true);
+    } finally {
+      sendCache.clear();
+      config.media.sendCacheDays = 0;
+    }
+  });
+
+  await test('job queue serialises heavy work while light work continues', async () => {
+    const oldLimit = config.queue.heavy;
+    config.queue.heavy = 1;
+    try {
+      const events = [];
+      let releaseFirst;
+      let startFirst;
+      const firstStarted = new Promise((resolve) => { startFirst = resolve; });
+      const first = jobQueue.runInLane('heavy', async () => {
+        startFirst();
+        await new Promise((resolve) => { releaseFirst = resolve; });
+        events.push('heavy-1');
+      });
+      await firstStarted;
+      const second = jobQueue.runInLane('heavy', async () => { events.push('heavy-2'); });
+      const light = jobQueue.runInLane('light', async () => { events.push('light'); });
+      await light;
+      assert.strictEqual(jobQueue.stats().heavy.waiting, 1);
+      assert.ok(events.includes('light'), 'light lane waited behind heavy work');
+      releaseFirst();
+      await Promise.all([first, second]);
+      assert.deepStrictEqual(events.slice(-2), ['heavy-1', 'heavy-2']);
+    } finally {
+      config.queue.heavy = oldLimit;
+    }
+  });
+
+  await test('progress card stays hidden for quick work and throttles edits', async () => {
+    const quickEvents = [];
+    const quickSock = { async sendMessage(_jid, message) { quickEvents.push(message); return { key: { id: 'quick' } }; } };
+    const quick = createProgress(quickSock, 'chat', null, { label: 'Downloading', delayMs: 25, intervalMs: 10 });
+    await wait(5);
+    await quick.done();
+    assert.strictEqual(quickEvents.length, 0);
+
+    const events = [];
+    const sock = { async sendMessage(_jid, message) { events.push(message); return { key: { id: 'card' } }; } };
+    const progress = createProgress(sock, 'chat', null, { label: 'Downloading', delayMs: 5, intervalMs: 30 });
+    progress.update({ pct: 10, speed: 1024 * 1024 });
+    await wait(20);
+    progress.update({ pct: 20 });
+    await wait(40);
+    progress.update({ pct: 30, stage: 'uploading' });
+    progress.update({ pct: 40 });
+    await progress.done();
+    const edits = events.filter((event) => event.edit);
+    assert.strictEqual(edits.length, 1, 'updates were not throttled');
+    assert.ok(edits[0].text.includes('Uploading'));
+    assert.ok(events.some((event) => event.delete), 'card was not deleted on completion');
+  });
 
   await test('.song sends the downloaded track (document mode)', async () => {
     const audioPath = path.join(sandbox, 'unit.mp3');
@@ -535,6 +704,32 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     assert.ok(tags, 'mp3 has no ID3 tags');
     assert.strictEqual(tags.title, 'Test Song');
     assert.strictEqual(tags.artist, 'Test Artist');
+  });
+
+  await test('.song cache hit relays without calling downloadAudio', async () => {
+    const oldDays = config.media.sendCacheDays;
+    config.media.sendCacheDays = 7;
+    sendCache.clear();
+    const url = 'https://youtu.be/dQw4w9WgXcQ';
+    const key = `song:${YT.youtubeId(url)}:document`;
+    sendCache.remember(key, {
+      message: {
+        documentMessage: { fileName: 'Cached Artist - Cached Song.mp3', mimetype: 'audio/mpeg' },
+      },
+    });
+    let downloaded = false;
+    YT.downloadAudio = async () => { downloaded = true; throw new Error('must not download'); };
+    const sock = mockSock();
+    try {
+      await songCmd.execute(sock, mockMsg(`.song ${url}`), [url], makeExtra(sock));
+      assert.strictEqual(downloaded, false);
+      assert.strictEqual(sock.relayed.length, 1);
+      assert.strictEqual(sock.relayed[0].message.documentMessage.fileName, 'Cached Artist - Cached Song.mp3');
+    } finally {
+      config.media.sendCacheDays = oldDays;
+      sendCache.clear();
+      YT.downloadAudio = realDownloadAudio;
+    }
   });
 
   await test('.song falls back to a remote provider when the local engine is bot-checked', async () => {
@@ -660,6 +855,29 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     const sock = mockSock();
     await dlCmd.execute(sock, mockMsg('.dl'), [], makeExtra(sock));
     assert.ok(/Usage/.test(sock.sent.map(textOf).join(' ')), 'no usage message');
+  });
+
+  await test('.dl recognises image mode for the light queue', () => {
+    const { parseOptions } = require(path.join(REPO, 'utils/mediaPipeline.js'));
+    const parsed = parseOptions(['https://example.invalid/photo', 'image']);
+    assert.strictEqual(parsed.kind, 'image');
+    assert.deepStrictEqual(parsed.rest, ['https://example.invalid/photo']);
+  });
+
+  await test('.health reports runtime media status through a fake socket', async () => {
+    const health = require(path.join(REPO, 'commands/admin/health.js'));
+    assert.strictEqual(health.ownerOnly, true);
+    const sock = mockSock();
+    await health.execute(sock, mockMsg('.health'), [], makeExtra(sock));
+    const report = sock.sent.map(textOf).join('\n');
+    assert.ok(/yt-dlp:/.test(report), report);
+    assert.ok(/ffmpeg:/.test(report), report);
+    assert.ok(/Temp free disk:/.test(report), report);
+    assert.ok(/Memory: RSS/.test(report), report);
+    assert.ok(/Jobs:/.test(report), report);
+    assert.ok(/Send cache:/.test(report), report);
+    assert.ok(/Last yt-dlp failure:/.test(report), report);
+    assert.ok(/Movie providers:/.test(report), report);
   });
 
   console.log('\n── 9. numbered search results (reply with a number) ──');
@@ -1338,7 +1556,9 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     await new Promise(r => server.listen(0, '127.0.0.1', r));
     process.env.MOVIEBOX_BFF = `http://127.0.0.1:${server.address().port}/wefeed-h5api-bff`;
     try {
-      const { default: mb } = await import(pathToFileURL(path.join(REPO, 'engine/providers/stream/moviebox.js')).href);
+      const movieboxUrl = pathToFileURL(path.join(REPO, 'engine/providers/stream/moviebox.js'));
+      movieboxUrl.searchParams.set('selftest', String(Date.now()));
+      const { default: mb } = await import(movieboxUrl.href);
       const cands = await mb.search(
         { title: 'Avengers Infinity War', year: '2018', type: 'movie' },
         { want: 1080, season: null, episode: null },
