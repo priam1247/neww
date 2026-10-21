@@ -27,7 +27,7 @@ const providers = require('../../utils/downloadProviders');
 const youtubeSearch = require('../../utils/youtubeSearch');
 const selections = require('../../utils/selections');
 const {
-  downloadToFile, ensureWhatsAppMp4, safeName, fmtMB,
+  downloadToFile, ensureWhatsAppMp4, probeMedia, safeName, fmtMB,
 } = require('../../utils/mediaTransfer');
 const { getTempDir, deleteTempFile } = require('../../utils/tempManager');
 const log = require('../../utils/logger')('ytv');
@@ -93,7 +93,8 @@ const execute = async (sock, msg, args, extra) => {
       return say('❌ No results found for that search.');
     }
 
-    const pickerOn = config.search?.picker !== false && settings.get('searchPicker', true) !== false;
+    // Same rule as .song: the runtime setting wins, config is the default.
+    const pickerOn = settings.get('searchPicker', config.search?.picker === true) !== false;
     if (results.length > 1 && pickerOn && !firstHit) {
       const listText = youtubeSearch.formatResults(results, {
         header: `🔎 *Results for "${query}"*`,
@@ -190,7 +191,7 @@ const execute = async (sock, msg, args, extra) => {
     if (!file) {
       const info = ytErr ? YT.classify(ytErr) : { code: 'UNKNOWN' };
       const remoteWorthTrying = ['BOT_CHECK', 'NO_YTDLP', 'NO_FORMATS', 'FFMPEG_MISSING', 'UNKNOWN',
-        'NETWORK', 'RATE_LIMIT', 'PO_TOKEN', 'AGE_RESTRICTED', 'GEO_BLOCK', 'BAD_ARGS', 'TOO_BIG'];
+        'NETWORK', 'RATE_LIMIT', 'PO_TOKEN', 'AGE_RESTRICTED', 'GEO_BLOCK', 'BAD_ARGS', 'TOO_BIG', 'NO_AUDIO'];
       const remoteAllowed = settings.get('remoteFallback', true) !== false;
 
       if (ytErr && (!remoteAllowed || !remoteWorthTrying.includes(info.code))) throw ytErr;
@@ -220,6 +221,12 @@ const execute = async (sock, msg, args, extra) => {
       file = dest;
       title = title || remoteHit.title;
       log.info(`via ${via} · ${got.sniff.kind}/${got.sniff.ext}`);
+      // A backup source can hand out a video-only stream too — never send a mute file.
+      const remoteInfo = await probeMedia(dest);
+      if (remoteInfo.probed && !remoteInfo.hasAudio) {
+        if (ytErr) throw ytErr;
+        throw Object.assign(new Error('the downloaded video has no audio track'), { code: 'NO_AUDIO' });
+      }
     }
 
     if (!file || !fs.existsSync(file) || fs.statSync(file).size < 10 * 1024) {

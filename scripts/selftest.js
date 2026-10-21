@@ -1353,6 +1353,63 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     }
   });
 
+  // ─── silent-video regressions (real ffmpeg; skipped when unavailable) ───────
+  console.log('\n▶ silent video guards');
+  {
+    const MT = require(path.join(REPO, 'utils', 'mediaTransfer'));
+    const YT = require(path.join(REPO, 'utils', 'youtubedl'));
+    const getFfmpeg = require(path.join(REPO, 'utils', 'ffmpeg'));
+    const { execFileSync } = require('child_process');
+
+    await test('findProduced ignores per-format DASH parts (base.f137.mp4)', async () => {
+      const dir = fs.mkdtempSync(path.join(sandbox, 'fp-'));
+      const base = path.join(dir, 'ytv_1');
+      fs.writeFileSync(`${base}.f137.mp4`, 'v');
+      fs.writeFileSync(`${base}.f251.webm`, 'a');
+      assert.strictEqual(YT.findProduced(base), null, 'a video-only part was taken as the result');
+      fs.writeFileSync(`${base}.mp4`, 'merged');
+      assert.strictEqual(YT.findProduced(base), `${base}.mp4`);
+    });
+
+    await test('sniff: mp4 with moov at the end is not mistaken for audio', async () => {
+      const head = Buffer.concat([Buffer.from([0, 0, 0, 0x20]), Buffer.from('ftypisom'), Buffer.alloc(4000, 0)]);
+      assert.strictEqual(MT.sniff(head).kind, 'video');
+      const m4a = Buffer.concat([Buffer.from([0, 0, 0, 0x20]), Buffer.from('ftypM4A '), Buffer.alloc(4000, 0)]);
+      assert.strictEqual(MT.sniff(m4a).kind, 'audio');
+    });
+
+    const ffOk = getFfmpeg.works() && (() => {
+      try { execFileSync(getFfmpeg(), ['-hide_banner', '-encoders'], { stdio: 'pipe' }).toString().match(/libx264/) || (() => { throw 0; })(); return true; }
+      catch { return false; }
+    })();
+    if (!ffOk) {
+      console.log('  ⏭  ffmpeg/libx264 not available — skipping probe/transcode checks');
+    } else {
+      const dir = fs.mkdtempSync(path.join(sandbox, 'ff-'));
+      const ff = (args) => execFileSync(getFfmpeg(), ['-y', '-hide_banner', '-loglevel', 'error', ...args], { stdio: 'pipe' });
+      const silent = path.join(dir, 'silent.mp4');
+      const opus = path.join(dir, 'opus.mp4');
+      ff(['-f', 'lavfi', '-i', 'testsrc=size=160x120:rate=10', '-t', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', silent]);
+      ff(['-f', 'lavfi', '-i', 'testsrc=size=160x120:rate=10', '-f', 'lavfi', '-i', 'sine=frequency=440',
+        '-t', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'libopus', '-shortest', opus]);
+
+      await test('probeMedia tells a mute video from one with sound', async () => {
+        const a = await MT.probeMedia(silent);
+        assert.ok(a.probed && a.hasVideo && !a.hasAudio, JSON.stringify(a));
+        const b = await MT.probeMedia(opus);
+        assert.ok(b.probed && b.hasVideo && b.hasAudio && b.audioCodec === 'opus', JSON.stringify(b));
+      });
+
+      await test('ensureWhatsAppMp4 re-encodes Opus audio to AAC (WhatsApp plays Opus-in-mp4 mute)', async () => {
+        const out = await MT.ensureWhatsAppMp4(opus, path.join(dir, 'opus_wa.mp4'));
+        const info = await MT.probeMedia(out);
+        assert.ok(out !== opus, 'file was passed through untouched');
+        assert.strictEqual(info.audioCodec, 'aac', JSON.stringify(info));
+        assert.strictEqual(info.videoCodec, 'h264', 'video should have been stream-copied');
+      });
+    }
+  }
+
   // ─── summary ────────────────────────────────────────────────────────────────
   console.log(`\n${'─'.repeat(52)}`);
   if (failures.length) {

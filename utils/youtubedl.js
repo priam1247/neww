@@ -32,6 +32,7 @@ const config = require('../config');
 const settings = require('./mediaSettings');
 const getFfmpeg = require('./ffmpeg');
 const { getTempDir } = require('./tempManager');
+const { probeMedia } = require('./mediaTransfer');
 
 const execFileAsync = promisify(execFile);
 
@@ -668,6 +669,7 @@ const RULES = [
   { code: 'IMPERSONATE',    re: /impersonat\w+ (?:target|request)|curl_cffi|impersonate.*not (?:available|supported)/i },
   { code: 'UNSUPPORTED_URL', re: /unsupported url|no suitable extractor|unknown extractor|is not a valid url|no video formats found for this url/i },
   { code: 'NO_FORMATS',     re: /requested format (?:is )?not available|no video formats found|only images are available|no video formats|unable to extract (?:any )?(?:video|data)|no formats? found for|some formats may be missing/i },
+  { code: 'NO_AUDIO',       re: /has no audio track|video without sound/i },
   { code: 'NETWORK',        re: /unable to download (?:webpage|api page|video data|json)|timed out|timeout|temporary failure|connection (?:refused|reset|aborted)|getaddrinfo|ssl|certificate|EOF occurred|HTTP Error 5\d\d|network is unreachable|remote end closed|tls\/ssl connection has been closed/i },
   { code: 'NO_YTDLP',       re: /yt-dlp is not installed|ENOENT|not recognized as an internal or external command/i },
 ];
@@ -731,6 +733,7 @@ const HINTS = {
   FFMPEG_MISSING: '❌ *ffmpeg* is missing on this host, so the audio/video cannot be converted.\nFix: `apt install ffmpeg` (Termux: `pkg install ffmpeg`), or run `npm install` so ffmpeg-static is present.',
   UNSUPPORTED_URL: '❌ That link is not a media page the downloader understands (or the site is not supported).\nSupported: YouTube, TikTok, Instagram, Facebook, X/Twitter, Reddit, SoundCloud and ~1000 more — paste the link to the *post/video*, not to a profile or a search page.',
   NO_FORMATS: '❌ YouTube returned no downloadable stream for that video. Try a different quality (e.g. 360p) or another video.',
+  NO_AUDIO: '❌ YouTube only gave this server a video stream *without sound*. Try another quality (e.g. `.ytv <link> 360`) or add cookies with `.cookies set`.',
   IMPERSONATE: '❌ This yt-dlp build cannot impersonate a browser on this host.',
   BAD_ARGS: '❌ The yt-dlp build on this host does not support one of the options the bot used.\nFix: `.ytdl update` (or `.ytdl repair`) to install a current build.',
   RATE_LIMIT: '❌ YouTube is rate-limiting this server (HTTP 429). Wait a few minutes and try again.',
@@ -870,7 +873,14 @@ async function searchVideos(query, { limit = 5, timeout = 60000 } = {}) {
     });
 }
 
-/** Find the file yt-dlp produced for `outBase` (it picks the extension). */
+/**
+ * Find the file yt-dlp produced for `outBase` (it picks the extension).
+ * Per-format parts (`base.f137.mp4`, `base.f251.webm`) are NOT results: they
+ * are what is left behind when a merge did not happen, and the video part of
+ * a DASH pair has no sound.
+ */
+const PART_RE = /\.f[0-9A-Za-z_-]+\.[a-z0-9]+$|\.(part|ytdl|temp|tmp)$|\.part-Frag\d+/i;
+
 function findProduced(outBase) {
   const dir = path.dirname(outBase);
   const base = path.basename(outBase);
@@ -879,9 +889,34 @@ function findProduced(outBase) {
   let names = [];
   try { names = fs.readdirSync(dir); } catch { return null; }
 
-  const hit = names.find(f => f.startsWith(base) && exts.includes(path.extname(f).toLowerCase()))
-    || names.find(f => f.startsWith(base) && !f.endsWith('.part') && !f.endsWith('.ytdl'));
+  // exactly "<base>.<ext>" — anything longer belongs to another step
+  const own = names.filter(f => f.startsWith(`${base}.`) && f.slice(base.length + 1).indexOf('.') === -1 && !PART_RE.test(f));
+  const hit = own.find(f => exts.includes(path.extname(f).toLowerCase())) || own[0];
   return hit ? path.join(dir, hit) : null;
+}
+
+/** Leftover per-format parts for `outBase` (a merge that never happened). */
+function leftoverParts(outBase) {
+  const dir = path.dirname(outBase);
+  const base = path.basename(outBase);
+  try { return fs.readdirSync(dir).filter(f => f.startsWith(`${base}.`) && PART_RE.test(f)).map(f => path.join(dir, f)); }
+  catch { return []; }
+}
+
+/**
+ * yt-dlp exits 0 when --max-filesize aborts a download ("File is larger than
+ * max-filesize … Aborting."), leaving no file — or only the video half of a
+ * DASH pair. Turn that into a proper TOO_BIG error.
+ */
+function assertProduced(outBase, stdout, what) {
+  const file = findProduced(outBase);
+  const tooBig = /larger than max-filesize/i.test(String(stdout || ''));
+  if (file && !tooBig) return file;
+  for (const f of [file, ...leftoverParts(outBase)].filter(Boolean)) {
+    try { fs.unlinkSync(f); } catch { /* ignore */ }
+  }
+  if (tooBig) throw Object.assign(new Error('File is larger than max-filesize'), { code: 'TOO_BIG' });
+  throw Object.assign(new Error(`yt-dlp produced no ${what} file`), { code: 'NO_FORMATS' });
 }
 
 let _autoUpdated = false;
@@ -918,11 +953,11 @@ async function runWithProfiles(url, buildArgs, {
 
     try {
       const args = [...baseArgs({ progress }), ...profile.args, ...buildArgs(profile)];
-      await spawnYtdlp(args, {
+      const { stdout } = await spawnYtdlp(args, {
         timeout: Math.min(timeout, remaining),
         onProgress: onProgress ? (p) => { try { onProgress(p, profile.name); } catch { /* ignore */ } } : undefined,
       });
-      return { profile: profile.name, attempts };
+      return { profile: profile.name, attempts, stdout };
     } catch (err) {
       const info = classify(err);
       lastErr = err;
@@ -1000,9 +1035,8 @@ async function downloadAudio(url, { outBase, maxMB = 200, maxSeconds = 0, onAtte
   ];
 
   try {
-    const { profile, attempts } = await runWithProfiles(url, rawArgs, { onAttempt, onProgress, deadlineMs });
-    const file = findProduced(base);
-    if (!file) throw Object.assign(new Error('yt-dlp produced no audio file'), { code: 'NO_FORMATS' });
+    const { profile, attempts, stdout } = await runWithProfiles(url, rawArgs, { onAttempt, onProgress, deadlineMs });
+    const file = assertProduced(base, stdout, 'audio');
     return { file, ext: path.extname(file).slice(1).toLowerCase(), profile, attempts, transcoded: false };
   } catch (err) {
     const info = classify(err);
@@ -1018,9 +1052,8 @@ async function downloadAudio(url, { outBase, maxMB = 200, maxSeconds = 0, onAtte
       ...sizeLimit,
       '-o', `${base}.%(ext)s`, url,
     ];
-    const { profile, attempts } = await runWithProfiles(url, convertArgs, { onAttempt, onProgress, deadlineMs });
-    const file = findProduced(base);
-    if (!file) throw Object.assign(new Error('yt-dlp produced no audio file'), { code: 'NO_FORMATS' });
+    const { profile, attempts, stdout } = await runWithProfiles(url, convertArgs, { onAttempt, onProgress, deadlineMs });
+    const file = assertProduced(base, stdout, 'audio');
     return { file, ext: path.extname(file).slice(1).toLowerCase(), profile, attempts, transcoded: true };
   }
 }
@@ -1041,10 +1074,12 @@ async function downloadVideo(url, { height = 720, outBase, maxMB = 300, maxSecon
     ? [caps.matchFilter, `duration <?${Math.floor(maxSeconds)}`]
     : [];
 
-  // A video-only stream is worse than useless when ffmpeg is missing: the file
-  // arrives without sound. Two hard rules below:
-  //   • every selector requires an audio track (vcodec!=none AND acodec!=none)
-  //   • merging is only attempted when ffmpeg actually runs on this host
+  // Silent-video rules:
+  //   • every progressive selector requires an audio track (acodec!=none),
+  //   • DASH pairs prefer AAC (mp4a) audio — Opus copied into an mp4 plays
+  //     with NO SOUND in WhatsApp,
+  //   • merging is only attempted when ffmpeg actually runs on this host,
+  //   • the result is probed and a file without an audio stream is rejected.
   const sizeFilter = caps.maxFilesize ? ['--max-filesize', `${maxMB}M`] : [];
 
   const progressive = [
@@ -1054,30 +1089,46 @@ async function downloadVideo(url, { height = 720, outBase, maxMB = 300, maxSecon
   ].join('/');
 
   const merged = [
-    `bv*[vcodec^=avc1][height<=${h}]+ba[ext=m4a]/bv*[height<=${h}]+ba`,
+    `bv*[vcodec^=avc1][height<=${h}]+ba[acodec^=mp4a]`,
+    `bv*[height<=${h}]+ba[acodec^=mp4a]`,
+    `bv*[vcodec^=avc1][height<=${h}]+ba`,
+    `bv*[height<=${h}]+ba`,
     `b[ext=mp4][height<=${h}][vcodec!=none][acodec!=none]`,
     `b[height<=${h}][vcodec!=none][acodec!=none]`,
   ].join('/');
 
-  const buildArgs = () => (ffmpegWorks
-    ? [
-      '-f', merged,
-      '--merge-output-format', 'mp4',
-      '--ffmpeg-location', ffmpeg,
-      ...sizeFilter, ...durationFilter,
-      '-o', `${base}.%(ext)s`, url,
-    ]
-    : [
-      // No ffmpeg → only progressive (video+audio in one stream).
-      '-f', progressive,
-      ...sizeFilter, ...durationFilter,
-      '-o', `${base}.%(ext)s`, url,
-    ]);
+  const argsFor = (selector) => () => [
+    '-f', selector,
+    ...(ffmpegWorks ? ['--merge-output-format', 'mp4', '--ffmpeg-location', ffmpeg] : []),
+    ...sizeFilter, ...durationFilter,
+    '-o', `${base}.%(ext)s`, url,
+  ];
 
-  const { profile, attempts } = await runWithProfiles(url, buildArgs, { onAttempt, onProgress, deadlineMs });
-  const file = findProduced(base);
-  if (!file) throw Object.assign(new Error('yt-dlp produced no video file (size or duration limit)'), { code: 'NO_FORMATS' });
-  return { file, profile, attempts, hasAudio: true };
+  const startedAt = Date.now();
+  const totalDeadline = deadlineMs || Number(config.ytdlp?.deadlineMs) || 10 * 60 * 1000;
+  const first = await runWithProfiles(url, argsFor(ffmpegWorks ? merged : progressive), { onAttempt, onProgress, deadlineMs: totalDeadline });
+  let file = assertProduced(base, first.stdout, 'video');
+
+  if (!ffmpegWorks) return { file, profile: first.profile, attempts: first.attempts, hasAudio: null };
+
+  let info = await probeMedia(file);
+  if (!info.probed || info.hasAudio) {
+    return { file, profile: first.profile, attempts: first.attempts, hasAudio: info.probed ? true : null };
+  }
+
+  // The merge produced a video with no sound: drop it and ask for a stream
+  // that carries its own audio (format 18 / 22 style progressive files).
+  console.warn('[ytdlp] downloaded video has no audio track — retrying with a progressive (audio+video) stream');
+  try { fs.unlinkSync(file); } catch { /* ignore */ }
+  const remaining = Math.max(20000, totalDeadline - (Date.now() - startedAt));
+  const second = await runWithProfiles(url, argsFor(progressive), { onAttempt, onProgress, deadlineMs: remaining });
+  file = assertProduced(base, second.stdout, 'video');
+  info = await probeMedia(file);
+  if (info.probed && !info.hasAudio) {
+    try { fs.unlinkSync(file); } catch { /* ignore */ }
+    throw Object.assign(new Error('the downloaded video has no audio track'), { code: 'NO_AUDIO' });
+  }
+  return { file, profile: second.profile, attempts: [...first.attempts, ...second.attempts], hasAudio: info.probed ? true : null };
 }
 
 // ─── DIAGNOSTICS (.ytdl) ──────────────────────────────────────────────────────
@@ -1123,7 +1174,7 @@ module.exports = {
   isYouTubeUrl, extractVideoId, extractUrl, normalizeYouTubeUrl,
   // engine
   resolveCommand, version, ensureInstalled, update, run, spawnYtdlp,
-  getInfo, probeRaw, searchVideos, downloadAudio, downloadVideo, runWithProfiles,
+  getInfo, probeRaw, searchVideos, downloadAudio, downloadVideo, runWithProfiles, findProduced,
   capabilities, disableImpersonation, setMinimalBaseArgs, usingMinimalBaseArgs,
   // cookies
   setCookies, clearCookies, cookieInfo, cookieFile, hasCookies, normaliseCookieText,

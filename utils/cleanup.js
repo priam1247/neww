@@ -15,7 +15,8 @@ const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 // legitimately stay on disk while a big video is merging/uploading.
 const FILE_AGE_THRESHOLD_MS = 30 * 60 * 1000;
 const MEDIA_AGE_THRESHOLD_MS = 2 * 60 * 60 * 1000;
-const MEDIA_PREFIX = /^(ytv_|song_|fb_|paper_|tg_|conv_|audio_|video_)/;
+// dl_/aud_ are .dl/.tiktok/.x/.spotify jobs (utils/mediaPipeline.js).
+const MEDIA_PREFIX = /^(ytv_|song_|fb_|paper_|tg_|conv_|audio_|video_|dl_|aud_|mp3_)/;
 
 const thresholdFor = (name) => (MEDIA_PREFIX.test(name) ? MEDIA_AGE_THRESHOLD_MS : FILE_AGE_THRESHOLD_MS);
 

@@ -6,6 +6,7 @@ const config = require('./config');
 const database = require('./database');
 const selections = require('./utils/selections');
 const { loadCommands } = require('./utils/commandLoader');
+const { jidNormalizedUser } = require('@whiskeysockets/baileys');
 const { jidVariants } = require('./utils/jid');
 const { readWL, findUserIndex } = require('./utils/accessControl');
 
@@ -150,7 +151,9 @@ const handleMessage = async (sock, msg) => {
     const protocolMessages = ['protocolMessage', 'senderKeyDistributionMessage', 'messageContextInfo'];
     if (Object.keys(content).filter(k => !protocolMessages.includes(k)).length === 0) return;
 
-    const sender = msg.key.fromMe ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : msg.key.participant || msg.key.remoteJid;
+    // jidNormalizedUser strips the device suffix ("123:4@s.whatsapp.net") and
+    // never doubles the server part when the id has no device suffix.
+    const sender = msg.key.fromMe ? jidNormalizedUser(sock.user.id) : msg.key.participant || msg.key.remoteJid;
     // Every JID form WhatsApp gave us for this sender (LID and phone number)
     const senderIds = [sender, msg.key.participantAlt, msg.key.remoteJidAlt].filter(Boolean);
 

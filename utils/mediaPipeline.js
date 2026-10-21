@@ -86,6 +86,7 @@ async function downloadAndSend(sock, msg, extra, {
         const info = await YT.getInfo(url, { timeout: 45000 });
         title = info.title; author = author || info.uploader;
         if (kind === 'video' && info.duration && info.duration > MAX_MINUTES * 60) {
+          await react('❌');
           return say(`❌ That is ${Math.round(info.duration / 60)} min long — the limit is ${MAX_MINUTES} min.`);
         }
       } catch (e) {
