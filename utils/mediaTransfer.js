@@ -170,6 +170,111 @@ async function audioToMp3(input, output = path.join(getTempDir(), `mp3_${Date.no
 }
 
 /**
+ * Write ID3v2.3 tags (title/artist/album) into an MP3.
+ *
+ * A WhatsApp *document* is only as informative as its file: the chat shows the
+ * filename, and every player reads ID3. Tagging the mp3 makes "Artist - Title"
+ * survive the trip into the user's music app.
+ *
+ * @returns {Promise<string|null>} tagged copy, or null when nothing was done
+ */
+async function tagMp3(input, output, { title = '', artist = '', album = '' } = {}) {
+  try {
+    if (!input || !fs.existsSync(input)) return null;
+    if (!title && !artist) return null;
+
+    // A UTF-16LE string with BOM is what ID3v2.3 specifies for encoding 0x01.
+    const frame = (id, value) => {
+      const text = String(value || '').trim();
+      if (!text) return null;
+      const body = Buffer.concat([Buffer.from([0x01]), Buffer.from(`\uFEFF${text}`, 'utf16le')]);
+      const head = Buffer.alloc(10);
+      head.write(id, 0, 4, 'ascii');
+      head.writeUInt32BE(body.length, 4);
+      return Buffer.concat([head, body]);
+    };
+
+    const frames = [
+      frame('TIT2', title),
+      frame('TPE1', artist),
+      frame('TALB', album),
+    ].filter(Boolean);
+    if (!frames.length) return null;
+    const body = Buffer.concat(frames);
+
+    // synchsafe 28-bit size
+    const size = body.length;
+    const header = Buffer.from([
+      0x49, 0x44, 0x33, 0x03, 0x00, 0x00,          // "ID3" v2.3.0, no flags
+      (size >> 21) & 0x7f, (size >> 14) & 0x7f, (size >> 7) & 0x7f, size & 0x7f,
+    ]);
+
+    // drop any existing ID3v2 block so the file cannot end up with two
+    let offset = 0;
+    const head = headOf(input, 10);
+    if (head.length === 10 && head.toString('ascii', 0, 3) === 'ID3') {
+      const declared = ((head[6] & 0x7f) << 21) | ((head[7] & 0x7f) << 14) | ((head[8] & 0x7f) << 7) | (head[9] & 0x7f);
+      const fileSize = fs.statSync(input).size;
+      // a header that points past the end of the file is junk: keep the audio
+      // instead of skipping it
+      offset = 10 + declared < fileSize ? 10 + declared : 0;
+    }
+
+    // tag first, then the audio — one pass, no temp hop
+    await new Promise((resolve, reject) => {
+      const out = fs.createWriteStream(output);
+      out.on('error', reject);
+      out.write(Buffer.concat([header, body]));
+      pipeline(fs.createReadStream(input, { start: offset }), out).then(resolve, reject);
+    });
+
+    return fs.statSync(output).size > 128 ? output : null;
+  } catch (e) {
+    console.warn('[media] id3 tagging failed:', e.message);
+    return null;
+  }
+}
+
+/** Read ID3v2 title/artist back out of a file (verification + tests). */
+function readId3(fileOrBuffer) {
+  let buf = null;
+  try {
+    buf = Buffer.isBuffer(fileOrBuffer) ? fileOrBuffer : fs.readFileSync(fileOrBuffer);
+  } catch { return null; }
+  if (buf.length < 10 || buf.toString('ascii', 0, 3) !== 'ID3') return null;
+
+  const version = buf[3];
+  const size = ((buf[6] & 0x7f) << 21) | ((buf[7] & 0x7f) << 14) | ((buf[8] & 0x7f) << 7) | (buf[9] & 0x7f);
+  const end = Math.min(buf.length, 10 + size);
+  const out = { title: '', artist: '', album: '' };
+  const idSize = version >= 4 ? 4 : 4;
+
+  let p = 10;
+  while (p + 10 <= end) {
+    const id = buf.toString('ascii', p, p + 4);
+    if (!/^[A-Z0-9]{4}$/.test(id)) break;
+    const len = version >= 4
+      ? ((buf[p + 4] & 0x7f) << 21) | ((buf[p + 5] & 0x7f) << 14) | ((buf[p + 6] & 0x7f) << 7) | (buf[p + 7] & 0x7f)
+      : buf.readUInt32BE(p + 4);
+    const body = buf.slice(p + 10, p + 10 + len);
+    if (body.length) {
+      const enc = body[0];
+      const raw = body.slice(1);
+      let text = '';
+      if (enc === 1) text = raw.toString('utf16le').replace(/^\uFEFF/, '');
+      else if (enc === 2) text = raw.swap16 ? raw.toString('utf16be') : '';
+      else text = raw.toString('utf8').replace(/\u0000+$/, '');
+      text = String(text).replace(/\u0000+$/g, '').trim();
+      if (id === 'TIT2') out.title = text;
+      else if (id === 'TPE1') out.artist = text;
+      else if (id === 'TALB') out.album = text;
+    }
+    p += 10 + len;
+  }
+  return out.title || out.artist ? out : null;
+}
+
+/**
  * Make a video file playable in WhatsApp (H.264 + AAC inside mp4).
  * Remuxes when already compatible; transcodes AV1/VP9/HEVC when not.
  * @returns {Promise<string>} path to a playable file (input when nothing to do)
@@ -219,4 +324,4 @@ const safeName = (s, fallback = 'media') => {
   return clean || fallback;
 };
 
-module.exports = { downloadToFile, sniff, sniffFile, headOf, audioToMp3, ensureWhatsAppMp4, safeName, fmtMB, UA };
+module.exports = { downloadToFile, sniff, sniffFile, headOf, audioToMp3, tagMp3, readId3, ensureWhatsAppMp4, safeName, fmtMB, UA };

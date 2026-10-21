@@ -29,7 +29,7 @@ const providers = require('../../utils/downloadProviders');
 const youtubeSearch = require('../../utils/youtubeSearch');
 const selections = require('../../utils/selections');
 const {
-  downloadToFile, sniffFile, audioToMp3, safeName, fmtMB,
+  downloadToFile, sniffFile, audioToMp3, tagMp3, safeName, fmtMB,
 } = require('../../utils/mediaTransfer');
 const log = require('../../utils/logger')('song');
 const { getTempDir, deleteTempFile } = require('../../utils/tempManager');
@@ -39,6 +39,29 @@ const MAX_AUDIO_SECONDS = Number(config.song?.maxMinutes ? config.song.maxMinute
 const ENGINE_TIMEOUT = 8 * 60 * 1000;
 
 const stamp = () => `song_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+// YouTube titles are messy: "Alan Walker - Faded (Official Music Video)".
+// Clean them so the document is named like a real music file.
+const JUNK = /\s*[([][^)\]]*(official|video|audio|lyric|hd|4k|mv|visuali[sz]er|remaster|explicit)[^)\]]*[)\]]/gi;
+const clean = (s) => String(s || '').replace(JUNK, '').replace(/\s{2,}/g, ' ').trim();
+
+function splitArtist(title, uploader) {
+  let t = clean(title);
+  let a = clean(uploader)
+    .replace(/\s*-\s*topic$/i, '')
+    .replace(/\s*vevo$/i, '')
+    .replace(/^topic$/i, '')
+    .trim();
+
+  // "Artist - Song" is the YouTube convention; prefer it over the channel name
+  const m = t.match(/^(.{2,60}?)\s+[-–—]\s+(.{2,})$/);
+  if (m && !/^\d+$/.test(m[1])) {
+    a = clean(m[1]) || a;
+    t = clean(m[2]) || t;
+  }
+  if (a && t.toLowerCase() === a.toLowerCase()) t = clean(title) || t;
+  return { title: t || clean(title) || 'song', artist: a };
+}
 
 const execute = async (sock, msg, args, extra) => {
     const chatId = extra?.from || msg.key.remoteJid;
@@ -225,15 +248,29 @@ const execute = async (sock, msg, args, extra) => {
         }
       }
 
+      const named = splitArtist(title, artist || '');
+      const finalTitle = safeName(named.title, 'song');
+      const finalArtist = safeName(named.artist, '');
+
+      // ID3 tags: a WhatsApp document is shown by filename, but the file the
+      // user keeps is read by a player — title/artist must be inside it.
+      if (finalExt === 'mp3') {
+        const tagged = await tagMp3(finalFile, `${outBase}_tagged.mp3`, {
+          title: finalTitle, artist: finalArtist,
+        });
+        if (tagged) {
+          files.push(tagged);
+          finalFile = tagged;
+        }
+      }
+
       const size = fs.statSync(finalFile).size;
       if (size > MAX_AUDIO_MB * 1024 * 1024) {
         throw Object.assign(new Error('audio file too large'), { code: 'TOO_BIG' });
       }
 
       // ── 6. Send (streamed from disk, not read into RAM) ───────────────────
-      const finalTitle = safeName(title, 'song');
-      const finalArtist = safeName(artist, '');
-      const fileName = `${finalArtist ? `${finalTitle} - ${finalArtist}` : finalTitle}.${finalExt}`;
+      const fileName = `${finalArtist ? `${finalArtist} - ${finalTitle}` : finalTitle}.${finalExt}`;
       const caption = (finalArtist ? `🎵 *${finalTitle}*\n👤 ${finalArtist}` : `🎵 *${finalTitle}*`)
         + `\n📦 ${fmtMB(size)}${via !== 'yt-dlp' ? ` • via ${via}` : ''}`;
 

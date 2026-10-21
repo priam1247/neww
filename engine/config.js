@@ -101,6 +101,11 @@ const cfg = {
   minSeedsOld: num(process.env.MIN_SEEDS_OLD, 0),
   oldYearThreshold: num(process.env.OLD_YEAR_THRESHOLD, 8),
   preferCodec: process.env.PREFER_CODEC || 'x265',
+  // Preferred sources: MovieBox has proven to be the one that actually serves
+  // playable files, so its candidates win every tie inside a tier. A provider
+  // that is down or has no match simply drops out and the rest stay as
+  // fallbacks — nothing is disabled.
+  preferProviders: list(process.env.PREFER_PROVIDERS, ['moviebox']),
   audioPref: list(process.env.AUDIO_PREF, ['en', 'dual', 'multi']),
   qualities: [480, 720, 1080, 2160],
   sizeWindow: {                       // rejects CAMs and bloated remuxes

@@ -477,6 +477,13 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       user: { id: '1234:5@s.whatsapp.net' },
       async sendMessage(jid, content) {
         if (content && content.react) return { key: { id: 'react' } };
+        // snapshot local files now: the command deletes them right after sending
+        try {
+          const f = content && (content.document?.url || content.audio?.url || content.video?.url);
+          if (typeof f === 'string' && fs.existsSync(f) && fs.statSync(f).size < 20 * 1024 * 1024) {
+            Object.defineProperty(content, '__bytes', { value: fs.readFileSync(f), enumerable: false });
+          }
+        } catch { /* ignore */ }
         sent.push(content);
         return { key: { id: `msg-${sent.length}`, remoteJid: jid } };
       },
@@ -515,9 +522,15 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
 
     const doc = sock.sent.find((m) => m.document);
     assert.ok(doc, 'no document sent');
-    assert.ok(/Test Song - Test Artist\.mp3$/.test(doc.fileName), `bad filename: ${doc.fileName}`);
+    // "Artist - Title" is the convention every music player displays.
+    assert.ok(/Test Artist - Test Song\.mp3$/.test(doc.fileName), `bad filename: ${doc.fileName}`);
     assert.strictEqual(doc.mimetype, 'audio/mpeg');
     assert.ok(textOf(doc).includes('Test Song'), 'caption missing the title');
+    // the document itself must carry the tags, not just its name
+    const tags = MT.readId3(doc.__bytes);
+    assert.ok(tags, 'mp3 has no ID3 tags');
+    assert.strictEqual(tags.title, 'Test Song');
+    assert.strictEqual(tags.artist, 'Test Artist');
   });
 
   await test('.song falls back to a remote provider when the local engine is bot-checked', async () => {
@@ -1117,7 +1130,29 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     } finally { server.close(); }
   });
 
-  console.log('\n── 18. media log format ──');
+  console.log('\n── 18. source preference (moviebox first, rest as fallbacks) ──');
+
+  await test('a preferred provider wins the tie at the same quality', async () => {
+    const { rank } = await import(pathToFileURL(path.join(REPO, 'engine/core/ranker.js')).href);
+    const cands = [
+      { provider: 'vixsrc', kind: 'file', quality: 1080, title: 'A', sourceTag: 'WEBDL', sizeMB: 900 },
+      { provider: 'moviebox', kind: 'file', quality: 1080, title: 'B', sourceTag: 'WEBRIP', sizeMB: 0 },
+    ];
+    const out = rank(cands, { want: 1080, year: 2020 });
+    assert.strictEqual(out[0].provider, 'moviebox', `ranked first: ${out.map(c => c.provider).join(', ')}`);
+  });
+
+  await test('a preferred provider does not push a wrong resolution through', async () => {
+    const { rank } = await import(pathToFileURL(path.join(REPO, 'engine/core/ranker.js')).href);
+    const cands = [
+      { provider: 'moviebox', kind: 'file', quality: 480, title: 'B', sourceTag: 'WEBRIP', sizeMB: 0 },
+      { provider: 'vixsrc', kind: 'hls', quality: 1080, title: 'A', sourceTag: 'WEBDL', sizeMB: 0 },
+    ];
+    const out = rank(cands, { want: 1080, year: 2020 });
+    assert.strictEqual(out[0].provider, 'vixsrc', `ranked first: ${out.map(c => c.provider).join(', ')}`);
+  });
+
+  console.log('\n── 18b. media log format ──');
 
   await test('log lines are one line, timestamped and aligned', () => {
     const lines = [];

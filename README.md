@@ -15,7 +15,7 @@ A command-driven WhatsApp bot built with Baileys. It supports past-paper lookup,
 .paper <course-code> [module] [year]   Search and send past papers
 .paper browse [course-code]            Browse available courses/modules
 .countpapers                           Count papers in the vault
-.song <name-or-YouTube-link>           Download audio
+.song <name-or-YouTube-link>           MP3 document (artist - title, ID3 tagged)
 .ytv <name-or-YouTube-link> [quality]  Download video
 .dl <URL> [audio|video] [quality]      Download supported media from a URL
 .tiktok <URL>   .x <URL>   .pinterest <URL>
@@ -121,7 +121,8 @@ How a request flows:
    └─ engine queue (1 heavy job at a time, fair per chat)
         ├─ tier 1  torrent  knaben · torrentio · yts · eztv · nyaa · apibay · solidtorrents
         ├─ tier 2  ddl      hdhub4u · 4khdhub · moviesdrive → locker resolution → direct file
-        └─ tier 3  stream   moviebox(BFF) · vidlink · vixsrc · vaplayer → MP4 / HLS
+        └─ tier 3  stream   moviebox(BFF) first · vidlink · vixsrc · vaplayer → MP4 / HLS
+                            (every other source stays as a fallback)
    └─ quality ladder: 1080 → 720 → 480 (and up when only 4K exists)
    └─ verification: real size, container magic bytes, ffprobe quality check when present
    └─ no ffmpeg needed: HLS is fetched and concatenated by engine/media/hls.js
@@ -183,6 +184,7 @@ MOVIE_MAX_DOWNLOAD_MB DRIME_MOVIES DRIME_MOVIES_MB DRIME_MOVIES_FOLDER_ID
 GIFTED_API_KEY GIFTED_API_URL TELEGRAM_BOT_TOKEN
 YOUTUBE_COOKIES YOUTUBE_COOKIES_FILE YTDLP_PROXY YTDLP_DEADLINE_MS
 COBALT_INSTANCES COBALT_USE_DEFAULTS SONG_SEND_AS SONG_MAX_MINUTES SEARCH_PICKER SEARCH_RESULTS
+PREFER_PROVIDERS (default moviebox)  MOVIE_SUBTITLES  MOVIE_SUBTITLE_LANG  DRIME_MOVIES
 SEARCH_TTL_MINUTES SPOTIFY_CLIENT_ID SPOTIFY_CLIENT_SECRET FFMPEG_PATH MEMORY_LIMIT_MB TZ
 ```
 
