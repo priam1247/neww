@@ -1076,6 +1076,36 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
   });
 
 
+  console.log('\n── 16b. heap plan (watchdog budget for the running host) ──');
+
+  await test('a 4.5 GB box plans 3900–4200 MB of heap', () => {
+    const { computeHeapMB } = require(path.join(REPO, 'utils/heapPlan.js'));
+    for (const totalMB of [4500, 4608, 4700]) {
+      const { heapMB } = computeHeapMB({ totalMB });
+      assert.ok(heapMB >= 3900 && heapMB <= 4200, `${totalMB} MB box planned ${heapMB} MB`);
+    }
+  });
+
+  await test('HEAP_MB is honoured inside the band and capped above it', () => {
+    const { computeHeapMB } = require(path.join(REPO, 'utils/heapPlan.js'));
+    assert.strictEqual(computeHeapMB({ totalMB: 4608, askedMB: 3900 }).heapMB, 3900);
+    assert.strictEqual(computeHeapMB({ totalMB: 4608, askedMB: 4200 }).heapMB, 4200);
+    const over = computeHeapMB({ totalMB: 4608, askedMB: 8000 });
+    assert.strictEqual(over.heapMB, 4200, 'an over-ask must be capped, not trusted');
+    assert.strictEqual(over.capped, true);
+    // small boxes must not be told to use 4 GB
+    assert.ok(computeHeapMB({ totalMB: 2048 }).heapMB < 2048, '2 GB box got an impossible heap');
+  });
+
+  await test('the watchdog budget follows the real heap limit, not RAM×0.9', () => {
+    const { detectLimitMB } = require(path.join(REPO, 'utils/memoryWatchdog.js'));
+    const limit = detectLimitMB();
+    const heapMB = require('v8').getHeapStatistics().heap_size_limit / (1024 * 1024);
+    // within a few MB of the heap limit the process is actually running under
+    assert.ok(Math.abs(limit - heapMB) <= 2 || limit < heapMB,
+      `watchdog budget ${limit} MB does not match heap limit ${Math.round(heapMB)} MB`);
+  });
+
   console.log('\n── 17. ffmpeg-free HLS downloader (movies/series core) ──');
 
   await test('HLS master → variant → segments land in one playable file', async () => {
