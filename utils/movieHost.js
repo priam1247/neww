@@ -141,7 +141,7 @@ function defaultQuality() {
 }
 
 function maxDownloadMB() {
-  return Number(moviesCfg().maxDownloadMB) || 4096;
+  return Number(moviesCfg().maxDownloadMB) || 2000;
 }
 
 function capabilities() {

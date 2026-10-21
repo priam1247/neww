@@ -8,6 +8,8 @@ import { trustOf } from './registry.js';
 
 const SOURCE_PTS = { REMUX: 100, BLURAY: 80, WEBDL: 70, WEBRIP: 55, HDTV: 40, HDRIP: 35, DVDRIP: 30, CAM: 10, UNKNOWN: 30 };
 const NET_PTS = { NF: 18, AMZN: 14, DSNP: 16, ATVP: 14, MAX: 12, HMAX: 12 };
+const isCamRelease = (c) => c.sourceTag === 'CAM' ||
+  /\b(?:CAM|HDCAM|TS|TELESYNC|HDTS|TC|CAMRIP|HQCAM)\b/i.test(`${c.title || ''} ${c.sourceTag || ''}`);
 
 export function isOld(year) {
   return year && (new Date().getFullYear() - Number(year)) > config.oldYearThreshold;
@@ -37,7 +39,9 @@ export function rank(cands, opts) {
   const win = config.sizeWindow[want] || [0, Infinity];
   const seedFloor = isOld(year) ? config.minSeedsOld : config.minSeeds;
 
+  const hasNonCam = cands.some(c => !isCamRelease(c));
   return cands
+    .filter(c => !hasNonCam || !isCamRelease(c))
     .filter(c => c.kind !== 'torrent' || (c.seeds ?? 0) >= seedFloor)
     .map(c => {
       let s = 0;

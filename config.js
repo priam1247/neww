@@ -32,6 +32,8 @@
 
 const env = process.env;
 const list = (raw, fallback) => String(raw || fallback).split(',').map(s => s.trim()).filter(Boolean);
+const drimeMoviesMode = String(env.DRIME_MOVIES || 'off').toLowerCase();
+const movieCapDefault = ['big', 'always'].includes(drimeMoviesMode) ? 4096 : 2000;
 
 module.exports = {
   ownerNumber: list(env.OWNER_NUMBER, '265894016453'),
@@ -121,6 +123,9 @@ module.exports = {
   media: {
     sendCacheDays: Number(env.MEDIA_SEND_CACHE_DAYS ?? 7),
     progressCard: !/^(0|false|no|off)$/i.test(String(env.MEDIA_PROGRESS_CARD ?? 'true')),
+    diskMinFreeMB: Number(env.MEDIA_DISK_MIN_FREE_MB ?? 1500),
+    diskCopyMultiplier: Number(env.MEDIA_DISK_COPY_MULTIPLIER ?? 1.2),
+    diskCopyOverheadMB: Number(env.MEDIA_DISK_COPY_OVERHEAD_MB ?? 300),
   },
   queue: {
     light: Math.max(1, Math.floor(Number(env.QUEUE_LIGHT) || 3)),
@@ -173,11 +178,14 @@ module.exports = {
 
     defaultQuality: Number(env.MOVIE_QUALITY || 720),
     // WhatsApp send ceiling (used by the engine's own ranking) …
-    maxSendMB: Number(env.MOVIE_MAX_MB || 1500),
+    maxSendMB: Number(env.MOVIE_MAX_MB || movieCapDefault),
     // … and the download cap. Above maxSendMB files are still sent: the bot
     // puts anything bigger than drimeThresholdMB on Drime and posts the link.
-    maxDownloadMB: Number(env.MOVIE_MAX_DOWNLOAD_MB || 4096),
+    maxDownloadMB: Number(env.MOVIE_MAX_DOWNLOAD_MB || movieCapDefault),
     minFreeMB: Number(env.MOVIE_MIN_FREE_MB || 800),  // refuse a download below this
+    diskSizeMultiplier: Number(env.MOVIE_DISK_SIZE_MULTIPLIER ?? 2),
+    diskOverheadMB: Number(env.MOVIE_DISK_OVERHEAD_MB ?? 500),
+    unknownSizeMB: Number(env.MOVIE_DISK_UNKNOWN_SIZE_MB ?? 2000),
 
     // ── Drime Cloud delivery (the same account .paper uses) ───────────────
     // OFF by default: this host has plenty of disk, and a chat never needs a

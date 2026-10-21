@@ -20,6 +20,7 @@ const engine = require('../../utils/movieEngine');
 const selections = require('../../utils/selections');
 const host = require('../../utils/movieHost');
 const { getTempDir } = require('../../utils/tempManager');
+const diskSpace = require('../../utils/diskSpace');
 const logger = require('../../utils/logger');
 const log = logger('series');
 
@@ -178,7 +179,7 @@ async function deliverSeasonPack(sock, msg, extra, meta, job) {
       if (MOVIES().dryRun) return { res: resolved, file: null };
 
       const sizeMB = Number(resolved.sizeMB) || 0;
-      const maxMB = MOVIES().maxSendMB || 1500;
+      const maxMB = MOVIES().maxSendMB || 2000;
 
       // packs are usually 5–40 GB: hand over the link instead of downloading
       if (resolved.kind !== 'cache' && (!sizeMB || sizeMB > maxMB)) {
@@ -190,6 +191,7 @@ async function deliverSeasonPack(sock, msg, extra, meta, job) {
       }
 
       const dest = await engine.targetFile(meta.title, meta.year, job.quality, season, null);
+      diskSpace.requireMovieSpace(getTempDir(), resolved.sizeMB, MOVIES());
       const saved = await engine.download(resolved, dest);
       return { res: resolved, file: (saved && saved.file) || dest };
     }, { timeoutMs: MOVIES().jobTimeoutMs });
@@ -250,6 +252,7 @@ async function fetchEpisodeSource(meta, season, ep, quality, attempts = 3) {
 
     const dest = await engine.targetFile(meta.title, meta.year, quality, season, ep);
     let downloadedFile = dest;
+    diskSpace.requireMovieSpace(getTempDir(), resolved.sizeMB, MOVIES());
     try {
       const saved = await engine.download(resolved, dest);
       const realFile = downloadedFile = (saved && saved.file) || dest;

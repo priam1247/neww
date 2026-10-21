@@ -69,6 +69,9 @@ function applyConfig() {
   setIfEmpty('MAX_SEND_MB', m.maxSendMB);
   setIfEmpty('MAX_DOWNLOAD_MB', m.maxDownloadMB);
   setIfEmpty('MIN_FREE_MB', m.minFreeMB);
+  setIfEmpty('MOVIE_DISK_SIZE_MULTIPLIER', m.diskSizeMultiplier);
+  setIfEmpty('MOVIE_DISK_OVERHEAD_MB', m.diskOverheadMB);
+  setIfEmpty('MOVIE_DISK_UNKNOWN_SIZE_MB', m.unknownSizeMB);
   setIfEmpty('TORRENT_DIRECT', m.torrentDirect === false ? '0' : '1');
   setIfEmpty('TORRENT_MIN_SEEDS', m.torrentMinSeeds);
   setIfEmpty('TORRENT_METADATA_TIMEOUT_MS', m.torrentMetadataTimeoutMs);
@@ -178,11 +181,6 @@ module.exports = {
   async debridAccounts() {
     const { debrid } = await load();
     return debrid.probe();
-  },
-  /** per-provider mirror pools: which DDL domain answered, which is benched */
-  async mirrors() {
-    const { mirrorReport } = await load();
-    try { return mirrorReport(); } catch { return []; }
   },
   async movieDetails(tmdbId) {
     const { tmdb } = await load();

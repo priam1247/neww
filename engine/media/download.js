@@ -183,7 +183,7 @@ export async function httpToFile(url, dest, { onProgress, onAbort, headers = {} 
         const stalled = e.name === 'AbortError' || /aborted|stalled/i.test(e.message || '');
         if (attempt >= config.downloadRetries) {
           // Last resort: the bot's own downloader (different TLS/agent stack).
-          // Some DDL mirrors reject Node's fetch fingerprint but serve axios.
+          // Some hosts reject Node's fetch fingerprint but serve axios.
           try {
             fs.rmSync(dest, { force: true });     // restart clean: host has no resume
           } catch { /* ignore */ }

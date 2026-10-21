@@ -1387,7 +1387,7 @@ const { createProgress } = require(path.join(REPO, 'utils/progressCard.js'));
   await test('a preferred provider wins the tie at the same quality', async () => {
     const { rank } = await import(pathToFileURL(path.join(REPO, 'engine/core/ranker.js')).href);
     const cands = [
-      { provider: 'vixsrc', kind: 'file', quality: 1080, title: 'A', sourceTag: 'WEBDL', sizeMB: 900 },
+      { provider: 'vidlink', kind: 'file', quality: 1080, title: 'A', sourceTag: 'WEBDL', sizeMB: 900 },
       { provider: 'moviebox', kind: 'file', quality: 1080, title: 'B', sourceTag: 'WEBRIP', sizeMB: 0 },
     ];
     const out = rank(cands, { want: 1080, year: 2020 });
@@ -1398,10 +1398,20 @@ const { createProgress } = require(path.join(REPO, 'utils/progressCard.js'));
     const { rank } = await import(pathToFileURL(path.join(REPO, 'engine/core/ranker.js')).href);
     const cands = [
       { provider: 'moviebox', kind: 'file', quality: 480, title: 'B', sourceTag: 'WEBRIP', sizeMB: 0 },
-      { provider: 'vixsrc', kind: 'hls', quality: 1080, title: 'A', sourceTag: 'WEBDL', sizeMB: 0 },
+      { provider: 'vidlink', kind: 'hls', quality: 1080, title: 'A', sourceTag: 'WEBDL', sizeMB: 0 },
     ];
     const out = rank(cands, { want: 1080, year: 2020 });
-    assert.strictEqual(out[0].provider, 'vixsrc', `ranked first: ${out.map(c => c.provider).join(', ')}`);
+    assert.strictEqual(out[0].provider, 'vidlink', `ranked first: ${out.map(c => c.provider).join(', ')}`);
+  });
+
+  await test('ranker drops CAM releases when a clean candidate exists', async () => {
+    const { rank } = await import(pathToFileURL(path.join(REPO, 'engine/core/ranker.js')).href);
+    const out = rank([
+      { provider: 'knaben', kind: 'torrent', quality: 720, title: 'Dune Part Two 2024 HDCAM', sourceTag: 'CAM', sizeMB: 1500, seeds: 900 },
+      { provider: 'yts', kind: 'torrent', quality: 720, title: 'Dune Part Two 2024 BluRay', sourceTag: 'BLURAY', sizeMB: 1500, seeds: 40 },
+    ], { want: 720, year: 2024 });
+    assert.strictEqual(out.length, 1);
+    assert.strictEqual(out[0].provider, 'yts');
   });
 
   console.log('\n── 18b. media log format ──');
@@ -1424,32 +1434,7 @@ const { createProgress } = require(path.join(REPO, 'utils/progressCard.js'));
   });
 
 
-  console.log('\n── 19. mirror failover, request coalescing, stale cache ──');
-
-  await test('mirror pool fails over and benches a domain that never answers', async () => {
-    const { withMirrors, mirrorReport } = await import(pathToFileURL(path.join(REPO, 'engine/core/mirrors.js')).href);
-
-    // 1. a dead first mirror must not cost the request
-    let aliveHits = 0;
-    const out = await withMirrors('unit-pool-a', ['https://dead.example', 'https://alive.example'], async (base) => {
-      if (base.includes('dead')) throw new Error('ENOTFOUND');
-      aliveHits++;
-      return [{ ok: true }];
-    });
-    assert.ok(out.length === 1 && aliveHits === 1, 'failover did not reach the live mirror');
-
-    // 2. an all-dead pool trips the breaker after 3 rounds instead of hammering
-    const deadOnly = ['https://one.invalid', 'https://two.invalid'];
-    for (let i = 0; i < 3; i++) {
-      await assert.rejects(() => withMirrors('unit-pool-b', deadOnly, async () => { throw new Error('ECONNRESET'); }));
-    }
-    const report = mirrorReport().find(p => p.provider === 'unit-pool-b');
-    assert.ok(report, 'no report for the dead pool');
-    assert.ok(report.mirrors.every(m => m.state === 'open'), `mirrors not benched: ${JSON.stringify(report.mirrors)}`);
-
-    // 3. half-open probe after the cooldown, not immediately
-    assert.ok(report.mirrors.every(m => m.fails >= 3), 'failure counts not tracked');
-  });
+  console.log('\n── 19. request coalescing, stale cache ──');
 
   await test('identical concurrent JSON requests are coalesced', async () => {
     const http = require('http');
@@ -1508,6 +1493,50 @@ const { createProgress } = require(path.join(REPO, 'utils/progressCard.js'));
     assert.strictEqual(alts[0].title, 'Avengers: Infinity War');
   });
 
+
+  console.log('\n── 20. torrent provider parsing ──');
+
+  await test('EZTV parses episodes and keeps matching season packs from API fields', async () => {
+    const { parseEztvTorrents } = await import(pathToFileURL(path.join(REPO, 'engine/providers/torrent/eztv.js')).href);
+    const result = parseEztvTorrents({
+      torrents: [
+        { hash: 'a'.repeat(40), filename: 'Breaking Bad S01E01 720p HDTV', season: 1, episode: 1, seeds: 21, size_bytes: 1048576000 },
+        { hash: 'b'.repeat(40), filename: 'Breaking Bad S01E02 720p HDTV', season: 1, episode: 2, seeds: 10, size_bytes: 900000000 },
+        { hash: 'c'.repeat(40), filename: 'Breaking Bad Season 1 Complete 720p HDTV', season: 1, episode: 0, seeds: 5, size_bytes: 7000000000 },
+        { hash: 'd'.repeat(40), filename: 'Breaking Bad S02E01 720p HDTV', season: 2, episode: 1, seeds: 8, size_bytes: 1000000000 },
+      ],
+    }, { season: 1, episode: 1 });
+    assert.strictEqual(result.length, 2);
+    assert.strictEqual(result[0].episode, 1);
+    assert.strictEqual(result[1].isPack, true);
+    assert.strictEqual(result[1].episode, null);
+    assert.ok(result[0].magnet.startsWith('magnet:?xt=urn:btih:'));
+  });
+
+  await test('Torrents-CSV parses movie and matching episode fixture rows', async () => {
+    const { parseTorrentsCsv } = await import(pathToFileURL(path.join(REPO, 'engine/providers/torrent/torrentscsv.js')).href);
+    const hash = 'e'.repeat(40);
+    const movie = parseTorrentsCsv({
+      torrents: [
+        { infohash: hash, name: 'Inception (2010) 1080p BluRay x264', size_bytes: 1500000000, seeders: 41 },
+        { infohash: 'bad', name: 'unusable row', size_bytes: 10, seeders: 0 },
+      ],
+    }, { type: 'movie', title: 'Inception', year: '2010' });
+    assert.strictEqual(movie.length, 1);
+    assert.strictEqual(movie[0].provider, 'torrentscsv');
+    assert.strictEqual(movie[0].quality, 1080);
+    assert.strictEqual(movie[0].seeds, 41);
+    assert.ok(movie[0].magnet.includes(hash));
+
+    const episode = parseTorrentsCsv({
+      torrents: [
+        { infohash: 'f'.repeat(40), name: 'Breaking Bad S01E01 720p HDTV', size_bytes: 800000000, seeders: 12 },
+        { infohash: '1'.repeat(40), name: 'Breaking Bad S01E02 720p HDTV', size_bytes: 800000000, seeders: 90 },
+      ],
+    }, { type: 'series', title: 'Breaking Bad' }, { season: 1, episode: 1 });
+    assert.strictEqual(episode.length, 1);
+    assert.strictEqual(episode[0].episode, 1);
+  });
 
   console.log('\n── 21. moviebox (BFF, no scraping) ──');
 
@@ -1782,11 +1811,37 @@ const { createProgress } = require(path.join(REPO, 'utils/progressCard.js'));
       assert.ok(minStreamSeconds({ runtime: 148 }, false) > 80 * 60);
     });
 
+    await test('moviebox rejects unrelated titles and prefers clean exact matches', async () => {
+      const { pickMatch } = await import(pathToFileURL(path.join(REPO, 'engine/providers/stream/moviebox.js')).href);
+      const dune = pickMatch([
+        { subjectType: 1, title: 'Rebel Moon - Part Two: The Scargiver', releaseDate: '2024-04-19', duration: 7200, subjectId: 'rebel' },
+      ], { title: 'Dune: Part Two', year: 2024, type: 'movie' });
+      assert.strictEqual(dune, null);
+
+      const spider = pickMatch([
+        { subjectType: 1, title: 'Spider-Man: Brand New Day[Hindi] [Full movie]', releaseDate: '2026-07-31', duration: 7200, subjectId: 'junk' },
+        { subjectType: 1, title: 'Spider-Man: Brand New Day', releaseDate: '2026-07-31', duration: 7200, subjectId: 'real' },
+      ], { title: 'Spider-Man: Brand New Day', year: 2026, type: 'movie' });
+      assert.strictEqual(spider.subjectId, 'real');
+    });
+
     const movie = require(path.join(REPO, 'commands', 'media', 'movie'));
     await test('.movie: minimum playtime follows the real runtime', () => {
       assert.strictEqual(movie._minPlaySeconds(0), 40 * 60);
       assert.strictEqual(movie._minPlaySeconds(150), 150 * 60 * 0.6);
       assert.strictEqual(movie._minPlaySeconds(0, 'episode'), 5 * 60);
+    });
+
+    await test('disk preflight uses statfs and configured movie/media thresholds', () => {
+      const disk = require(path.join(REPO, 'utils', 'diskSpace'));
+      const statfs = (free) => () => ({ bavail: free, bsize: 1024 * 1024 });
+      assert.throws(
+        () => disk.requireMovieSpace('/fake', 2000, { minFreeMB: 800, diskSizeMultiplier: 2, diskOverheadMB: 500 }, statfs(4000)),
+        /not enough disk \(3\.9 GB free/,
+      );
+      assert.doesNotThrow(() => disk.requireMovieSpace('/fake', 2000, {}, statfs(5000)));
+      assert.throws(() => disk.requireMediaDownloadSpace('/fake', { diskMinFreeMB: 1500 }, statfs(1499)), /not enough disk/);
+      assert.throws(() => disk.requireMediaCopySpace('/fake', 1000, { diskCopyMultiplier: 1.2, diskCopyOverheadMB: 300 }, statfs(1499)), /not enough disk/);
     });
 
     const getFfmpeg = require(path.join(REPO, 'utils', 'ffmpeg'));

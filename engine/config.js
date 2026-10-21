@@ -84,11 +84,14 @@ const cfg = {
   dataDir: process.env.DATA_DIR || './temp/movies/data',
 
   // limits
-  maxSendMB: num(process.env.MAX_SEND_MB, 1500),
+  maxSendMB: num(process.env.MAX_SEND_MB, 2000),
   // Hard ceiling for a single download. This is NOT WhatsApp's send limit:
   // anything over maxSendMB is delivered as a Drime link by the bot adapters.
-  maxDownloadMB: num(process.env.MAX_DOWNLOAD_MB, 4096),
+  maxDownloadMB: num(process.env.MAX_DOWNLOAD_MB, 2000),
   minFreeMB: num(process.env.MIN_FREE_MB, 800),
+  diskSizeMultiplier: num(process.env.MOVIE_DISK_SIZE_MULTIPLIER, 2),
+  diskOverheadMB: num(process.env.MOVIE_DISK_OVERHEAD_MB, 500),
+  unknownSizeMB: num(process.env.MOVIE_DISK_UNKNOWN_SIZE_MB, 2000),
   minSampleMB: num(process.env.MIN_SAMPLE_MB, 30),        // below this = sample/trailer
   cacheMaxMB: num(process.env.CACHE_MAX_MB, 20000),
   cacheTTLHours: num(process.env.CACHE_TTL_HOURS, 72),

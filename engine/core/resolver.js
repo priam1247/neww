@@ -1,8 +1,6 @@
 // engine/core/resolver.js — the tiered cascade.
 //
 // Fixed in the ZaFar Bot integration:
-//   • DDL candidates are now actually resolved (core/locker.js) instead of being
-//     handed to Real-Debrid as if they were magnets — the whole tier 2 was dead
 //   • torrent candidates download directly when no debrid key is configured
 //   • the final error explains WHY nothing worked (config vs. content vs. dead
 //     links), so ".movie" never just says "no source"
@@ -16,7 +14,6 @@ import { verify } from './verify.js';
 import { hedge } from './http.js';
 import cache from './cache.js';
 import debrid from '../providers/debrid/index.js';
-import { resolveLocker } from './locker.js';
 import { metrics } from './metrics.js';
 import { emit, EVENTS } from './events.js';
 import { log } from './log.js';
@@ -24,11 +21,9 @@ import { magnet as buildMagnet } from '../providers/torrent/_trackers.js';
 import { torrentEngineAvailable } from '../media/torrent.js';
 
 const rlog = log.child('resolver');
-// torrents (debrid, instant when cached) → streams (keyless, host-independent)
-// → DDL (scraped hosts that keep dying). Streams used to sit last, so a dead
-// DDL tier cost ~15s on every single request before the working tier was tried.
-const DEBRID_TIERS = [[1], [3], [2]];
-const KEYLESS_TIERS = [[3], [1], [2]];
+// Streams lead for keyless users; torrents are the direct-download fallback.
+const DEBRID_TIERS = [[1], [3]];
+const KEYLESS_TIERS = [[3], [1]];
 const MAX_PER_TIER = 6;
 
 // Not every source deserves the same patience:
@@ -36,7 +31,6 @@ const MAX_PER_TIER = 6;
 //   tier 3 stream → the whole tier is already capped by the hedge deadline
 const TIER_LIMITS = {
   1: { candidates: 2, perCandidateMs: 40_000 },
-  2: { candidates: 4, perCandidateMs: 25_000 },
   3: { candidates: 6, perCandidateMs: 30_000 },
 };
 
@@ -162,9 +156,6 @@ export async function resolveCandidate(cand, opts = {}) {
       };
     }
     direct = await debrid.resolve(cand, opts);
-    direct.kind = 'file';
-  } else if (cand.needsResolve) {
-    direct = await resolveLocker(cand, opts);
     direct.kind = 'file';
   } else {
     direct = { url: cand.url, kind: cand.kind || 'file', headers: cand.headers, sizeMB: cand.sizeMB };
@@ -293,7 +284,7 @@ async function resolve(media, opts = {}) {
       throw new Error([
         `no free source found for “${media.title}”.`,
         `• torrent sources ${torrentStatus}`,
-        '• the free DDL/stream sources returned nothing — try another quality or title'
+        '• the free stream sources returned nothing — try another quality or title'
       ].join('\n'));
     }
     throw new Error(`no provider returned results for “${media.title}” (all sources unreachable or empty)`);
@@ -302,7 +293,7 @@ async function resolve(media, opts = {}) {
     throw new Error([
       'found sources but none could be used.',
       `• torrent results ${torrentStatus}`,
-      '• free stream/DDL sources were unreachable right now — try again or pick another quality'
+      '• free stream sources were unreachable right now — try again or pick another quality'
     ].join('\n'));
   }
   throw new Error(`no usable source found.\n${reasons.slice(0, 4).map(r => `• ${r}`).join('\n')}`);

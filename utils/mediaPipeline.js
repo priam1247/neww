@@ -26,6 +26,7 @@ const {
   downloadToFile, sniffFile, audioToMp3, tagMp3, ensureWhatsAppMp4, safeName, fmtMB,
 } = require('./mediaTransfer');
 const { getTempDir, deleteTempFile, holdTemp } = require('./tempManager');
+const diskSpace = require('./diskSpace');
 
 const MAX_VIDEO_MB = Number(config.video?.maxMB) || 2000;
 const MAX_AUDIO_MB = Number(config.song?.maxMB) || 120;
@@ -126,6 +127,7 @@ async function downloadAndSend(sock, msg, extra, {
 
   try {
     if (!waited) await react('⏳');
+    diskSpace.requireMediaDownloadSpace(getTempDir(), config.media || {});
 
     // Best-effort metadata (the download attempt reports the real problems).
     if (!title) {
@@ -221,6 +223,9 @@ async function downloadAndSend(sock, msg, extra, {
     }
 
     const sniffed = sniffFile(file);
+    if (sniffed.kind !== 'image') {
+      diskSpace.requireMediaCopySpace(getTempDir(), fs.statSync(file).size / 1048576, config.media || {});
+    }
     const viaText = via !== 'yt-dlp' ? ` • via ${via}` : '';
 
     // ── Images (Pinterest pins, Instagram photos …) ────────────────────────
@@ -303,6 +308,8 @@ async function downloadAndSend(sock, msg, extra, {
     // One short line, never a wall of engine detail.
     if (info.code === 'TOO_BIG') {
       await say(`❌ Too big (video ${MAX_VIDEO_MB} MB / audio ${MAX_AUDIO_MB} MB) — try a lower quality or a shorter clip.`);
+    } else if (err.code === 'NOT_ENOUGH_DISK' || err.code === 'DISK_CHECK_FAILED') {
+      await say(`❌ ${err.message}`);
     } else {
       const lines = String(YT.friendlyError(err) + YT.attemptsSummary(merged)).split('\n').filter(Boolean);
       await say(lines.slice(0, 3).join('\n'));

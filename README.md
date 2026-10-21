@@ -119,9 +119,8 @@ How a request flows:
    └─ metadata: TMDB → Cinemeta → IMDb → TVMaze → OMDb → Trakt → Jikan → AniList
         (merged per title; numbered picker when ambiguous)
    └─ engine queue (1 heavy job at a time, fair per chat)
-        ├─ tier 1  torrent  knaben · torrentio · yts · eztv · nyaa · apibay · solidtorrents
-        ├─ tier 2  ddl      hdhub4u · 4khdhub · moviesdrive → locker resolution → direct file
-        └─ tier 3  stream   moviebox(BFF) first · vidlink · vixsrc · vaplayer → MP4 / HLS
+        ├─ tier 1  torrent  knaben · torrentio · yts · eztv · nyaa · apibay · torrents-csv
+        └─ tier 3  stream   moviebox(BFF) first · vidlink · vaplayer → MP4 / HLS
                             (every other source stays as a fallback)
    └─ quality ladder: 1080 → 720 → 480 (and up when only 4K exists)
    └─ verification: real size, container magic bytes, ffprobe quality check when present
@@ -135,8 +134,8 @@ Requirements and behaviour:
   Not a hard requirement any more: without it the bot runs on Cinemeta + IMDb +
   TVMaze (`.providers` shows which sources are live).
 * **Debrid is optional.** Real-Debrid / All-Debrid unlock the torrent tier (best
-  quality). Without a key the torrent tier is skipped automatically and the bot
-  uses the free DDL and stream tiers; `.providers` shows exactly what is live.
+  quality). Without a key, the bot tries free streams first and downloads a
+  seeded torrent directly as fallback; `.providers` shows exactly what is live.
 * Files are staged in `temp/movies/` — inside the bot's own temp dir, in a
   subfolder `cleanup.js` never touches — and are indexed by an LRU that survives
   restarts. A file still downloading is never swept away.

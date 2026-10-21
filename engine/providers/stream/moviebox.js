@@ -170,8 +170,10 @@ async function playerDomain(force = false) {
 
 const norm = (s) => String(s || '')
   .toLowerCase()
-  .replace(/\((\d{4})\)/g, '$1')
+  .replace(/\[[^\]]*\]|\([^)]*\)/g, ' ')
+  .replace(/&/g, ' and ')
   .replace(/[^a-z0-9]+/g, ' ')
+  .replace(/\s+/g, ' ')
   .trim();
 
 // Re-uploads with tags in the name are where trailers and 2-minute fakes live.
@@ -187,6 +189,7 @@ function minStreamSeconds(media, isSeries) {
 /** Best search hit for a title (+ optional year). */
 function pickMatch(items, { title, year, type = null }) {
   const want = norm(title);
+  const wantedTokens = want.split(' ').filter(Boolean);
   let best = null;
   let bestScore = -Infinity;
 
@@ -199,21 +202,27 @@ function pickMatch(items, { title, year, type = null }) {
     const st = Number(sub?.subjectType);
     if (st !== 1 && st !== 2) continue;
     const kind = st === 2 ? 'series' : 'movie';
+    const got = norm(name);
+    const gotTokens = got.split(' ').filter(Boolean);
+    const rel = String(sub?.releaseDate || it?.releaseDate || '').slice(0, 4);
+    if (kind === 'movie' && year && rel && Math.abs(Number(rel) - Number(year)) > 1) continue;
+    if (got !== want) {
+      const gotSet = new Set(gotTokens);
+      if (!wantedTokens.every(token => gotSet.has(token))) continue;
+      const extraTokens = gotTokens.filter(token => !wantedSet.has(token)).length;
+      if (extraTokens > 2) continue;
+    }
+
     let s = 0;
     if (JUNK_RX.test(name)) s -= 35;
     const dur = Number(sub?.duration || it?.duration) || 0;
     if (kind === 'movie' && dur > 0 && dur < 40 * 60) s -= 60;
     if (type) s += kind === type ? 15 : -25;
-    const got = norm(name);
-    if (got === want) s += 60;
-    else if (got.startsWith(want) || want.startsWith(got)) s += 30;
-    else if (got.includes(want)) s += 15;
-    else s -= 20;
+    s += got === want ? 120 : 70;
 
-    const rel = String(sub?.releaseDate || it?.releaseDate || '').slice(0, 4);
     if (year && rel) {
       const d = Math.abs(Number(rel) - Number(year));
-      s += d === 0 ? 25 : d === 1 ? 10 : -20;
+      s += d === 0 ? 25 : 10;
     }
     if (sub?.hasResource) s += 12;
 

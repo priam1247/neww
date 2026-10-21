@@ -15,6 +15,7 @@ const engine = require('../../utils/movieEngine');
 const selections = require('../../utils/selections');
 const host = require('../../utils/movieHost');
 const { getTempDir } = require('../../utils/tempManager');
+const diskSpace = require('../../utils/diskSpace');
 const { probeMedia } = require('../../utils/mediaTransfer');
 const logger = require('../../utils/logger');
 const log = logger('movie');
@@ -122,6 +123,7 @@ async function fetchSource(meta, quality, attempts = 3) {
 
     const dest = await engine.targetFile(meta.title, meta.year, quality, null, null);
     let downloadedFile = dest;
+    diskSpace.requireMovieSpace(getTempDir(), resolved.sizeMB, MOVIES());
     try {
       const saved = await engine.download(resolved, dest);
       // HLS sources may land as .ts (no ffmpeg on the host) — use the real path
@@ -251,6 +253,7 @@ async function deliver(sock, msg, extra, meta, job) {
     if (e.code === 'SHORT' || /trailer\/fake/.test(String(e.message))) {
       return say(`❌ Only a trailer/fake clip of ${matched} is out there right now — no full-length copy yet.`);
     }
+    if (e.code === 'NOT_ENOUGH_DISK' || e.code === 'DISK_CHECK_FAILED') return say(`❌ ${e.message}`);
     await say(`❌ No source for ${matched}.${hint}`);
   }
 }

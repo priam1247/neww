@@ -27,7 +27,6 @@ import { parseRelease, matchesEpisode } from '../core/release.js';
 import { pickEpisodeFile, episodeQuery, seasonQuery } from '../core/tv.js';
 import { sanitize } from './download.js';
 import { log } from '../core/log.js';
-import { mirrorReport } from '../core/mirrors.js';
 
 const mlog = log.child('media');
 
@@ -38,16 +37,10 @@ import '../providers/torrent/yts.js';
 import '../providers/torrent/eztv.js';
 import '../providers/torrent/nyaa.js';
 import '../providers/torrent/apibay.js';
-import '../providers/torrent/solidtorrents.js';
-import '../providers/ddl/hdhub4u.js';
-import '../providers/ddl/fourkhdhub.js';
-import '../providers/ddl/moviesdrive.js';
+import '../providers/torrent/torrentscsv.js';
 import '../providers/stream/vidlink.js';
-import '../providers/stream/vixsrc.js';
 import '../providers/stream/vaplayer.js';
 import '../providers/stream/moviebox.js';
-import '../providers/stream/vidsrc.js';
-import '../providers/stream/videasy.js';
 
 let booted = false;
 async function boot() {
@@ -262,9 +255,9 @@ export function rememberFile(meta, quality, season, episode, file, sizeMB) {
   return true;
 }
 
-export { boot, cache, config, tv, parseRelease, matchesEpisode, tmdb, metadata, debrid, resolver, registry, queue, mlog, mirrorReport };
+export { boot, cache, config, tv, parseRelease, matchesEpisode, tmdb, metadata, debrid, resolver, registry, queue, mlog };
 export default {
   boot, identify, resolveMovie, resolveEpisode, resolveSeason,
   targetFile, rememberFile, qualityLadder, subtitles,
-  cache, config, tmdb, metadata, resolver, debrid, registry, queue, mirrorReport, subtitles
+  cache, config, tmdb, metadata, resolver, debrid, registry, queue, subtitles
 };

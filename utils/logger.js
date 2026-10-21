@@ -4,7 +4,7 @@
  * One format for the whole process so the panel log is readable:
  *
  *   22:49:41.798  INFO   command   .movie ← 265894016453
- *   22:49:42.844  WARN   engine    registry: hdhub4u tripped (fetch failed)
+ *   22:49:42.844  WARN   engine    registry: vaplayer tripped (fetch failed)
  *
  * Levels: debug < info < warn < error. `LOG_LEVEL=debug` turns on the noisy
  * detail (per-provider attempts, paper window walks, download progress).

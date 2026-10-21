@@ -33,6 +33,7 @@ const {
   downloadToFile, ensureWhatsAppMp4, probeMedia, safeName, fmtMB,
 } = require('../../utils/mediaTransfer');
 const { getTempDir, deleteTempFile } = require('../../utils/tempManager');
+const diskSpace = require('../../utils/diskSpace');
 const log = require('../../utils/logger')('ytv');
 
 // ─── LIMITS (config.video, see config.js) ────────────────────────────────────
@@ -162,6 +163,7 @@ const execute = async (sock, msg, args, extra) => {
 
     try {
     if (!waited) await react('⏳');
+    diskSpace.requireMediaDownloadSpace(getTempDir(), config.media || {});
 
     // ── Download: yt-dlp first, with automatic quality fallback ────────────
     let file = null;
@@ -249,6 +251,7 @@ const execute = async (sock, msg, args, extra) => {
       throw Object.assign(new Error('video too large'), { code: 'TOO_BIG' });
     }
 
+    diskSpace.requireMediaCopySpace(getTempDir(), fs.statSync(file).size / 1048576, config.media || {});
     // ── Make it playable in WhatsApp (no-op without ffmpeg) ────────────────
     const ready = await ensureWhatsAppMp4(file, path.join(getTempDir(), `${stamp}_wa.mp4`));
     const size = fs.statSync(ready).size;
@@ -273,6 +276,8 @@ const execute = async (sock, msg, args, extra) => {
     // one short line on failure, never a wall of engine detail
     if (err.code === 'TOO_BIG') {
       await say(`❌ Too large even at the lowest quality — try \`.ytv <link> 360\` or a shorter video.`);
+    } else if (err.code === 'NOT_ENOUGH_DISK' || err.code === 'DISK_CHECK_FAILED') {
+      await say(`❌ ${err.message}`);
     } else {
       const lines = String(YT.friendlyError(err) + YT.attemptsSummary(merged)).split('\n').filter(Boolean);
       await say(lines.slice(0, 3).join('\n'));
