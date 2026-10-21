@@ -182,8 +182,25 @@ const { createProgress } = require(path.join(REPO, 'utils/progressCard.js'));
   await test('base args only use supported options and always disable progress by default', () => {
     const args = YT.baseArgs();
     assert.ok(args.includes('--js-runtimes'), 'js-runtimes missing');
+    assert.strictEqual(args[args.indexOf('--js-runtimes') + 1], `node:${process.execPath}`);
     assert.ok(args.includes('--no-progress'), 'progress not disabled');
     assert.ok(!args.includes('--progress-template'), 'progress template leaked into base args');
+  });
+
+  await test('ffmpeg location args require an existing absolute path', () => {
+    assert.deepStrictEqual(YT.ffmpegLocationArgs('ffmpeg'), []);
+    assert.deepStrictEqual(YT.ffmpegLocationArgs(path.join(sandbox, 'missing-ffmpeg')), []);
+    assert.deepStrictEqual(YT.ffmpegLocationArgs(process.execPath), ['--ffmpeg-location', process.execPath]);
+  });
+
+  await test('ffmpeg resolves PATH entries to absolute executable paths', () => {
+    const getFfmpeg = require(path.join(REPO, 'utils/ffmpeg.js'));
+    const dir = fs.mkdtempSync(path.join(sandbox, 'ffpath-'));
+    const fake = path.join(dir, 'ffmpeg');
+    fs.writeFileSync(fake, '#!/bin/sh\nexit 0\n');
+    fs.chmodSync(fake, 0o755);
+    assert.strictEqual(getFfmpeg.findOnPath('ffmpeg', dir), fake);
+    if (getFfmpeg.works()) assert.ok(path.isAbsolute(getFfmpeg()), getFfmpeg());
   });
 
   await test('progress template is added when progress is requested', () => {
@@ -214,6 +231,9 @@ const { createProgress } = require(path.join(REPO, 'utils/progressCard.js'));
     ['ERROR: HTTP Error 429: Too Many Requests', 'RATE_LIMIT'],
     ['ERROR: Requested format is not available', 'NO_FORMATS'],
     ['ERROR: Postprocessing: ffmpeg not found. Please install or provide the path', 'FFMPEG_MISSING'],
+    ['ERROR: ffmpeg is not installed', 'FFMPEG_MISSING'],
+    ['WARNING: The formats won\u2019t be merged', 'FFMPEG_MISSING'],
+    ["WARNING: The formats won't be merged", 'FFMPEG_MISSING'],
     ['ERROR: yt-dlp: error: no such option: --js-runtimes', 'BAD_ARGS'],
     ['ERROR: [youtube] x: This video is DRM protected', 'DRM'],
     ['ERROR: Unsupported URL: https://example.com/some-page', 'UNSUPPORTED_URL'],
@@ -1760,9 +1780,23 @@ const { createProgress } = require(path.join(REPO, 'utils/progressCard.js'));
       const ff = (args) => execFileSync(getFfmpeg(), ['-y', '-hide_banner', '-loglevel', 'error', ...args], { stdio: 'pipe' });
       const silent = path.join(dir, 'silent.mp4');
       const opus = path.join(dir, 'opus.mp4');
+      const unmergedBase = path.join(dir, 'unmerged');
+      ff(['-f', 'lavfi', '-i', 'testsrc=size=160x120:rate=10', '-t', '1', '-an',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', `${unmergedBase}.f134.mp4`]);
+      ff(['-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '1', '-vn',
+        '-c:a', 'aac', `${unmergedBase}.f140.m4a`]);
       ff(['-f', 'lavfi', '-i', 'testsrc=size=160x120:rate=10', '-t', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', silent]);
       ff(['-f', 'lavfi', '-i', 'testsrc=size=160x120:rate=10', '-f', 'lavfi', '-i', 'sine=frequency=440',
         '-t', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'libopus', '-shortest', opus]);
+
+      await test('assertProduced merges one leftover video and audio part into an A/V MP4', async () => {
+        const merged = YT.assertProduced(unmergedBase, '', 'video');
+        assert.strictEqual(merged, `${unmergedBase}.mp4`);
+        assert.ok(!fs.existsSync(`${unmergedBase}.f134.mp4`) && !fs.existsSync(`${unmergedBase}.f140.m4a`),
+          'the source parts were not deleted after merging');
+        const info = await MT.probeMedia(merged);
+        assert.ok(info.probed && info.hasVideo && info.hasAudio, JSON.stringify(info));
+      });
 
       await test('probeMedia tells a mute video from one with sound', async () => {
         const a = await MT.probeMedia(silent);

@@ -500,7 +500,7 @@ function baseArgs({ progress = false } = {}) {
   // yt-dlp needs a JavaScript runtime to solve YouTube's challenges; node is
   // always present because this bot *is* a node process. Only pass the flag on
   // builds that know it.
-  if (caps.jsRuntimes) args.push('--js-runtimes', 'node');
+  if (caps.jsRuntimes) args.push('--js-runtimes', `node:${process.execPath}`);
 
   const cookies = cookieFile();
   if (cookies) args.push('--cookies', cookies);
@@ -667,7 +667,7 @@ const RULES = [
   { code: 'TOO_LONG',       re: /is longer than|exceeds the duration|duration filter|does not pass (?:the )?filter/i },
   { code: 'TOO_BIG',        re: /larger than max-filesize|file is larger than|skipping due to --max-filesize|exceeds (?:the )?max.?filesize/i },
   { code: 'BAD_ARGS',       re: /no such option|unrecognized arguments|unrecognised arguments|invalid argument|invalid value for/i },
-  { code: 'FFMPEG_MISSING', re: /ffmpeg (?:is )?not (?:installed|found)|ffprobe and ffmpeg not found|postprocessing.*ffmpeg|requested merging of multiple formats|you have requested merging/i },
+  { code: 'FFMPEG_MISSING', re: /ffmpeg (?:is )?not (?:installed|found)|ffprobe and ffmpeg not found|postprocessing.*ffmpeg|requested merging of multiple formats|you have requested merging|\b(?:won['’]t|will not) be merged\b/i },
   { code: 'IMPERSONATE',    re: /impersonat\w+ (?:target|request)|curl_cffi|impersonate.*not (?:available|supported)/i },
   { code: 'UNSUPPORTED_URL', re: /unsupported url|no suitable extractor|unknown extractor|is not a valid url|no video formats found for this url/i },
   { code: 'NO_FORMATS',     re: /requested format (?:is )?not available|no video formats found|only images are available|no video formats|unable to extract (?:any )?(?:video|data)|no formats? found for|some formats may be missing/i },
@@ -937,6 +937,32 @@ function leftoverParts(outBase) {
   catch { return []; }
 }
 
+function mergeVideoParts(outBase, parts) {
+  if (parts.length !== 2) return null;
+  const videoExts = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.ts']);
+  const audioExts = new Set(['.m4a', '.mp3', '.opus', '.ogg', '.aac', '.wav', '.flac']);
+  const videos = parts.filter(file => videoExts.has(path.extname(file).toLowerCase()));
+  const audios = parts.filter(file => audioExts.has(path.extname(file).toLowerCase()));
+  if (videos.length !== 1 || audios.length !== 1 || videos[0] === audios[0]) return null;
+
+  const ffmpeg = getFfmpeg();
+  const output = `${outBase}.mp4`;
+  try {
+    execFileSync(ffmpeg, [
+      '-y', '-nostdin', '-i', videos[0], '-i', audios[0],
+      '-map', '0:v:0', '-map', '1:a:0', '-c', 'copy', '-movflags', '+faststart', output,
+    ], { timeout: 10 * 60 * 1000, stdio: ['ignore', 'ignore', 'pipe'], maxBuffer: 4 * 1024 * 1024 });
+  } catch (error) {
+    try { fs.unlinkSync(output); } catch { /* ignore */ }
+    throw error;
+  }
+  if (!fs.existsSync(output) || !fs.statSync(output).size) {
+    try { fs.unlinkSync(output); } catch { /* ignore */ }
+    return null;
+  }
+  return output;
+}
+
 /**
  * yt-dlp exits 0 when --max-filesize aborts a download ("File is larger than
  * max-filesize … Aborting."), leaving no file — or only the video half of a
@@ -946,6 +972,22 @@ function assertProduced(outBase, stdout, what) {
   const file = findProduced(outBase);
   const tooBig = /larger than max-filesize/i.test(String(stdout || ''));
   if (file && !tooBig) return file;
+  if (!file && !tooBig && what === 'video') {
+    const parts = leftoverParts(outBase);
+    if (parts.length === 2 && getFfmpeg.works()) {
+      try {
+        const merged = mergeVideoParts(outBase, parts);
+        if (merged) {
+          for (const part of parts) {
+            try { fs.unlinkSync(part); } catch { /* ignore */ }
+          }
+          return merged;
+        }
+      } catch (error) {
+        console.warn('[ytdlp] failed to merge leftover video/audio parts:', error.message || error);
+      }
+    }
+  }
   for (const f of [file, ...leftoverParts(outBase)].filter(Boolean)) {
     try { fs.unlinkSync(f); } catch { /* ignore */ }
   }
@@ -964,7 +1006,9 @@ function scheduleAutoUpdate() {
 
   const runUpdate = async () => {
     try {
-      if (!await update({ quick: true })) console.warn('[ytdlp] scheduled auto-update did not find a working version');
+      const command = resolveCommand();
+      const result = command ? await update({ quick: true }) : await ensureInstalled();
+      if (!result) console.warn('[ytdlp] scheduled auto-update/install did not find a working version');
     } catch (error) {
       console.warn('[ytdlp] scheduled auto-update failed:', error.message || error);
     }
@@ -1110,7 +1154,8 @@ async function downloadAudio(url, { outBase, maxMB = 200, maxSeconds = 0, onAtte
     console.warn('[ytdlp] no raw audio stream — re-encoding to mp3 instead');
     const convertArgs = () => [
       '-f', 'bestaudio[ext=m4a]/bestaudio/best',
-      '--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0', '--ffmpeg-location', ffmpeg,
+      '--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0',
+      ...ffmpegLocationArgs(ffmpeg),
       ...durationFilter,
       ...sizeLimit,
       ...fragments,
@@ -1122,6 +1167,12 @@ async function downloadAudio(url, { outBase, maxMB = 200, maxSeconds = 0, onAtte
     const file = assertProduced(base, stdout, 'audio');
     return { file, ext: path.extname(file).slice(1).toLowerCase(), profile, attempts, transcoded: true };
   }
+}
+
+function ffmpegLocationArgs(ffmpeg = getFfmpeg()) {
+  return path.isAbsolute(String(ffmpeg || '')) && fs.existsSync(ffmpeg)
+    ? ['--ffmpeg-location', ffmpeg]
+    : [];
 }
 
 /**
@@ -1168,7 +1219,7 @@ async function downloadVideo(url, { height = 720, outBase, maxMB = 300, maxSecon
 
   const argsFor = (selector) => () => [
     '-f', selector,
-    ...(ffmpegWorks ? ['--merge-output-format', 'mp4', '--ffmpeg-location', ffmpeg] : []),
+    ...(ffmpegWorks ? ['--merge-output-format', 'mp4', ...ffmpegLocationArgs(ffmpeg)] : []),
     ...sizeFilter, ...durationFilter, ...fragments,
     '-o', `${base}.%(ext)s`, url,
   ];
@@ -1248,6 +1299,7 @@ module.exports = {
   // engine
   resolveCommand, version, ensureInstalled, update, scheduleAutoUpdate, run, spawnYtdlp,
   getInfo, probeRaw, searchVideos, downloadAudio, downloadVideo, runWithProfiles, findProduced,
+  ffmpegLocationArgs, assertProduced,
   capabilities, disableImpersonation, setMinimalBaseArgs, usingMinimalBaseArgs,
   // cookies
   setCookies, clearCookies, cookieInfo, cookieFile, hasCookies, normaliseCookieText,
