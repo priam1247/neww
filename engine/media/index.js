@@ -45,6 +45,7 @@ import '../providers/ddl/moviesdrive.js';
 import '../providers/stream/vidlink.js';
 import '../providers/stream/vixsrc.js';
 import '../providers/stream/vaplayer.js';
+import '../providers/stream/moviebox.js';
 import '../providers/stream/vidsrc.js';
 import '../providers/stream/videasy.js';
 

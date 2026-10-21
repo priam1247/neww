@@ -122,9 +122,10 @@ How a request flows:
    └─ engine queue (1 heavy job at a time, fair per chat)
         ├─ tier 1  torrent  knaben · torrentio · yts · eztv · nyaa · apibay · solidtorrents
         ├─ tier 2  ddl      hdhub4u · 4khdhub · moviesdrive → locker resolution → direct file
-        └─ tier 3  stream   vidlink · vidsrc · videasy → HLS
+        └─ tier 3  stream   moviebox(BFF) · vidlink · vixsrc · vaplayer → MP4 / HLS
    └─ quality ladder: 1080 → 720 → 480 (and up when only 4K exists)
-   └─ verification: real size, container magic bytes, ffprobe quality check
+   └─ verification: real size, container magic bytes, ffprobe quality check when present
+   └─ no ffmpeg needed: HLS is fetched and concatenated by engine/media/hls.js
    └─ streamed download (resume + stall guard) → document upload → LRU cache
 ```
 
