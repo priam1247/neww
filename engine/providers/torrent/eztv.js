@@ -6,11 +6,26 @@ import { magnet } from './_trackers.js';
 
 const HOSTS = ['https://eztvx.to', 'https://eztv.wf'];
 
-export function parseEztvTorrents(payload, { season, episode } = {}) {
+function showTitleTokens(value) {
+  const tokens = String(value || '')
+    .toLowerCase()
+    .replace(/\b(?:19|20)\d{2}\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  return tokens[0] === 'the' ? tokens.slice(1) : tokens;
+}
+
+export function parseEztvTorrents(payload, { season, episode, title } = {}) {
+  const wantedTokens = showTitleTokens(title);
   return (payload?.torrents || []).flatMap((t) => {
     const name = String(t.filename || t.title || '').trim();
     const hash = String(t.hash || '').trim();
     if (!name || (!hash && !t.magnet_url)) return [];
+
+    const nameTokens = new Set(showTitleTokens(name));
+    if (!wantedTokens.every(token => nameTokens.has(token))) return [];
 
     const rel = parseRelease(name);
     const apiSeason = Number(t.season);
@@ -49,7 +64,7 @@ export function parseEztvTorrents(payload, { season, episode } = {}) {
 class Eztv extends Provider {
   constructor() { super({ id: 'eztv', tier: 1, kinds: ['torrent'], supports: ['series'], trust: 1.3 }); }
 
-  async search(media, opts) {
+  async search(media, opts = {}) {
     if (!media.imdbId) return [];
     if (opts.season == null || opts.episode == null) return [];
     const imdbId = String(media.imdbId).replace(/^tt/i, '');
@@ -64,7 +79,7 @@ class Eztv extends Provider {
           const query = new URLSearchParams({ imdb_id: imdbId, limit: '100', page: String(page) });
           const data = await req(`${host}/api/get-torrents?${query}`);
           const rows = Array.isArray(data?.torrents) ? data.torrents : [];
-          for (const candidate of parseEztvTorrents(data, opts)) {
+          for (const candidate of parseEztvTorrents(data, { ...opts, title: opts.title || media.title })) {
             const key = candidate.hash || candidate.magnet;
             if (!seen.has(key)) {
               seen.add(key);

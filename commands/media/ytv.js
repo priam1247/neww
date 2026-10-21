@@ -276,7 +276,7 @@ const execute = async (sock, msg, args, extra) => {
     // one short line on failure, never a wall of engine detail
     if (err.code === 'TOO_BIG') {
       await say(`❌ Too large even at the lowest quality — try \`.ytv <link> 360\` or a shorter video.`);
-    } else if (err.code === 'NOT_ENOUGH_DISK' || err.code === 'DISK_CHECK_FAILED') {
+    } else if (err.code === 'NOT_ENOUGH_DISK') {
       await say(`❌ ${err.message}`);
     } else {
       const lines = String(YT.friendlyError(err) + YT.attemptsSummary(merged)).split('\n').filter(Boolean);

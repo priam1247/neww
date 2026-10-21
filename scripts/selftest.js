@@ -1405,7 +1405,9 @@ const { createProgress } = require(path.join(REPO, 'utils/progressCard.js'));
   });
 
   await test('ranker drops CAM releases when a clean candidate exists', async () => {
-    const { rank } = await import(pathToFileURL(path.join(REPO, 'engine/core/ranker.js')).href);
+    const { rank, isCamRelease } = await import(pathToFileURL(path.join(REPO, 'engine/core/ranker.js')).href);
+    assert.strictEqual(isCamRelease({ title: 'Dune.Part.Two.2024.1080p.WEB-DL.DTS-HD' }), false);
+    assert.strictEqual(isCamRelease({ title: 'Movie.2024.TS.x264' }), true);
     const out = rank([
       { provider: 'knaben', kind: 'torrent', quality: 720, title: 'Dune Part Two 2024 HDCAM', sourceTag: 'CAM', sizeMB: 1500, seeds: 900 },
       { provider: 'yts', kind: 'torrent', quality: 720, title: 'Dune Part Two 2024 BluRay', sourceTag: 'BLURAY', sizeMB: 1500, seeds: 40 },
@@ -1501,13 +1503,15 @@ const { createProgress } = require(path.join(REPO, 'utils/progressCard.js'));
     const result = parseEztvTorrents({
       torrents: [
         { hash: 'a'.repeat(40), filename: 'Breaking Bad S01E01 720p HDTV', season: 1, episode: 1, seeds: 21, size_bytes: 1048576000 },
+        { hash: 'f'.repeat(40), filename: 'Breaking.Brad.S01E01.Geometry.Wars.Survived.100000', season: 1, episode: 1, seeds: 22, size_bytes: 1048576000 },
         { hash: 'b'.repeat(40), filename: 'Breaking Bad S01E02 720p HDTV', season: 1, episode: 2, seeds: 10, size_bytes: 900000000 },
         { hash: 'c'.repeat(40), filename: 'Breaking Bad Season 1 Complete 720p HDTV', season: 1, episode: 0, seeds: 5, size_bytes: 7000000000 },
         { hash: 'd'.repeat(40), filename: 'Breaking Bad S02E01 720p HDTV', season: 2, episode: 1, seeds: 8, size_bytes: 1000000000 },
       ],
-    }, { season: 1, episode: 1 });
+    }, { season: 1, episode: 1, title: 'The Breaking Bad (2008)' });
     assert.strictEqual(result.length, 2);
     assert.strictEqual(result[0].episode, 1);
+    assert.match(result[0].title, /Breaking Bad/);
     assert.strictEqual(result[1].isPack, true);
     assert.strictEqual(result[1].episode, null);
     assert.ok(result[0].magnet.startsWith('magnet:?xt=urn:btih:'));
@@ -1823,6 +1827,11 @@ const { createProgress } = require(path.join(REPO, 'utils/progressCard.js'));
         { subjectType: 1, title: 'Spider-Man: Brand New Day', releaseDate: '2026-07-31', duration: 7200, subjectId: 'real' },
       ], { title: 'Spider-Man: Brand New Day', year: 2026, type: 'movie' });
       assert.strictEqual(spider.subjectId, 'real');
+
+      const breakingBad = pickMatch([
+        { subjectType: 2, title: 'Breaking Bad S1', subjectId: 'series' },
+      ], { title: 'Breaking Bad', type: 'series' });
+      assert.strictEqual(breakingBad.subjectId, 'series');
     });
 
     const movie = require(path.join(REPO, 'commands', 'media', 'movie'));
@@ -1842,6 +1851,21 @@ const { createProgress } = require(path.join(REPO, 'utils/progressCard.js'));
       assert.doesNotThrow(() => disk.requireMovieSpace('/fake', 2000, {}, statfs(5000)));
       assert.throws(() => disk.requireMediaDownloadSpace('/fake', { diskMinFreeMB: 1500 }, statfs(1499)), /not enough disk/);
       assert.throws(() => disk.requireMediaCopySpace('/fake', 1000, { diskCopyMultiplier: 1.2, diskCopyOverheadMB: 300 }, statfs(1499)), /not enough disk/);
+
+      const warnings = [];
+      const oldError = console.error;
+      console.error = (...args) => warnings.push(args.join(' '));
+      try {
+        const unavailable = () => { throw new Error('statfs unavailable'); };
+        assert.strictEqual(disk.freeMB('/fake', unavailable), null);
+        assert.doesNotThrow(() => disk.requireFreeSpace('/fake', 100, unavailable));
+        assert.doesNotThrow(() => disk.requireMovieSpace('/fake', 2000, {}, unavailable));
+        assert.doesNotThrow(() => disk.requireMediaDownloadSpace('/fake', {}, unavailable));
+        assert.doesNotThrow(() => disk.requireMediaCopySpace('/fake', 100, {}, unavailable));
+      } finally {
+        console.error = oldError;
+      }
+      assert.strictEqual(warnings.length, 1);
     });
 
     const getFfmpeg = require(path.join(REPO, 'utils', 'ffmpeg'));

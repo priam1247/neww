@@ -253,7 +253,7 @@ async function deliver(sock, msg, extra, meta, job) {
     if (e.code === 'SHORT' || /trailer\/fake/.test(String(e.message))) {
       return say(`❌ Only a trailer/fake clip of ${matched} is out there right now — no full-length copy yet.`);
     }
-    if (e.code === 'NOT_ENOUGH_DISK' || e.code === 'DISK_CHECK_FAILED') return say(`❌ ${e.message}`);
+    if (e.code === 'NOT_ENOUGH_DISK') return say(`❌ ${e.message}`);
     await say(`❌ No source for ${matched}.${hint}`);
   }
 }

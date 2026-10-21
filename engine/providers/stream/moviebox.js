@@ -190,6 +190,7 @@ function minStreamSeconds(media, isSeries) {
 function pickMatch(items, { title, year, type = null }) {
   const want = norm(title);
   const wantedTokens = want.split(' ').filter(Boolean);
+  const wantedSet = new Set(wantedTokens);
   let best = null;
   let bestScore = -Infinity;
 

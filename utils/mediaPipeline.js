@@ -308,7 +308,7 @@ async function downloadAndSend(sock, msg, extra, {
     // One short line, never a wall of engine detail.
     if (info.code === 'TOO_BIG') {
       await say(`❌ Too big (video ${MAX_VIDEO_MB} MB / audio ${MAX_AUDIO_MB} MB) — try a lower quality or a shorter clip.`);
-    } else if (err.code === 'NOT_ENOUGH_DISK' || err.code === 'DISK_CHECK_FAILED') {
+    } else if (err.code === 'NOT_ENOUGH_DISK') {
       await say(`❌ ${err.message}`);
     } else {
       const lines = String(YT.friendlyError(err) + YT.attemptsSummary(merged)).split('\n').filter(Boolean);

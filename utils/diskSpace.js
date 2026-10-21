@@ -1,6 +1,8 @@
 const fs = require('fs');
+const log = require('./logger')('diskSpace');
 
 const MB = 1024 * 1024;
+let warnedStatfsUnavailable = false;
 
 function freeMB(dir, statfsSync = fs.statfsSync) {
   try {
@@ -9,13 +11,18 @@ function freeMB(dir, statfsSync = fs.statfsSync) {
     const blockSize = Number(stats.bsize);
     if (!Number.isFinite(blocks) || !Number.isFinite(blockSize)) throw new Error('invalid statfs result');
     return blocks * blockSize / MB;
-  } catch {
-    throw Object.assign(new Error('not enough disk (free space unavailable)'), { code: 'DISK_CHECK_FAILED' });
+  } catch (error) {
+    if (!warnedStatfsUnavailable) {
+      warnedStatfsUnavailable = true;
+      log.warn('statfs unavailable; allowing media job to continue', error);
+    }
+    return null;
   }
 }
 
 function requireFreeSpace(dir, requiredMB, statfsSync = fs.statfsSync) {
   const free = freeMB(dir, statfsSync);
+  if (free == null) return { freeMB: null, requiredMB, skipped: true };
   if (free < requiredMB) {
     throw Object.assign(
       new Error(`not enough disk (${(free / 1024).toFixed(1)} GB free; need ${Math.ceil(requiredMB)} MB)`),

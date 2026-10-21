@@ -8,8 +8,12 @@ import { trustOf } from './registry.js';
 
 const SOURCE_PTS = { REMUX: 100, BLURAY: 80, WEBDL: 70, WEBRIP: 55, HDTV: 40, HDRIP: 35, DVDRIP: 30, CAM: 10, UNKNOWN: 30 };
 const NET_PTS = { NF: 18, AMZN: 14, DSNP: 16, ATVP: 14, MAX: 12, HMAX: 12 };
-const isCamRelease = (c) => c.sourceTag === 'CAM' ||
-  /\b(?:CAM|HDCAM|TS|TELESYNC|HDTS|TC|CAMRIP|HQCAM)\b/i.test(`${c.title || ''} ${c.sourceTag || ''}`);
+const CAM_RELEASE_RX = /\b(?:CAM|HDCAM|CAMRIP|HQCAM|TELESYNC|HDTS)\b/i;
+const TS_TC_RX = /(?:^|[.\s-]|\[|\])(?:TS|TC)(?=$|[.\s-]|\[|\])/;
+export const isCamRelease = (c) => {
+  const release = `${c.title || ''} ${c.sourceTag || ''}`;
+  return CAM_RELEASE_RX.test(release) || TS_TC_RX.test(release);
+};
 
 export function isOld(year) {
   return year && (new Date().getFullYear() - Number(year)) > config.oldYearThreshold;
