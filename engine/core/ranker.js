@@ -28,6 +28,12 @@ function sizeScore(sizeMB, win, maxMB) {
 
 export function rank(cands, opts) {
   const { want, year, maxMB = config.maxSendMB, anime = false } = opts;
+  const preferred = new Set((config.preferProviders || []).map((p) => String(p).toLowerCase()));
+  // A preferred provider only jumps the queue when its file is close to the
+  // quality that was asked for — a 480p MovieBox stream must not beat a real
+  // 1080p from a fallback source.
+  const isPreferred = (c) => preferred.has(String(c.provider || '').toLowerCase())
+    && (!want || Math.abs((c.quality || 0) - want) <= 240);
   const win = config.sizeWindow[want] || [0, Infinity];
   const seedFloor = isOld(year) ? config.minSeedsOld : config.minSeeds;
 
@@ -70,7 +76,7 @@ export function rank(cands, opts) {
       if (c.verified) s += 25;
 
       s *= trustOf(c.provider);
-      return { ...c, score: Math.round(s * 100) / 100 };
+      return { ...c, score: Math.round(s * 100) / 100, preferred: isPreferred(c) };
     })
-    .sort((a, b) => b.score - a.score);
+    .sort((a, b) => (a.preferred === b.preferred ? b.score - a.score : (a.preferred ? -1 : 1)));
 }

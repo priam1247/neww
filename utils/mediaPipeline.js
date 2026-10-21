@@ -20,7 +20,7 @@ const YT = require('./youtubedl');
 const settings = require('./mediaSettings');
 const providers = require('./downloadProviders');
 const {
-  downloadToFile, sniffFile, audioToMp3, ensureWhatsAppMp4, safeName, fmtMB,
+  downloadToFile, sniffFile, audioToMp3, tagMp3, ensureWhatsAppMp4, safeName, fmtMB,
 } = require('./mediaTransfer');
 const { getTempDir, deleteTempFile } = require('./tempManager');
 
@@ -186,6 +186,13 @@ async function downloadAndSend(sock, msg, extra, {
         const mp3 = await audioToMp3(file, `${outBase}_wa.mp3`);
         if (mp3) { files.push(mp3); finalFile = mp3; ext = 'mp3'; mime = 'audio/mpeg'; }
       }
+      // Tag before sending: a document keeps its name, but the file the user
+      // saves should still show the song title and artist in any player.
+      if (ext === 'mp3') {
+        const tagged = await tagMp3(finalFile, `${outBase}_tagged.mp3`, { title: safeName(title, ''), artist: author });
+        if (tagged) { files.push(tagged); finalFile = tagged; }
+      }
+
       const size = fs.statSync(finalFile).size;
       if (size > MAX_AUDIO_MB * 1024 * 1024) throw Object.assign(new Error('audio too large'), { code: 'TOO_BIG' });
 
@@ -193,7 +200,8 @@ async function downloadAndSend(sock, msg, extra, {
       const fileName = `${name}.${ext}`;
       const caption = `🎵 *${name}*${author ? `\n👤 ${author}` : ''}\n📦 ${fmtMB(size)}${viaText}`;
 
-      if (String(config.song?.sendAs || '').toLowerCase() === 'audio') {
+      // Documents by default — the filename is where the artist/song name live.
+      if (String(config.song?.sendAs || 'document').toLowerCase() === 'audio') {
         await sock.sendMessage(chatId, { audio: { url: finalFile }, mimetype: mime, ptt: false, fileName }, { quoted: msg });
       } else {
         await sock.sendMessage(chatId, { document: { url: finalFile }, mimetype: mime, fileName, caption }, { quoted: msg });
