@@ -2,7 +2,8 @@
  * Memory Watchdog - Monitors RAM and cleans up before the panel hits OOM.
  *
  * The budget is read from the real heap limit (see index.js: the bot re-execs
- * itself with --max-old-space-size on a 4 GB box, so this is normally ~3 GB):
+ * itself with --max-old-space-size, so this tracks the plan it is running on —
+ * ~4.1 GB on a 4.5 GB box, ~3.6 GB on a 4 GB one):
  *   >= 70% — soft clean: trim old store entries + temp files
  *   >= 85% — hard clean: wipe entire store
  *   >= 95% — graceful restart: clean exit so the panel restarts us
@@ -19,10 +20,10 @@ const v8   = require('v8');
 
 /**
  * How much heap may this process use?
- * `--max-old-space-size` (see npm start) already reflects the host's budget, so
- * the V8 heap limit is the honest number — hard-coding 1700 MB was wrong on any
- * host with a different plan (it restarted a 512 MB container far too late).
- * MEMORY_LIMIT_MB overrides it.
+ * `--max-old-space-size` (set by index.js from the real RAM) is the honest
+ * number — a hard-coded value was wrong on every plan but one. The V8 heap
+ * limit wins; a tighter cgroup limit still overrides it (that is the number
+ * the kernel will actually enforce), and MEMORY_LIMIT_MB overrides both.
  */
 function detectLimitMB() {
   const fromEnv = Number(process.env.MEMORY_LIMIT_MB);
@@ -44,9 +45,14 @@ function detectLimitMB() {
     } catch { /* not containerised */ }
   }
 
-  const totalMB = os.totalmem() / (1024 * 1024);
-  const candidates = [heapMB, cgroupMB, totalMB * 0.9].filter(n => Number.isFinite(n) && n > 32);
-  return Math.round(candidates.length ? Math.min(...candidates) : 3072);
+  // The heap limit already leaves room for native memory, so use it as-is
+  // instead of multiplying again — that double-reserve is what kept the
+  // watchdog at ~2.7 GB on a 4.5 GB box. Only a container limit may be lower.
+  const candidates = [heapMB, cgroupMB].filter(n => Number.isFinite(n) && n > 32);
+  if (candidates.length) return Math.round(Math.min(...candidates));
+
+  // No heap limit and no cgroup (bare `node index.js` on the host): plan one.
+  return require('./heapPlan').autoHeapMB(os.totalmem() / (1024 * 1024));
 }
 
 const TOTAL_MB          = detectLimitMB();
@@ -133,7 +139,12 @@ function gracefulRestart(heapMB) {
 
 // ─── START WATCHDOG ───────────────────────────────────────────────────────────
 function startMemoryWatchdog(store = null) {
-  console.log(`[MEMORY] Watchdog started — limit: ${TOTAL_MB} MB, interval: ${CHECK_INTERVAL / 1000}s`);
+  const limitGB = (TOTAL_MB / 1024).toFixed(1);
+  console.log(
+    `[MEMORY] Watchdog started — limit: ${TOTAL_MB} MB (${limitGB} GB) · ` +
+    `soft ${Math.round(TOTAL_MB * WARN_THRESHOLD)} · hard ${Math.round(TOTAL_MB * HARD_THRESHOLD)} · ` +
+    `restart ${Math.round(TOTAL_MB * RESTART_THRESHOLD)} MB · every ${CHECK_INTERVAL / 1000}s`
+  );
 
   setInterval(() => {
     const heapMB  = getHeapMB();
@@ -161,4 +172,4 @@ function startMemoryWatchdog(store = null) {
   }, CHECK_INTERVAL);
 }
 
-module.exports = { startMemoryWatchdog };
+module.exports = { startMemoryWatchdog, detectLimitMB };
