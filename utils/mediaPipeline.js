@@ -36,38 +36,6 @@ const bar = (percent) => {
   return `${'█'.repeat(filled)}${'░'.repeat(10 - filled)}`;
 };
 
-/** Throttled editable status card. */
-function progressCard(sock, chatId, msg, initialText) {
-  let key = null;
-  let lastEdit = 0;
-  let lastText = initialText;
-  let disabled = false;
-
-  sock.sendMessage(chatId, { text: initialText }, { quoted: msg })
-    .then((sent) => { key = sent?.key || null; })
-    .catch(() => { disabled = true; });
-
-  return {
-    async update(text, { force = false } = {}) {
-      if (disabled || !key || text === lastText) return;
-      const now = Date.now();
-      if (!force && now - lastEdit < 4000) return;
-      lastEdit = now;
-      lastText = text;
-      try { await sock.sendMessage(chatId, { text, edit: key }); }
-      catch { disabled = true; }
-    },
-    async final(text) {
-      if (disabled || !key) {
-        try { await sock.sendMessage(chatId, { text }, { quoted: msg }); } catch { /* ignore */ }
-        return;
-      }
-      try { await sock.sendMessage(chatId, { text, edit: key }); }
-      catch { try { await sock.sendMessage(chatId, { text }, { quoted: msg }); } catch { /* ignore */ } }
-    },
-  };
-}
-
 /** Parse "[audio|video] [144-1080]" written in any order (non-destructive). */
 function parseOptions(args, defaults = {}) {
   const rest = [...args];
@@ -107,10 +75,10 @@ async function downloadAndSend(sock, msg, extra, {
   const stamp = `${kind === 'audio' ? 'aud' : 'dl'}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const outBase = path.join(getTempDir(), stamp);
   const files = [];
-  let card = null;
 
   try {
-    await react('📥');
+    // Quiet by design: the reaction is the only progress signal.
+    await react('⏳');
 
     // Best-effort metadata (the download attempt reports the real problems).
     if (!title) {
@@ -125,10 +93,6 @@ async function downloadAndSend(sock, msg, extra, {
       }
     }
 
-    const label = kind === 'audio' ? '🎵' : '🎬';
-    const shownTitle = title || 'media';
-    card = progressCard(sock, chatId, msg, `${label} *${shownTitle}*\n⏳ Downloading…`);
-
     const deadlineAt = Date.now() + JOB_DEADLINE;
     let file = null;
     let via = 'yt-dlp';
@@ -139,23 +103,20 @@ async function downloadAndSend(sock, msg, extra, {
         console.log(`[media] yt-dlp profile "${name}" failed (${info.code})`);
         attempts.push({ engine: `yt-dlp:${name}`, code: info.code });
       };
-      const onProgress = (p) => card.update(`${label} *${shownTitle}*\n${bar(p.percent)} ${p.percent}%`);
-
       if (kind === 'audio') {
         const res = await YT.downloadAudio(url, {
-          outBase, maxMB: MAX_AUDIO_MB, onAttempt, onProgress,
+          outBase, maxMB: MAX_AUDIO_MB, onAttempt,
           deadlineMs: Math.max(20000, deadlineAt - Date.now()),
         });
         file = res.file;
       } else {
         const res = await YT.downloadVideo(url, {
           height, outBase, maxMB: MAX_VIDEO_MB, maxSeconds: MAX_MINUTES * 60,
-          onAttempt, onProgress, deadlineMs: Math.max(20000, deadlineAt - Date.now()),
+          onAttempt, deadlineMs: Math.max(20000, deadlineAt - Date.now()),
         });
         file = res.file;
       }
       files.push(file);
-      card.update(`${label} *${shownTitle}*\n✅ Downloaded — preparing…`, { force: true });
     } catch (ytErr) {
       const info = YT.classify(ytErr);
       attempts.push({ engine: 'yt-dlp', code: info.code });
@@ -170,7 +131,7 @@ async function downloadAndSend(sock, msg, extra, {
         throw ytErr;
       }
 
-      await card.update('🔄 Local engine failed — trying a backup source…', { force: true });
+      await react('🔄');
       let remoteHit;
       try {
         remoteHit = await providers.resolveMedia(url, {
@@ -188,7 +149,6 @@ async function downloadAndSend(sock, msg, extra, {
       const got = await downloadToFile(remoteHit.url, dest, {
         maxBytes: (kind === 'audio' ? MAX_AUDIO_MB : MAX_VIDEO_MB) * 1024 * 1024,
         headers: remoteHit.headers,
-        onProgress: (p) => card.update(`${label} *${shownTitle}* (${via})\n${bar(p.percent)} ${p.percent}%`),
       });
       files.push(dest);
       file = dest;
@@ -207,13 +167,11 @@ async function downloadAndSend(sock, msg, extra, {
     if (sniffed.kind === 'image') {
       const size = fs.statSync(file).size;
       if (size > MAX_VIDEO_MB * 1024 * 1024) throw Object.assign(new Error('image too large'), { code: 'TOO_BIG' });
-      card.update(`🖼️ *${shownTitle}*\n📤 Sending image…`, { force: true });
       await sock.sendMessage(chatId, {
         image: { url: file },
         mimetype: sniffed.mime,
         caption: `🖼️ *${safeName(title, 'image')}*${author ? `\n👤 ${author}` : ''}\n📦 ${fmtMB(size)}${viaText}`,
       }, { quoted: msg });
-      await card.update(`✅ Image sent`, { force: true });
       await react('✅');
       return { sent: true, kind: 'image', via };
     }
@@ -240,13 +198,11 @@ async function downloadAndSend(sock, msg, extra, {
       } else {
         await sock.sendMessage(chatId, { document: { url: finalFile }, mimetype: mime, fileName, caption }, { quoted: msg });
       }
-      await card.update(`✅ *${name}* sent`, { force: true });
       await react('✅');
       return { sent: true, kind: 'audio', via };
     }
 
     // ── Video ──────────────────────────────────────────────────────────────
-    await card.update(`🎬 *${shownTitle}*\n🎛️ Converting for WhatsApp…`, { force: true });
     const ready = await ensureWhatsAppMp4(file, path.join(getTempDir(), `${stamp}_wa.mp4`));
     files.push(ready);
     const size = fs.statSync(ready).size;
@@ -260,16 +216,17 @@ async function downloadAndSend(sock, msg, extra, {
     } else {
       await sock.sendMessage(chatId, { video: { url: ready }, mimetype: 'video/mp4', caption }, { quoted: msg });
     }
-    await card.update(`✅ *${name}* sent\n📦 ${fmtMB(size)}${viaText}`, { force: true });
     await react('✅');
     return { sent: true, kind: 'video', via };
   } catch (err) {
     const info = YT.classify(err);
     const merged = attempts.length ? attempts : (err.attempts || info.attempts);
+    // One short line, never a wall of engine detail.
     if (info.code === 'TOO_BIG') {
-      await (card ? card.final : say)(`❌ The file is bigger than this bot allows (video ${MAX_VIDEO_MB} MB / audio ${MAX_AUDIO_MB} MB).\nTry a lower quality or a shorter clip.`);
+      await say(`❌ Too big (video ${MAX_VIDEO_MB} MB / audio ${MAX_AUDIO_MB} MB) — try a lower quality or a shorter clip.`);
     } else {
-      await (card ? card.final : say)(YT.friendlyError(err) + YT.attemptsSummary(merged));
+      const lines = String(YT.friendlyError(err) + YT.attemptsSummary(merged)).split('\n').filter(Boolean);
+      await say(lines.slice(0, 3).join('\n'));
     }
     await react('❌');
     // The user has already been told what happened — report it, don't throw
@@ -286,4 +243,4 @@ async function downloadAndSend(sock, msg, extra, {
   }
 }
 
-module.exports = { downloadAndSend, parseOptions, progressCard, bar, QUALITIES, MAX_VIDEO_MB, MAX_AUDIO_MB };
+module.exports = { downloadAndSend, parseOptions, QUALITIES, MAX_VIDEO_MB, MAX_AUDIO_MB };

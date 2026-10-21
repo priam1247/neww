@@ -220,6 +220,32 @@ export async function resolveSeason({ title, year, season, quality = 720, tmdbId
   return { ...res, meta, season };
 }
 
+// ── SUBTITLES ──────────────────────────────────────────────────────────────
+/**
+ * Grab a subtitle track for a title (currently from MovieBox, whose BFF serves
+ * them next to the stream). Never throws — no subtitles is not a failure.
+ *
+ * @param {object} meta item from identify()/search()
+ * @param {{season?:number, episode?:number, lang?:string, dest?:string}} opts
+ * @returns {Promise<{file:string, language:string}|null>}
+ */
+export async function subtitles(meta, { season = null, episode = null, lang = 'en', dest = null } = {}) {
+  if (!meta) return null;
+  try {
+    const { fetchSubtitle } = await import('../providers/stream/moviebox.js');
+    const media = {
+      ...meta,
+      type: season != null ? 'series' : 'movie',
+      title: meta.title,
+      year: meta.year,
+    };
+    return await fetchSubtitle(media, { season, episode, lang, dest });
+  } catch (e) {
+    mlog.debug(`subtitles · ${e.message}`);
+    return null;
+  }
+}
+
 // ── file paths + cache bookkeeping ─────────────────────────────────────────
 export function targetFile(title, year, quality, season = null, episode = null) {
   return path.join(config.tempDir, sanitize(`${title}.${year || ''}`, quality, season, episode));
@@ -239,6 +265,6 @@ export function rememberFile(meta, quality, season, episode, file, sizeMB) {
 export { boot, cache, config, tv, parseRelease, matchesEpisode, tmdb, metadata, debrid, resolver, registry, queue, mlog, mirrorReport };
 export default {
   boot, identify, resolveMovie, resolveEpisode, resolveSeason,
-  targetFile, rememberFile, qualityLadder,
-  cache, config, tmdb, metadata, resolver, debrid, registry, queue, mirrorReport
+  targetFile, rememberFile, qualityLadder, subtitles,
+  cache, config, tmdb, metadata, resolver, debrid, registry, queue, mirrorReport, subtitles
 };

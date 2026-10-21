@@ -9,10 +9,12 @@
  */
 
 const fs = require('fs');
+const path = require('path');
 const config = require('../../config');
 const engine = require('../../utils/movieEngine');
 const selections = require('../../utils/selections');
 const host = require('../../utils/movieHost');
+const { getTempDir } = require('../../utils/tempManager');
 const logger = require('../../utils/logger');
 const log = logger('movie');
 
@@ -60,6 +62,12 @@ const help = (P) =>
   `e.g.  ${P}movie inception 2010 1080\n` +
   `      ${P}movie dune 2021\n\n` +
   `qualities: 480 · 720 · 1080 · 2160 (4k)`;
+
+const sanitize = (name) => String(name || 'subtitle')
+  .replace(/[\\/:*?"<>|]+/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .slice(0, 120) || 'subtitle';
 
 /** First two lines of an error — never a wall of text. */
 const shortError = (e) =>
@@ -124,6 +132,30 @@ async function offerChoices(sock, msg, extra, matches, job, kind) {
   });
 }
 
+/**
+ * Attach the subtitle track that came with the stream (MovieBox serves it).
+ * Best effort and silent: a missing subtitle never fails the download.
+ */
+async function trySubtitles(sock, chatId, msg, meta, { season = null, episode = null } = {}) {
+  if ((MOVIES().subtitles ?? true) === false) return null;
+  const lang = MOVIES().subtitleLang || 'en';
+  const base = season != null
+    ? `${meta.title} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
+    : `${meta.title}${meta.year ? ` (${meta.year})` : ''}`;
+  const dest = path.join(getTempDir(), `${sanitize(base)}.${lang}.srt`);
+
+  try {
+    const sub = await engine.subtitles(meta, { season, episode, lang, dest });
+    if (!sub?.file || !fs.existsSync(sub.file)) return null;
+    await host.sendSubtitle(sock, chatId, msg, { file: sub.file, name: base, language: sub.language || lang });
+    log.info(`${base} · subtitle ${sub.language || lang}`);
+    return sub;
+  } catch (e) {
+    log.debug(`${base} · no subtitle (${e.message})`);
+    return null;
+  }
+}
+
 /** Resolve → download → send. One file message, reactions for the rest. */
 async function deliver(sock, msg, extra, meta, job) {
   const chatId = extra.from;
@@ -169,6 +201,7 @@ async function deliver(sock, msg, extra, meta, job) {
       caption: `🎬 *${meta.title}${meta.year ? ` (${meta.year})` : ''}*\n${shownQuality}p${note} · ${host.fmtMB(fs.statSync(file).size)}`,
     });
 
+    await trySubtitles(sock, chatId, msg, meta);
     await react('✅');
   } catch (e) {
     // full message: the logger collapses the bullets onto one line, so the

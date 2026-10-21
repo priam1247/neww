@@ -218,11 +218,31 @@ async function sendMedia(sock, chatId, msg, { file, title = '', caption = '' } =
   return { as: 'document', bytes: stat.size };
 }
 
+/**
+ * Send a subtitle track (.srt) as its own small document.
+ * Subtitles are useless as a caption, and WhatsApp shows .srt inline on some
+ * clients — a document keeps the exact filename media players expect.
+ */
+async function sendSubtitle(sock, chatId, msg, { file, name = 'subtitle', language = '' } = {}) {
+  if (!file || !fs.existsSync(file)) return null;
+  const stat = fs.statSync(file);
+  if (!stat.size) return null;
+  const ext = (path.extname(file) || '.srt').replace('.', '').toLowerCase();
+  const base = safeName(name, 'subtitle');
+  const tag = language ? `.${String(language).toLowerCase().replace(/[^a-z-]/g, '')}` : '';
+  await sock.sendMessage(chatId, {
+    document: { url: file },
+    mimetype: ext === 'vtt' ? 'text/vtt' : 'application/x-subrip',
+    fileName: `${base}${tag}.${ext}`,
+  }, { quoted: msg });
+  return { bytes: stat.size, fileName: `${base}${tag}.${ext}` };
+}
+
 // ── Drime Cloud (same account as .paper) ───────────────────────────────────
 /** off | big (only files above the threshold) | always */
 function drimeMode() {
-  const mode = String(moviesCfg().drimeUpload || 'big').toLowerCase();
-  return ['off', 'big', 'always'].includes(mode) ? mode : 'big';
+  const mode = String(moviesCfg().drimeUpload || 'off').toLowerCase();
+  return ['off', 'big', 'always'].includes(mode) ? mode : 'off';
 }
 
 function drimeThresholdMB() {
@@ -414,7 +434,7 @@ module.exports = {
   tempDir, tempFile, cleanup, fmtMB,
   // media
   sniff, safeName, ffmpeg, ffmpegPath, defaultQuality, maxDownloadMB,
-  download, sendMedia,
+  download, sendMedia, sendSubtitle,
   // drime
   drimeReady, drimeMode, drimeThresholdMB, shouldUploadDrime, drimeUpload,
   // delivery

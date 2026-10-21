@@ -1,6 +1,37 @@
 /**
  * WhatsApp MD Bot - Main Entry Point
  */
+// ── heap sizing ──────────────────────────────────────────────────────────────
+// The panel starts us as a bare `node index.js`, so V8 picks a default old
+// space (~half of RAM, i.e. ~2 GB here) even though the box has 4 GB.
+// Re-exec ONCE with an explicit heap; the env guard prevents a loop.
+// (Top-level `return` is legal in CommonJS: the parent then just waits for the
+// child and mirrors its exit code, so the bot never runs twice.)
+function respawnWithBiggerHeap() {
+  if (process.env.ZAFAR_HEAP_SIZED === '1') return false;
+  const wantMB = Number(process.env.HEAP_MB) || Number(process.env.MEMORY_LIMIT_MB) || 3072;
+  if (!Number.isFinite(wantMB) || wantMB < 512) return false;
+  if (process.execArgv.some(a => a.startsWith('--max-old-space-size'))) return false;
+
+  let currentMB = 0;
+  try { currentMB = require('v8').getHeapStatistics().heap_size_limit / 1048576; } catch { /* ignore */ }
+  if (currentMB >= wantMB * 0.9) return false;
+
+  const { spawn } = require('child_process');
+  const args = ['--expose-gc', `--max-old-space-size=${wantMB}`, __filename, ...process.argv.slice(2)];
+  console.log(`[BOOT] heap ${Math.round(currentMB)} MB → ${wantMB} MB (restarting once)`);
+
+  const child = spawn(process.execPath, args, {
+    stdio: 'inherit',
+    env: { ...process.env, ZAFAR_HEAP_SIZED: '1' },
+  });
+  child.on('exit', (code, signal) => process.exit(code == null ? (signal ? 1 : 0) : code));
+  child.on('error', (e) => { console.error('[BOOT] could not resize heap:', e.message); process.exit(1); });
+  return true;
+}
+
+if (respawnWithBiggerHeap()) return;
+
 process.env.PUPPETEER_SKIP_DOWNLOAD = 'true';
 process.env.PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = 'true';
 process.env.PUPPETEER_CACHE_DIR = process.env.PUPPETEER_CACHE_DIR || '/tmp/puppeteer_cache_disabled';

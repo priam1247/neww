@@ -246,6 +246,184 @@ async function play({ subjectId, detailPath }, se, ep) {
   };
 }
 
+// A short-lived hit cache: subtitles ask for the same title right after the
+// episode was resolved, and a range of episodes must not re-search per file.
+const HIT_TTL = 10 * 60 * 1000;
+const hits = new Map();
+
+function hitKey(media, season, episode, isSeries) {
+  return [
+    String(media.title || '').toLowerCase().trim(),
+    media.year || '', isSeries ? 'series' : 'movie', season, episode,
+  ].join('|');
+}
+
+/**
+ * Title → the BFF's own match → the play payload.
+ * Shared by search() and the subtitle helper so a season pack does not search
+ * the same show once per episode more than necessary.
+ */
+async function locate(media, opts = {}) {
+  const isSeries = media.type === 'series';
+  const season = Number(opts.season ?? 1);
+  const episode = Number(opts.episode ?? 1);
+
+  const key = hitKey(media, season, episode, isSeries);
+  const cached = hits.get(key);
+  if (cached && cached.until > Date.now()) return cached.hit;
+  hits.delete(key);
+
+  const found = await bff('/subject/search', {
+    method: 'POST',
+    body: { keyword: String(media.title || '').trim(), page: 1, perPage: 20 },
+  });
+  const inner = found?.data || {};
+  const items = inner.items || inner.list || [];
+  if (!items.length) return null;
+
+  const match = pickMatch(items, { title: media.title, year: media.year, type: media.type });
+  if (!match || !match.detailPath || !match.subjectId) {
+    mlog.debug(`${media.title}: no match in ${items.length} result(s)`);
+    return null;
+  }
+
+  // movies are addressed se=0/ep=0, but a few titles only answer on 1/1
+  const attempts = isSeries ? [[season, episode]] : [[0, 0], [1, 1]];
+  for (const [se, ep] of attempts) {
+    try {
+      let r = await play(match, se, ep);
+      if (!r.hasResource || (!r.streams.length && !r.hls.length)) {
+        // a rotated player origin answers 403/404 once; refresh and retry
+        if (!domain) continue;
+        domain = null;
+        r = await play(match, se, ep);
+      }
+      if (r.hasResource && (r.streams.length || r.hls.length)) {
+        const hit = { match, payload: r, se, ep, isSeries, season, episode };
+        if (hits.size > 40) hits.delete(hits.keys().next().value);
+        hits.set(key, { hit, until: Date.now() + HIT_TTL });
+        return hit;
+      }
+    } catch (e) {
+      mlog.debug(`${match.title} se=${se} ep=${ep} · ${e.message}`);
+      if (e.status === 403 || e.status === 404) domain = null;
+    }
+  }
+  mlog.debug(`${match.title}: no playable resource`);
+  return null;
+}
+
+/**
+ * Subtitle tracks for a title (MovieBox serves them next to the stream).
+ *
+ * `target` is either a media meta object (then the title is located here) or a
+ * `locate()` hit — passing the hit back avoids searching/playing twice per
+ * delivery.
+ * @returns {Promise<Array<{language:string, url:string, format:string}>>}
+ */
+export async function captions(target, opts = {}) {
+  const hit = target && target.payload ? target : await locate(target, opts);
+  if (!hit) return [];
+
+  const stream = hit.payload.streams[0] || hit.payload.dash?.[0] || null;
+  const format = stream?.format || 'MP4';
+  const id = stream?.id;
+  if (!id) return [];
+
+  // The BFF has used more than one name for this route; ask each once and take
+  // the first answer that actually carries tracks.
+  const routes = ['/subject/caption', '/subject/captions', '/subject/subtitle'];
+  for (const route of routes) {
+    const qs = new URLSearchParams({
+      format: String(format),
+      id: String(id),
+      subjectId: hit.match.subjectId,
+      detailPath: hit.match.detailPath,
+    });
+    let j = null;
+    try {
+      j = await bff(`${route}?${qs.toString()}`);
+    } catch (e) {
+      mlog.debug(`captions ${route} · ${e.message}`);
+      continue;
+    }
+    const inner = j?.data ?? {};
+    const list = Array.isArray(inner)
+      ? inner
+      : (inner.captions || inner.list || inner.subtitles || inner.tracks || []);
+    const tracks = (Array.isArray(list) ? list : [])
+      .map(c => ({
+        language: c.language || c.lan || c.lang || c.code || 'und',
+        url: c.url || c.src || c.subtitleUrl || null,
+        format: String(c.format || c.ext || 'srt').toLowerCase(),
+      }))
+      .filter(c => c.url && /^https?:/i.test(c.url));
+    if (tracks.length) return tracks;
+  }
+  return [];
+}
+
+/** Does this buffer look like a subtitle file rather than an HTML error page? */
+function looksLikeSubtitle(buf) {
+  const head = buf.slice(0, 4096).toString('utf8').replace(/^\uFEFF/, '').trim();
+  if (!head) return false;
+  if (/^<(!doctype|html)/i.test(head)) return false;
+  return /-->/.test(head) || /^WEBVTT/i.test(head);
+}
+
+/**
+ * Download one subtitle file.
+ * @returns {Promise<{file:string, language:string, url:string, bytes:number}|null>}
+ */
+export async function fetchSubtitle(target, opts = {}) {
+  const prefer = String(opts.lang || 'en').toLowerCase();
+  let tracks = [];
+  const hit = target && target.payload ? target : null;
+  try { tracks = await captions(hit || target, opts); } catch (e) { mlog.debug(`captions · ${e.message}`); return null; }
+  if (!tracks.length) return null;
+
+  // best language first, then anything else that is likely to be English-ish
+  const ranked = tracks.slice().sort((a, b) => {
+    const score = (t) => {
+      const l = String(t.language).toLowerCase();
+      if (l === prefer) return 0;
+      if (l.startsWith(prefer)) return 1;
+      if (prefer === 'en' && /english|eng/.test(l)) return 2;
+      if (prefer === 'en' && /unknown|und/.test(l)) return 3;
+      return 4;
+    };
+    return score(a) - score(b);
+  });
+
+  const dest = opts.dest || null;
+  if (!dest) {
+    const pick0 = ranked[0];
+    return { file: null, language: pick0.language, url: pick0.url };
+  }
+
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  for (const pick of ranked.slice(0, 3)) {
+    try {
+      const res = await fetch(pick.url, { signal: AbortSignal.timeout(TIMEOUT), redirect: 'follow' });
+      if (!res.ok) throw new Error(`subtitle HTTP ${res.status}`);
+      let buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length < 20) throw new Error('empty subtitle');
+      if (!looksLikeSubtitle(buf)) throw new Error('not a subtitle file');
+
+      // keep the real container: WEBVTT must not be shipped as .srt
+      const isVtt = /^\uFEFF?\s*WEBVTT/i.test(buf.slice(0, 64).toString('utf8'));
+      const finalDest = isVtt && !/\.vtt$/i.test(dest) ? dest.replace(/\.[^.]+$/, '.vtt') : dest;
+      fs.mkdirSync(path.dirname(finalDest), { recursive: true });
+      fs.writeFileSync(finalDest, buf);
+      return { file: finalDest, language: pick.language, url: pick.url, bytes: buf.length };
+    } catch (e) {
+      mlog.debug(`subtitle ${pick.language} · ${e.message}`);
+    }
+  }
+  return null;
+}
+
 class MovieBox extends Provider {
   constructor() {
     // tier 3 (streams), high trust: a real API, not a scraper
@@ -253,72 +431,33 @@ class MovieBox extends Provider {
   }
 
   async search(media, opts) {
-    const isSeries = media.type === 'series';
-    const season = Number(opts.season ?? 1);
-    const episode = Number(opts.episode ?? 1);
+    const hit = await locate(media, opts);
+    if (!hit) return [];
 
-    // 1 — find the title
-    const found = await bff('/subject/search', {
-      method: 'POST',
-      body: { keyword: String(media.title || '').trim(), page: 1, perPage: 20 },
-    });
-    const inner = found?.data || {};
-    const items = inner.items || inner.list || [];
-    if (!items.length) return [];
-
-    const match = pickMatch(items, { title: media.title, year: media.year, type: media.type });
-    if (!match || !match.detailPath || !match.subjectId) {
-      mlog.debug(`${media.title}: no match in ${items.length} result(s)`);
-      return [];
-    }
-
-    // 2 — ask for the stream. Movies are addressed as se=0/ep=0, but a few
-    //     titles only answer on 1/1, so try both before giving up.
-    const attempts = isSeries ? [[season, episode]] : [[0, 0], [1, 1]];
-    let got = null;
-    for (const [se, ep] of attempts) {
-      try {
-        const r = await play(match, se, ep);
-        if (r.hasResource && (r.streams.length || r.hls.length)) { got = r; break; }
-      } catch (e) {
-        mlog.debug(`${match.title} se=${se} ep=${ep} · ${e.message}`);
-        if (e.status === 404 || e.status === 403) {
-          domain = null;                        // force a fresh player origin
-          try {
-            const r = await play(match, se, ep);
-            if (r.hasResource && (r.streams.length || r.hls.length)) { got = r; break; }
-          } catch { /* next attempt */ }
-        }
-      }
-    }
-    if (!got) {
-      mlog.debug(`${match.title}: no playable resource`);
-      return [];
-    }
-
+    const { match, payload, isSeries, season, episode } = hit;
     const out = [];
-    const headers = { referer: got.referer };
+    const headers = { referer: payload.referer };
     const label = `${match.title}${match.year ? ` ${match.year}` : ''}`;
 
     // direct MP4 per resolution — the best case for this bot (no ffmpeg, no HLS)
-    for (const s of got.streams) {
-      const url = s?.url;
+    for (const st of payload.streams) {
+      const url = st?.url;
       if (!url || !/^https?:/i.test(url)) continue;
-      const height = Number(s.resolutions) || 0;
+      const height = Number(st.resolutions) || 0;
       out.push({
         provider: this.id,
         kind: /\.m3u8(\?|$)/i.test(url) ? 'hls' : 'file',
         url,
         title: `${label} ${height}p`,
         quality: height || Number(opts.want) || 1080,
-        codec: s.codecName || 'x264',
+        codec: st.codecName || 'x264',
         sourceTag: 'WEBRIP',
         audio: [], langs: [],
         isPack: false,
         isEpisode: isSeries,
         season: isSeries ? season : null,
         episode: isSeries ? episode : null,
-        sizeMB: toMB(s.size),
+        sizeMB: toMB(st.size),
         seeds: 999,
         __name: `moviebox ${height || '?'}p`,
         headers,
@@ -326,7 +465,7 @@ class MovieBox extends Provider {
     }
 
     // HLS fallbacks (the engine downloads these natively, still no ffmpeg)
-    for (const h of got.hls) {
+    for (const h of payload.hls) {
       const url = typeof h === 'string' ? h : h?.url;
       if (!url || !/^https?:/i.test(url)) continue;
       const height = Number(h?.resolutions) || Number(opts.want) || 1080;
@@ -350,9 +489,7 @@ class MovieBox extends Provider {
       });
     }
 
-    if (out.length) {
-      mlog.debug(`${match.title} · ${out.length} stream(s) · best ${out[0].quality}p`);
-    }
+    if (out.length) mlog.debug(`${match.title} · ${out.length} stream(s) · best ${out[0].quality}p`);
     return out;
   }
 
@@ -362,4 +499,4 @@ class MovieBox extends Provider {
 const instance = new MovieBox();
 register(instance);
 export default instance;
-export { MovieBox, pickMatch, toMB };
+export { MovieBox, pickMatch, toMB, locate };

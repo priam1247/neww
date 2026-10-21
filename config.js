@@ -55,10 +55,6 @@ module.exports = {
     apiKey: env.GIFTED_API_KEY || '_0u5aff45,_0l1876s8qc',
   },
 
-  // Telegram bot token for .tgsticker / .tgpack. Create a free bot with
-  // @BotFather on Telegram and paste its token here (or set TELEGRAM_BOT_TOKEN).
-  telegramBotToken: env.TELEGRAM_BOT_TOKEN || '',
-
   // ─── yt-dlp / YouTube (used by .song and .ytv) ────────────────────────────
   // Hosting IPs are what trigger YouTube's "confirm you're not a bot" wall.
   // Cookies fix it: export a cookies.txt from a logged-in browser and drop it
@@ -171,14 +167,19 @@ module.exports = {
     minFreeMB: Number(env.MOVIE_MIN_FREE_MB || 800),  // refuse a download below this
 
     // ── Drime Cloud delivery (the same account .paper uses) ───────────────
-    // 'off'    → never upload
-    // 'big'    → upload only files above drimeThresholdMB (default)
+    // OFF by default: this host has plenty of disk, and a chat never needs a
+    // cloud link for a file WhatsApp can carry itself.
+    // 'off'    → never upload (default)
+    // 'big'    → upload only files above drimeThresholdMB
     // 'always' → every finished movie/episode gets a permanent Drime link
-    drimeUpload: (env.DRIME_MOVIES || 'big').toLowerCase(),
+    drimeUpload: (env.DRIME_MOVIES || 'off').toLowerCase(),
     drimeThresholdMB: Number(env.DRIME_MOVIES_MB || 0),   // 0 = use video.maxMB
     drimeFolderId: Number(env.DRIME_MOVIES_FOLDER_ID || 0), // 0 = Drime root
     region: env.REGION || 'US',
     episodeBatchLimit: Number(env.MOVIE_BATCH_LIMIT || 10),
+    // attach the English subtitle (.srt) that MovieBox serves with the stream
+    subtitles: env.MOVIE_SUBTITLES !== '0',
+    subtitleLang: env.MOVIE_SUBTITLE_LANG || 'en',
 
     // engine storage — stays inside the bot's ./temp folder
     tempDir: env.MOVIE_TEMP_DIR || 'temp/movies',

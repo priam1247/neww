@@ -1,10 +1,11 @@
 /**
- * Memory Watchdog - Monitors RAM and cleans up before KataBump hits OOM.
+ * Memory Watchdog - Monitors RAM and cleans up before the panel hits OOM.
  *
- * Thresholds (based on 1700 MB heap budget of the 2 GB KataBump server):
- *   >= 70% (~1190 MB) — soft clean: trim old store entries + temp files
- *   >= 85% (~1445 MB) — hard clean: wipe entire store
- *   >= 95% (~1615 MB) — graceful restart: clean exit so KataBump auto-restarts
+ * The budget is read from the real heap limit (see index.js: the bot re-execs
+ * itself with --max-old-space-size on a 4 GB box, so this is normally ~3 GB):
+ *   >= 70% — soft clean: trim old store entries + temp files
+ *   >= 85% — hard clean: wipe entire store
+ *   >= 95% — graceful restart: clean exit so the panel restarts us
  *
  * Usage in index.js (already patched):
  *   const { startMemoryWatchdog } = require('./utils/memoryWatchdog');
@@ -45,7 +46,7 @@ function detectLimitMB() {
 
   const totalMB = os.totalmem() / (1024 * 1024);
   const candidates = [heapMB, cgroupMB, totalMB * 0.9].filter(n => Number.isFinite(n) && n > 32);
-  return Math.round(candidates.length ? Math.min(...candidates) : 1700);
+  return Math.round(candidates.length ? Math.min(...candidates) : 3072);
 }
 
 const TOTAL_MB          = detectLimitMB();

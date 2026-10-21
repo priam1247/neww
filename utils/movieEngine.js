@@ -161,6 +161,15 @@ module.exports = {
       .slice(0, limit);
   },
 
+  /**
+   * Subtitle file for a title (MovieBox BFF). Returns null when there is none.
+   * @returns {Promise<{file:string, language:string}|null>}
+   */
+  async subtitles(meta, { season = null, episode = null, lang = 'en', dest = null } = {}) {
+    const { subtitles } = await load();
+    return subtitles(meta, { season, episode, lang, dest });
+  },
+
   /** verify the configured debrid keys against the provider APIs */
   async debridAccounts() {
     const { debrid } = await load();

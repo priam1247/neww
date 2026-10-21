@@ -19,6 +19,7 @@ const config = require('../../config');
 const engine = require('../../utils/movieEngine');
 const selections = require('../../utils/selections');
 const host = require('../../utils/movieHost');
+const { getTempDir } = require('../../utils/tempManager');
 const logger = require('../../utils/logger');
 const log = logger('series');
 
@@ -124,6 +125,20 @@ async function offerChoices(sock, msg, extra, matches, job) {
 }
 
 /** Send one finished file through the bot's delivery path (document, like .song). */
+/** Attach the subtitle track that came with the stream. Best effort, silent. */
+async function trySubtitles(sock, msg, chatId, meta, season, episode) {
+  if ((MOVIES().subtitles ?? true) === false) return null;
+  const lang = MOVIES().subtitleLang || 'en';
+  const base = `${meta.title} S${pad(season)}E${pad(episode)}`;
+  const dest = path.join(getTempDir(), `${base.replace(/[\\/:*?"<>|]+/g, ' ')}.${lang}.srt`);
+  try {
+    const sub = await engine.subtitles(meta, { season, episode, lang, dest });
+    if (!sub?.file || !fs.existsSync(sub.file)) return null;
+    await host.sendSubtitle(sock, chatId, msg, { file: sub.file, name: base, language: sub.language || lang });
+    return sub;
+  } catch { return null; }
+}
+
 async function sendEpisode(sock, msg, chatId, file, meta, season, episode, quality, res) {
   const stat = fs.statSync(file);
   const tag = `S${pad(season)}E${pad(episode)}`;
@@ -139,6 +154,8 @@ async function sendEpisode(sock, msg, chatId, file, meta, season, episode, quali
     title: `${meta.title} ${tag}`,
     caption,
   });
+
+  await trySubtitles(sock, msg, chatId, meta, season, episode);
 
   return stat.size;
 }
