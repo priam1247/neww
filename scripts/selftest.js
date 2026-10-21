@@ -1219,6 +1219,73 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     assert.strictEqual(alts[0].title, 'Avengers: Infinity War');
   });
 
+
+  console.log('\n── 21. moviebox (BFF, no scraping) ──');
+
+  await test('moviebox turns the BFF into direct MP4 candidates', async () => {
+    const http = require('http');
+    const hits = { token: 0, search: 0, play: 0, unauth: 0 };
+    let rejectFirstSearch = true;
+
+    const server = http.createServer((req, res) => {
+      const u = new URL(req.url, 'http://x');
+      const json = (o, h = {}) => { res.writeHead(200, { 'content-type': 'application/json', ...h }); res.end(JSON.stringify(o)); };
+
+      if (u.pathname === '/wefeed-h5api-bff/home') {
+        hits.token++;
+        return json({ code: 0, data: {} }, { 'x-user': JSON.stringify({ token: `GUEST${hits.token}` }) });
+      }
+      if (u.pathname === '/wefeed-h5api-bff/subject/search') {
+        hits.search++;
+        // prove the 401 → refresh-token → replay path works
+        if (rejectFirstSearch && req.headers.authorization !== 'Bearer GUEST2') {
+          rejectFirstSearch = false;
+          hits.unauth++;
+          res.writeHead(401); return res.end('{}');
+        }
+        return json({ code: 0, data: { items: [
+          { subject: { title: 'Infinity Wars', subjectType: 1, releaseDate: '2018-05-06', subjectId: '111', detailPath: 'ghost-aaa', hasResource: true } },
+          { subject: { title: 'Avengers: Infinity War', subjectType: 1, releaseDate: '2018-04-27', subjectId: '299534', detailPath: 'avengers-bbb', hasResource: true } },
+        ] } });
+      }
+      if (u.pathname === '/wefeed-h5api-bff/media-player/get-domain') {
+        return json({ code: 0, data: `http://127.0.0.1:${server.address().port}` });
+      }
+      if (u.pathname === '/wefeed-h5api-bff/subject/play') {
+        hits.play++;
+        // movies answer on se=1/ep=1 only, to exercise the 0/0 → 1/1 fallback
+        if (u.searchParams.get('se') === '0') return json({ code: 0, data: { hasResource: false, streams: [] } });
+        return json({ code: 0, data: {
+          hasResource: true,
+          streams: [{ url: 'https://cdn.example/1080.mp4', resolutions: 1080, size: 1095262921, codecName: 'h264', format: 'MP4' }],
+          hls: [],
+        } });
+      }
+      res.writeHead(404); res.end('no');
+    });
+
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    process.env.MOVIEBOX_BFF = `http://127.0.0.1:${server.address().port}/wefeed-h5api-bff`;
+    try {
+      const { default: mb } = await import(pathToFileURL(path.join(REPO, 'engine/providers/stream/moviebox.js')).href);
+      const cands = await mb.search(
+        { title: 'Avengers Infinity War', year: '2018', type: 'movie' },
+        { want: 1080, season: null, episode: null },
+      );
+
+      assert.strictEqual(cands.length, 1, `expected 1 candidate, got ${JSON.stringify(cands)}`);
+      assert.strictEqual(cands[0].kind, 'file', 'direct MP4 was not offered as a file');
+      assert.strictEqual(cands[0].quality, 1080);
+      assert.ok(Math.round(cands[0].sizeMB) === 1045, `size not converted from bytes: ${cands[0].sizeMB}`);
+      assert.ok(/avengers/.test(cands[0].headers.referer), 'player referer missing from the candidate');
+      assert.ok(hits.unauth === 1, 'the 401 retry path was not exercised');
+      assert.ok(hits.play >= 2, 'the se=0 → se=1 fallback did not run');
+    } finally {
+      delete process.env.MOVIEBOX_BFF;
+      server.close();
+    }
+  });
+
   // ─── summary ────────────────────────────────────────────────────────────────
   console.log(`\n${'─'.repeat(52)}`);
   if (failures.length) {
