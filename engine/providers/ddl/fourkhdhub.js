@@ -4,7 +4,7 @@ import { req, anchors } from '../../core/http.js';
 import { withMirrors } from '../../core/mirrors.js';
 import { parseRelease } from '../../core/release.js';
 
-const HOSTS = ['https://4khdhub.fans', 'https://4khdhub.icu', 'https://4khdhub.casa'];
+const HOSTS = ['https://4khdhub.one', 'https://4khdhub.fans', 'https://4khdhub.icu', 'https://4khdhub.casa'];
 const LOCKER = /hubcloud|gdflix|drive\.google|hubdrive|filepress/i;
 const sizeOf = (t) => { const m = /([\d.]+)\s*(GB|MB)/i.exec(t); return m ? parseFloat(m[1]) * (/G/i.test(m[2]) ? 1024 : 1) : 0; };
 

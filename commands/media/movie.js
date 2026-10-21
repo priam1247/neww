@@ -15,6 +15,7 @@ const engine = require('../../utils/movieEngine');
 const selections = require('../../utils/selections');
 const host = require('../../utils/movieHost');
 const { getTempDir } = require('../../utils/tempManager');
+const { probeMedia } = require('../../utils/mediaTransfer');
 const logger = require('../../utils/logger');
 const log = logger('movie');
 
@@ -69,6 +70,29 @@ const sanitize = (name) => String(name || 'subtitle')
   .trim()
   .slice(0, 120) || 'subtitle';
 
+/**
+ * Shortest playtime a real copy can have. Fake uploads ("[Hindi] [Full movie]",
+ * trailers, 2-minute teasers) are served under the film's own name.
+ */
+function minPlaySeconds(runtimeMin, kind = 'movie') {
+  const rt = Number(runtimeMin) || 0;
+  if (kind === 'episode') return rt ? rt * 60 * 0.5 : 5 * 60;
+  return Math.max(40 * 60, rt * 60 * 0.6);
+}
+
+/** Throw when the downloaded file is a clip, not the title. */
+async function assertFullLength(file, runtimeMin, kind = 'movie') {
+  const { duration } = await probeMedia(file);
+  const min = minPlaySeconds(runtimeMin, kind);
+  if (duration && duration < min) {
+    throw Object.assign(
+      new Error(`only ${Math.max(1, Math.round(duration / 60))} min long — a trailer/fake upload, not the full ${kind}`),
+      { code: 'SHORT' },
+    );
+  }
+  return duration;
+}
+
 /** First two lines of an error — never a wall of text. */
 const shortError = (e) =>
   `❌ ${String(e && e.message ? e.message : e).split('\n').filter(Boolean).slice(0, 2).join('\n')}`;
@@ -100,7 +124,12 @@ async function fetchSource(meta, quality, attempts = 3) {
     try {
       const saved = await engine.download(resolved, dest);
       // HLS sources may land as .ts (no ffmpeg on the host) — use the real path
-      return { res: resolved, file: (saved && saved.file) || dest };
+      const file = (saved && saved.file) || dest;
+      const full = resolved.meta || meta;
+      await assertFullLength(file, full.runtime, 'movie');
+      // indexed files are never swept as orphans while they upload
+      await engine.rememberFile(full, quality, null, null, file, fs.statSync(file).size / 1048576);
+      return { res: resolved, file };
     } catch (e) {
       lastErr = e;
       log.warn(`${meta.title} ${quality}p · ${resolved.provider} download failed · ${e.message}`);
@@ -193,6 +222,7 @@ async function deliver(sock, msg, extra, meta, job) {
 
     if (host.shouldUploadDrime(fs.statSync(file).size) && host.drimeReady()) await react('☁️');
 
+    try { (await engine.load()).cache?.markActive?.(file); } catch { /* best effort */ }
     const shownQuality = res.quality || quality;
     const note = res.downgraded ? ` (${shownQuality}p)` : '';
     await host.deliver(sock, chatId, msg, {
@@ -203,6 +233,7 @@ async function deliver(sock, msg, extra, meta, job) {
 
     await trySubtitles(sock, chatId, msg, meta);
     await react('✅');
+    try { (await engine.load()).cache?.unmarkActive?.(file); } catch { /* ignore */ }
   } catch (e) {
     // full message: the logger collapses the bullets onto one line, so the
     // reason (dead host, quality mismatch, no candidates) stays visible
@@ -216,6 +247,9 @@ async function deliver(sock, msg, extra, meta, job) {
       ? `\n💡 Did you mean *${alts[0].title}*${alts[0].year ? ` (${alts[0].year})` : ''}?` +
         `\n→ ${config.prefix}movie ${alts[0].title.toLowerCase()}${alts[0].year ? ` ${alts[0].year}` : ''}`
       : '';
+    if (e.code === 'SHORT' || /trailer\/fake/.test(String(e.message))) {
+      return say(`❌ Only a trailer/fake clip of ${matched} is out there right now — no full-length copy yet.`);
+    }
     await say(`❌ No source for ${matched}.${hint}`);
   }
 }
@@ -256,6 +290,8 @@ module.exports = {
 
   // exported for tests
   _parseArgs: parseArgs,
+  _minPlaySeconds: minPlaySeconds,
+  _assertFullLength: assertFullLength,
   _deliver: deliver,
   _offerChoices: offerChoices,
 };

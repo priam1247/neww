@@ -4,7 +4,7 @@ import { req } from '../../core/http.js';
 import { parseRelease } from '../../core/release.js';
 import { magnet } from './_trackers.js';
 
-const HOSTS = ['https://solidtorrents.to', 'https://alpha.solidtorrents.to'];
+const HOSTS = ['https://solidtorrents.eu', 'https://solidtorrents.to', 'https://alpha.solidtorrents.to'];
 
 class SolidTorrents extends Provider {
   constructor() { super({ id: 'solidtorrents', tier: 1, kinds: ['torrent'], trust: 0.9 }); }

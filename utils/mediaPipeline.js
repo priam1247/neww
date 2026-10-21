@@ -22,11 +22,11 @@ const providers = require('./downloadProviders');
 const {
   downloadToFile, sniffFile, audioToMp3, tagMp3, ensureWhatsAppMp4, safeName, fmtMB,
 } = require('./mediaTransfer');
-const { getTempDir, deleteTempFile } = require('./tempManager');
+const { getTempDir, deleteTempFile, holdTemp } = require('./tempManager');
 
-const MAX_VIDEO_MB = Number(config.video?.maxMB) || 300;
+const MAX_VIDEO_MB = Number(config.video?.maxMB) || 2000;
 const MAX_AUDIO_MB = Number(config.song?.maxMB) || 120;
-const MAX_MINUTES = Number(config.video?.maxMinutes) || 60;
+const MAX_MINUTES = Number(config.video?.maxMinutes) || 0;   // 0 = any length
 const AS_DOC_ABOVE = 50 * 1024 * 1024;
 const JOB_DEADLINE = Number(config.ytdlp?.deadlineMs) || 10 * 60 * 1000;
 const QUALITIES = [144, 240, 360, 480, 720, 1080];
@@ -52,6 +52,19 @@ function parseOptions(args, defaults = {}) {
   return { kind, height, rest };
 }
 
+/** Last resort for links yt-dlp does not know: fetch the URL itself if it is a media file. */
+async function downloadDirect(url, dest, maxMB) {
+  if (!/^https?:\/\//i.test(String(url || ''))) return null;
+  try {
+    const got = await downloadToFile(url, dest, { maxBytes: maxMB * 1024 * 1024 });
+    if (['video', 'audio', 'image'].includes(got?.sniff?.kind)) return dest;
+  } catch (e) {
+    console.warn('[media] direct download failed:', e.message);
+  }
+  deleteTempFile(dest);
+  return null;
+}
+
 /**
  * Download `url` and send it to the chat. Never throws for "unsupported"
  * reasons without explaining them; always cleans up its temp files.
@@ -75,6 +88,7 @@ async function downloadAndSend(sock, msg, extra, {
   const stamp = `${kind === 'audio' ? 'aud' : 'dl'}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const outBase = path.join(getTempDir(), stamp);
   const files = [];
+  const release = holdTemp(stamp);
 
   try {
     // Quiet by design: the reaction is the only progress signal.
@@ -85,7 +99,7 @@ async function downloadAndSend(sock, msg, extra, {
       try {
         const info = await YT.getInfo(url, { timeout: 45000 });
         title = info.title; author = author || info.uploader;
-        if (kind === 'video' && info.duration && info.duration > MAX_MINUTES * 60) {
+        if (kind === 'video' && MAX_MINUTES && info.duration && info.duration > MAX_MINUTES * 60) {
           await react('❌');
           return say(`❌ That is ${Math.round(info.duration / 60)} min long — the limit is ${MAX_MINUTES} min.`);
         }
@@ -123,38 +137,47 @@ async function downloadAndSend(sock, msg, extra, {
       attempts.push({ engine: 'yt-dlp', code: info.code });
       console.warn(`[media] yt-dlp failed (${info.code}): ${info.detail}`);
 
-      const remoteWorthTrying = ['BOT_CHECK', 'NO_YTDLP', 'NO_FORMATS', 'FFMPEG_MISSING', 'UNKNOWN',
-        'NETWORK', 'RATE_LIMIT', 'PO_TOKEN', 'AGE_RESTRICTED', 'GEO_BLOCK', 'BAD_ARGS'];
-      const remoteAllowed = settings.get('remoteFallback', true) !== false;
+      const direct = ['UNSUPPORTED_URL', 'NO_FORMATS', 'UNKNOWN'].includes(info.code)
+        ? await downloadDirect(url, `${outBase}_direct.bin`, kind === 'audio' ? MAX_AUDIO_MB : MAX_VIDEO_MB)
+        : null;
+      if (direct) {
+        files.push(direct);
+        file = direct;
+        via = 'direct link';
+      } else {
+        const remoteWorthTrying = ['BOT_CHECK', 'NO_YTDLP', 'NO_FORMATS', 'FFMPEG_MISSING', 'UNKNOWN',
+          'NETWORK', 'RATE_LIMIT', 'PO_TOKEN', 'AGE_RESTRICTED', 'GEO_BLOCK', 'BAD_ARGS'];
+        const remoteAllowed = settings.get('remoteFallback', true) !== false;
 
-      if (!remoteAllowed || !remoteWorthTrying.includes(info.code)) {
-        ytErr.attempts = attempts;
-        throw ytErr;
-      }
+        if (!remoteAllowed || !remoteWorthTrying.includes(info.code)) {
+          ytErr.attempts = attempts;
+          throw ytErr;
+        }
 
-      await react('🔄');
-      let remoteHit;
-      try {
-        remoteHit = await providers.resolveMedia(url, {
-          kind, quality: height, timeoutMs: 20000,
-          onAttempt: (name, err, st) => { if (st.code !== 'OK') attempts.push({ engine: name, code: st.code }); },
+        await react('🔄');
+        let remoteHit;
+        try {
+          remoteHit = await providers.resolveMedia(url, {
+            kind, quality: height, timeoutMs: 20000,
+            onAttempt: (name, err, st) => { if (st.code !== 'OK') attempts.push({ engine: name, code: st.code }); },
+          });
+        } catch (providerErr) {
+          console.warn('[media] backup sources failed:', providerErr.message);
+          ytErr.attempts = attempts;
+          throw ytErr;
+        }
+
+        via = remoteHit.provider;
+        const dest = path.join(getTempDir(), `${stamp}_remote.${remoteHit.ext || (kind === 'audio' ? 'mp3' : 'mp4')}`);
+        const got = await downloadToFile(remoteHit.url, dest, {
+          maxBytes: (kind === 'audio' ? MAX_AUDIO_MB : MAX_VIDEO_MB) * 1024 * 1024,
+          headers: remoteHit.headers,
         });
-      } catch (providerErr) {
-        console.warn('[media] backup sources failed:', providerErr.message);
-        ytErr.attempts = attempts;
-        throw ytErr;
+        files.push(dest);
+        file = dest;
+        title = title || remoteHit.title;
+        console.log(`[media] downloaded via ${via} (${got.sniff.kind}/${got.sniff.ext})`);
       }
-
-      via = remoteHit.provider;
-      const dest = path.join(getTempDir(), `${stamp}_remote.${remoteHit.ext || (kind === 'audio' ? 'mp3' : 'mp4')}`);
-      const got = await downloadToFile(remoteHit.url, dest, {
-        maxBytes: (kind === 'audio' ? MAX_AUDIO_MB : MAX_VIDEO_MB) * 1024 * 1024,
-        headers: remoteHit.headers,
-      });
-      files.push(dest);
-      file = dest;
-      title = title || remoteHit.title;
-      console.log(`[media] downloaded via ${via} (${got.sniff.kind}/${got.sniff.ext})`);
     }
 
     if (!file || !fs.existsSync(file) || fs.statSync(file).size < 10 * 1024) {
@@ -214,6 +237,7 @@ async function downloadAndSend(sock, msg, extra, {
     // ── Video ──────────────────────────────────────────────────────────────
     const ready = await ensureWhatsAppMp4(file, path.join(getTempDir(), `${stamp}_wa.mp4`));
     files.push(ready);
+    if (ready !== file) deleteTempFile(file);   // a 2 GB source must not sit on disk twice
     const size = fs.statSync(ready).size;
     if (size > MAX_VIDEO_MB * 1024 * 1024) throw Object.assign(new Error('video too large'), { code: 'TOO_BIG' });
 
@@ -242,6 +266,7 @@ async function downloadAndSend(sock, msg, extra, {
     // (callers would only end up printing the same thing twice).
     return { sent: false, kind, via: 'none', code: info.code, error: err };
   } finally {
+    release();
     for (const f of files) deleteTempFile(f);
     try {
       for (const f of fs.readdirSync(getTempDir())) {

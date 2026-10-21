@@ -5,7 +5,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { getTempDir } = require('./tempManager');
+const { getTempDir, isHeld } = require('./tempManager');
 const config = require('../config');
 
 // Cleanup interval: 10 minutes
@@ -19,6 +19,9 @@ const MEDIA_AGE_THRESHOLD_MS = 2 * 60 * 60 * 1000;
 const MEDIA_PREFIX = /^(ytv_|song_|fb_|paper_|tg_|conv_|audio_|video_|dl_|aud_|mp3_)/;
 
 const thresholdFor = (name) => (MEDIA_PREFIX.test(name) ? MEDIA_AGE_THRESHOLD_MS : FILE_AGE_THRESHOLD_MS);
+// yt-dlp/ffmpeg can stamp a fresh file with the source's old Last-Modified
+// time; ctime is set when the file is written here, so take the newer one.
+const ageOf = (stats, now = Date.now()) => now - Math.max(stats.mtimeMs, stats.ctimeMs);
 
 // Session directory name (must NOT be cleaned)
 const SESSION_DIR_NAME = config.sessionName || 'session';
@@ -30,9 +33,9 @@ let cleanupInterval = null;
  * Deletes files older than FILE_AGE_THRESHOLD_MS from temp directory
  * NEVER touches session directory
  */
-function cleanupOldFiles() {
+function cleanupOldFiles(dir = null) {
   try {
-    const tempDir = getTempDir();
+    const tempDir = dir || getTempDir();
     
     // Safety check: ensure we're cleaning the right directory
     if (!fs.existsSync(tempDir)) {
@@ -60,8 +63,8 @@ function cleanupOldFiles() {
           continue;
         }
         
-        // Check file age
-        const fileAge = now - stats.mtimeMs;
+        if (isHeld(file)) continue;
+        const fileAge = ageOf(stats, now);
         
         if (fileAge > thresholdFor(file)) {
           // File is older than threshold, delete it
@@ -129,6 +132,8 @@ process.on('SIGTERM', () => {
 });
 
 module.exports = {
+  thresholdFor,
+  ageOf,
   cleanupOldFiles,
   startCleanup,
   stopCleanup

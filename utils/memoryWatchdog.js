@@ -73,33 +73,14 @@ function tryGC() {
   }
 }
 
-// Clean the temp folder the bot uses (never the managed cookies/database files)
+// Clean the temp folder the bot uses. Same age rules as utils/cleanup.js:
+// this used to delete every file older than 60 s whenever the heap passed
+// 70 %, which removed .dl/.movie files while they were still being sent.
 function cleanTempFiles() {
-  const tempDirs = [
-    path.join(__dirname, '../temp'),
-    path.join(__dirname, '../temp/baileys_store'),
-  ];
-  let removed = 0;
-  for (const dir of tempDirs) {
-    if (!fs.existsSync(dir)) continue;
-    try {
-      const files = fs.readdirSync(dir);
-      for (const file of files) {
-        try {
-          const fp = path.join(dir, file);
-          // .ytv downloads can sit idle while merging/uploading — give them 30 min.
-          // Cookie files are never inside temp/, and must never be deleted here.
-          if (/cookies?\.txt$/i.test(file)) continue;
-          const age = file.startsWith('ytv_') || file.startsWith('song_') ? 30 * 60_000 : 60_000;
-          if (fs.statSync(fp).mtimeMs < Date.now() - age) {
-            fs.unlinkSync(fp);
-            removed++;
-          }
-        } catch (_) {}
-      }
-    } catch (_) {}
+  const { cleanupOldFiles } = require('./cleanup');
+  for (const dir of [path.join(__dirname, '../temp'), path.join(__dirname, '../temp/baileys_store')]) {
+    if (fs.existsSync(dir)) cleanupOldFiles(dir);
   }
-  if (removed > 0) console.log(`[MEMORY] Temp clean — removed ${removed} old files`);
 }
 
 // ─── SOFT CLEAN ───────────────────────────────────────────────────────────────

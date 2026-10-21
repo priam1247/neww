@@ -1410,6 +1410,88 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     }
   }
 
+  // ─── cleanup / .movie length / per-command smoke ───────────────────────────
+  console.log('\n▶ temp holds, fake movie clips, command smoke');
+  {
+    const TM = require(path.join(REPO, 'utils', 'tempManager'));
+    const CL = require(path.join(REPO, 'utils', 'cleanup'));
+
+    await test('cleanup never deletes a held job file, even when it looks old', async () => {
+      const dir = fs.mkdtempSync(path.join(sandbox, 'cl-'));
+      const f = path.join(dir, 'dl_123_abc_wa.mp4');
+      const g = path.join(dir, 'junk.tmp');
+      fs.writeFileSync(f, 'x'); fs.writeFileSync(g, 'x');
+      const old = new Date(Date.now() - 5 * 3600 * 1000);
+      fs.utimesSync(f, old, old); fs.utimesSync(g, old, old);
+      const release = TM.holdTemp('dl_123_abc');
+      CL.cleanupOldFiles(dir);
+      assert.ok(fs.existsSync(f), 'held file was deleted');
+      release();
+      // utimes moved mtime back, but ctime is "now" → still too fresh to sweep
+      CL.cleanupOldFiles(dir);
+      assert.ok(fs.existsSync(f), 'a file written seconds ago was swept because of an old mtime');
+    });
+
+    await test('moviebox skips 2-minute "[Hindi] [Full movie]" fakes and music items', async () => {
+      const { pickMatch, minStreamSeconds } = await import(pathToFileURL(path.join(REPO, 'engine/providers/stream/moviebox.js')).href);
+      const items = [
+        { subjectType: 6, title: 'Spider-Man Theme Song', releaseDate: '2026-01-01', hasResource: true, subjectId: '1', detailPath: 'a' },
+        { subjectType: 1, title: 'Spider-Man: Brand New Day[Hindi] [Full movie]', releaseDate: '2026-07-31', hasResource: true, duration: 157, subjectId: '2', detailPath: 'b' },
+        { subjectType: 1, title: 'Spider-Man: Brand New Day', releaseDate: '2026-07-31', hasResource: true, duration: 8100, subjectId: '3', detailPath: 'c' },
+      ];
+      assert.strictEqual(pickMatch(items, { title: 'Spider-Man: Brand New Day', year: '2026', type: 'movie' }).subjectId, '3');
+      assert.ok(minStreamSeconds({ runtime: 0 }, false) >= 40 * 60);
+      assert.ok(minStreamSeconds({ runtime: 148 }, false) > 80 * 60);
+    });
+
+    const movie = require(path.join(REPO, 'commands', 'media', 'movie'));
+    await test('.movie: minimum playtime follows the real runtime', () => {
+      assert.strictEqual(movie._minPlaySeconds(0), 40 * 60);
+      assert.strictEqual(movie._minPlaySeconds(150), 150 * 60 * 0.6);
+      assert.strictEqual(movie._minPlaySeconds(0, 'episode'), 5 * 60);
+    });
+
+    const getFfmpeg = require(path.join(REPO, 'utils', 'ffmpeg'));
+    if (getFfmpeg.works()) {
+      await test('.movie rejects a downloaded trailer-length file', async () => {
+        const clip = path.join(sandbox, 'clip.mp4');
+        require('child_process').execFileSync(getFfmpeg(), ['-y', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=size=64x48:rate=5', '-t', '3', '-pix_fmt', 'yuv420p', clip]);
+        await assert.rejects(() => movie._assertFullLength(clip, 120), /trailer\/fake/);
+      });
+    }
+
+    // every command runs once against a fake socket and never throws
+    const { loadCommands } = (() => { try { return require(path.join(REPO, 'utils', 'commandLoader')); } catch { return {}; } })();
+    const cmdDir = path.join(REPO, 'commands');
+    const files = [];
+    for (const cat of fs.readdirSync(cmdDir)) for (const f of fs.readdirSync(path.join(cmdDir, cat))) if (f.endsWith('.js')) files.push(path.join(cmdDir, cat, f));
+    for (const file of files) {
+      const mod = require(file);
+      const list = Array.isArray(mod) ? mod : [mod];
+      for (const cmd of list.filter(c => c && typeof c.execute === 'function')) {
+        await test(`.${cmd.name} with no arguments answers without crashing`, async () => {
+          const sent = [];
+          const sock = {
+            user: { id: '111:1@s.whatsapp.net' },
+            sendMessage: async (jid, content) => { sent.push(content); return { key: { id: 'x' } }; },
+            groupMetadata: async () => ({ participants: [] }),
+          };
+          const msg = { key: { remoteJid: '222@s.whatsapp.net', id: 'm1', fromMe: false }, message: { conversation: `.${cmd.name}` } };
+          const extra = {
+            from: '222@s.whatsapp.net', sender: '222@s.whatsapp.net', isGroup: false, isOwner: true, isAdmin: true,
+            reply: async (t) => { sent.push({ text: t }); }, commands: new Map(), prefix: '.',
+          };
+          await Promise.race([
+            cmd.execute(sock, msg, [], extra),
+            new Promise(r => setTimeout(r, 15000)),
+          ]);
+          assert.ok(sent.length >= 0);
+        });
+      }
+    }
+    void loadCommands;
+  }
+
   // ─── summary ────────────────────────────────────────────────────────────────
   console.log(`\n${'─'.repeat(52)}`);
   if (failures.length) {

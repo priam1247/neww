@@ -174,6 +174,16 @@ const norm = (s) => String(s || '')
   .replace(/[^a-z0-9]+/g, ' ')
   .trim();
 
+// Re-uploads with tags in the name are where trailers and 2-minute fakes live.
+const JUNK_RX = /\[[^\]]*\]|\b(trailer|teaser|full movie|hdcam|cam ?rip|reaction|review|clip)\b/i;
+
+/** Seconds a stream must run to be the real thing (null → no check). */
+function minStreamSeconds(media, isSeries) {
+  const rt = Number(isSeries ? (media.episodeRuntime || media.runtime) : media.runtime) || 0;
+  if (isSeries) return rt ? rt * 60 * 0.5 : 5 * 60;
+  return Math.max(40 * 60, rt * 60 * 0.6);
+}
+
 /** Best search hit for a title (+ optional year). */
 function pickMatch(items, { title, year, type = null }) {
   const want = norm(title);
@@ -185,9 +195,14 @@ function pickMatch(items, { title, year, type = null }) {
     const name = sub?.title || it?.title || '';
     if (!name) continue;
 
-    // subjectType: 1 = movie, 2 = series
-    const kind = Number(sub?.subjectType) === 2 ? 'series' : 'movie';
+    // subjectType: 1 = movie, 2 = series, anything else (6 = music …) is not a title
+    const st = Number(sub?.subjectType);
+    if (st !== 1 && st !== 2) continue;
+    const kind = st === 2 ? 'series' : 'movie';
     let s = 0;
+    if (JUNK_RX.test(name)) s -= 35;
+    const dur = Number(sub?.duration || it?.duration) || 0;
+    if (kind === 'movie' && dur > 0 && dur < 40 * 60) s -= 60;
     if (type) s += kind === type ? 15 : -25;
     const got = norm(name);
     if (got === want) s += 60;
@@ -439,10 +454,16 @@ class MovieBox extends Provider {
     const headers = { referer: payload.referer };
     const label = `${match.title}${match.year ? ` ${match.year}` : ''}`;
 
+    const minSec = minStreamSeconds(media, isSeries);
     // direct MP4 per resolution — the best case for this bot (no ffmpeg, no HLS)
     for (const st of payload.streams) {
       const url = st?.url;
       if (!url || !/^https?:/i.test(url)) continue;
+      const secs = Number(st.duration) || 0;
+      if (secs && secs < minSec) {
+        mlog.debug(`${match.title} · ${st.resolutions}p stream is ${secs}s — trailer/fake, skipped`);
+        continue;
+      }
       const height = Number(st.resolutions) || 0;
       out.push({
         provider: this.id,
@@ -499,4 +520,4 @@ class MovieBox extends Provider {
 const instance = new MovieBox();
 register(instance);
 export default instance;
-export { MovieBox, pickMatch, toMB, locate };
+export { MovieBox, pickMatch, toMB, locate, minStreamSeconds };

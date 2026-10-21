@@ -33,8 +33,8 @@ const { getTempDir, deleteTempFile } = require('../../utils/tempManager');
 const log = require('../../utils/logger')('ytv');
 
 // ─── LIMITS (config.video, see config.js) ────────────────────────────────────
-const MAX_VIDEO_MB   = Number(config.video?.maxMB) || 300;   // disk holds the file + Baileys' encrypted copy
-const MAX_MINUTES    = Number(config.video?.maxMinutes) || 60; // refuse longer videos
+const MAX_VIDEO_MB   = Number(config.video?.maxMB) || 2000;   // disk holds the file + Baileys' encrypted copy
+const MAX_MINUTES    = Number(config.video?.maxMinutes) || 0;  // 0 = any length
 const AS_DOC_ABOVE   = 50 * 1024 * 1024;    // above this, send as a document
 const DEFAULT_HEIGHT = Number(config.video?.defaultQuality) || 720;
 const QUALITIES      = [144, 240, 360, 480, 720, 1080].sort((a, b) => a - b);
@@ -138,7 +138,7 @@ const execute = async (sock, msg, args, extra) => {
       author = author || i.uploader; thumbnail = thumbnail || i.thumbnail;
     } catch { /* the download attempt reports the real reason */ }
   }
-  if (duration && duration > MAX_MINUTES * 60) {
+  if (MAX_MINUTES && duration && duration > MAX_MINUTES * 60) {
     return say(`❌ Video is ${Math.round(duration / 60)} min — the limit is ${MAX_MINUTES} min.`);
   }
 
@@ -148,6 +148,7 @@ const execute = async (sock, msg, args, extra) => {
 
   const stamp = `ytv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const outBase = path.join(getTempDir(), stamp);
+  const release = require('../../utils/tempManager').holdTemp(stamp);
 
   try {
     await react('⏳');
@@ -262,6 +263,7 @@ const execute = async (sock, msg, args, extra) => {
     }
     await react('❌');
   } finally {
+    release();
     sweep(stamp);
     busyUntil = 0;
     if (typeof global.gc === 'function') global.gc();

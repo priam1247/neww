@@ -106,7 +106,33 @@ function deleteTempFiles(filePaths) {
   });
 }
 
+// Files/stamps a running job still needs. The periodic cleanup and the memory
+// watchdog skip anything whose name starts with a held key.
+const held = new Map();
+
+/** Protect `key` (a temp path or a job stamp prefix) until the returned fn is called. */
+function holdTemp(key) {
+  const k = path.basename(String(key || ''));
+  if (!k) return () => {};
+  held.set(k, (held.get(k) || 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const n = (held.get(k) || 1) - 1;
+    if (n <= 0) held.delete(k); else held.set(k, n);
+  };
+}
+
+function isHeld(name) {
+  const base = path.basename(String(name || ''));
+  for (const k of held.keys()) if (base.startsWith(k)) return true;
+  return false;
+}
+
 module.exports = {
+  holdTemp,
+  isHeld,
   initializeTempSystem,
   getTempDir,
   createTempFilePath,

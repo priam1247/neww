@@ -69,7 +69,7 @@ module.exports = {
     updateOnBotCheck: true,                      // self-update yt-dlp once per run after a bot-check
     // Total time one .song/.ytv job may spend trying player clients before it
     // gives up (prevents a hopeless download from hanging for an hour).
-    deadlineMs: Number(env.YTDLP_DEADLINE_MS || 10 * 60 * 1000),
+    deadlineMs: Number(env.YTDLP_DEADLINE_MS || 45 * 60 * 1000),
   },
 
   // ─── Spotify (.spotify) ──────────────────────────────────────────────────
@@ -112,8 +112,9 @@ module.exports = {
   },
   video: {
     defaultQuality: 720,
-    maxMB: 300,
-    maxMinutes: 60,
+    // WhatsApp documents top out at 2 GB; anything over 50 MB goes as a document.
+    maxMB: Number(env.VIDEO_MAX_MB || 2000),
+    maxMinutes: Number(env.VIDEO_MAX_MINUTES || 0),   // 0 = no length limit
   },
 
   messages: {

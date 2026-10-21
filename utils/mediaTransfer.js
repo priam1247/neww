@@ -285,10 +285,10 @@ function readId3(fileOrBuffer) {
  * Inspect a media file with `ffmpeg -i` (ffprobe is not always installed).
  * `probed:false` means ffmpeg could not read it — callers must treat every
  * other field as unknown in that case, never as "missing".
- * @returns {Promise<{probed:boolean,container:string,hasVideo:boolean,hasAudio:boolean,videoCodec:string,audioCodec:string}>}
+ * @returns {Promise<{probed:boolean,container:string,hasVideo:boolean,hasAudio:boolean,videoCodec:string,audioCodec:string,duration:number}>}
  */
 async function probeMedia(file) {
-  const out = { probed: false, container: '', hasVideo: false, hasAudio: false, videoCodec: '', audioCodec: '' };
+  const out = { probed: false, container: '', hasVideo: false, hasAudio: false, videoCodec: '', audioCodec: '', duration: 0 };
   if (!getFfmpeg.works() || !file || !fs.existsSync(file)) return out;
   let stderr = '';
   try { await execFileAsync(getFfmpeg(), ['-hide_banner', '-i', file], { timeout: 60000, maxBuffer: 4 * 1024 * 1024 }); }
@@ -297,6 +297,8 @@ async function probeMedia(file) {
   if (!input) return out;
   out.probed = true;
   out.container = input[1].trim();
+  const dur = stderr.match(/Duration:\s*(\d+):(\d+):([\d.]+)/);
+  if (dur) out.duration = Number(dur[1]) * 3600 + Number(dur[2]) * 60 + Number(dur[3]);
   const video = stderr.match(/Stream #0:\d+[^:]*:\s*Video:\s*([a-z0-9_]+)/i);
   const audio = stderr.match(/Stream #0:\d+[^:]*:\s*Audio:\s*([a-z0-9_]+)/i);
   // Cover art in an m4a is reported as a video stream — it is not a picture track.
@@ -318,7 +320,7 @@ const WA_AUDIO_CODECS = new Set(['aac', 'mp3']);
  *   • anything else (AV1/VP9/HEVC …)   → full transcode
  * @returns {Promise<string>} path to a playable file (input when nothing to do)
  */
-async function ensureWhatsAppMp4(input, output, { timeoutMs = 20 * 60 * 1000 } = {}) {
+async function ensureWhatsAppMp4(input, output, { timeoutMs = 90 * 60 * 1000 } = {}) {
   const ff = getFfmpeg();
   if (!getFfmpeg.works()) return input;
 

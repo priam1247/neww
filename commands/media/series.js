@@ -254,6 +254,8 @@ async function fetchEpisodeSource(meta, season, ep, quality, attempts = 3) {
       const realFile = (saved && saved.file) || dest;
       const size = fs.statSync(realFile).size;
       if (!size) throw new Error('download produced an empty file');
+      const epRuntime = resolved.episodeRuntime || (resolved.meta || meta).episodeRuntime || (resolved.meta || meta).runtime;
+      await require('./movie')._assertFullLength(realFile, epRuntime, 'episode');
       await engine.rememberFile(resolved.meta || meta, quality, season, ep, realFile, size / 1048576);
       return { res: resolved, file: realFile };
     } catch (e) {
