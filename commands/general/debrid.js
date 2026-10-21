@@ -63,7 +63,9 @@ const debridCommand = {
         `${lines.join('\n')}\n\n` +
         (ok
           ? '✅ Torrent tier is live — .movie/.series can now use cached 1080p/4K torrents.'
-          : '⚠️ Torrent candidates will be skipped until a premium key validates.')
+          : config.movies?.torrentDirect !== false
+            ? '✅ Torrent sources download directly without a debrid key.'
+            : '⚠️ Torrent candidates will be skipped until a premium key validates.')
       );
     } catch (e) {
       return extra.reply(`❌ Could not check the account: ${String(e.message || '').split('\n')[0]}`);

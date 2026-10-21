@@ -42,6 +42,10 @@ async function test(name, fn) {
 // ─── sandbox: cwd with a fake bin/yt-dlp ──────────────────────────────────────
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'zafar-selftest-'));
 process.chdir(sandbox);                       // engine looks for ./bin/yt-dlp
+process.env.TORRENT_DIRECT = 'true';
+process.env.REALDEBRID_API_KEY = '';
+process.env.DEBRID_API_KEY = '';
+process.env.ALLDEBRID_API_KEY = '';
 fs.mkdirSync(path.join(sandbox, 'bin'), { recursive: true });
 fs.mkdirSync(path.join(sandbox, 'database'), { recursive: true });
 
@@ -1351,6 +1355,120 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       delete process.env.MOVIEBOX_BFF;
       server.close();
     }
+  });
+
+  console.log('\n── direct torrent download support ──');
+
+  await test('pickTorrentFile selects the right video and excludes samples', async () => {
+    const { pickTorrentFile } = await import(pathToFileURL(path.join(REPO, 'engine/media/torrent.js')).href);
+    const MB = 1024 * 1024;
+    const files = [
+      { name: 'Film.mp4', length: 700 * MB },
+      { name: 'Film.mkv', length: 900 * MB },
+      { name: 'Film.sample.mkv', length: 1200 * MB },
+      { name: 'Film.txt', length: 500 * MB },
+      { name: 'tiny.mkv', length: 20 * MB },
+    ];
+    assert.strictEqual(pickTorrentFile(files), files[1], 'largest eligible video not selected');
+    assert.strictEqual(pickTorrentFile([{ name: 'small.mkv', length: 29 * MB }]), null, 'video below 30 MB was selected');
+
+    const episodes = [
+      { name: 'Show.S01E01.mkv', length: 700 * MB },
+      { name: 'Show.1x02.mp4', length: 500 * MB },
+      { name: 'Show.S01.E02.webm', length: 800 * MB },
+      { name: 'Show.S01E02.sample.mkv', length: 1200 * MB },
+    ];
+    assert.strictEqual(pickTorrentFile(episodes, { season: 1, episode: 2 }), episodes[2], 'matching episode was not preferred');
+    assert.strictEqual(pickTorrentFile(files, { fileIdx: 0 }), files[0], 'valid fileIdx was ignored');
+    assert.strictEqual(pickTorrentFile([{ name: 'readme.txt', length: 500 * MB }]), null, 'non-video was selected');
+  });
+
+  await test('downloader keeps HTTP downloads available without loading WebTorrent', async () => {
+    const torrentSource = fs.readFileSync(path.join(REPO, 'engine/media/torrent.js'), 'utf8');
+    assert.doesNotMatch(torrentSource, /^\s*import\s+.*\bfrom\s*['"]webtorrent['"]/m, 'WebTorrent is imported statically');
+
+    const { download } = await import(pathToFileURL(path.join(REPO, 'engine/media/downloader.js')).href);
+    const payload = Buffer.from('http download without torrent engine');
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-length': payload.length, 'content-type': 'video/mp4' });
+      res.end(payload);
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const file = path.join(sandbox, 'http-without-torrent.mp4');
+    try {
+      const result = await download({ kind: 'file', url: `http://127.0.0.1:${server.address().port}/video.mp4` }, file);
+      assert.strictEqual(result.bytes, payload.length);
+      assert.deepStrictEqual(fs.readFileSync(file), payload);
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+    }
+  });
+
+  await test('resolveCandidate returns seeded magnets without debrid and rejects low-seed torrents', async () => {
+    const { default: resolver } = await import(pathToFileURL(path.join(REPO, 'engine/core/resolver.js')).href);
+    const { default: debrid } = await import(pathToFileURL(path.join(REPO, 'engine/providers/debrid/index.js')).href);
+    const { default: config } = await import(pathToFileURL(path.join(REPO, 'engine/config.js')).href);
+    assert.strictEqual(config.torrentDirect, true, 'direct torrent downloads are disabled in this test');
+    const originalActive = debrid.active;
+    debrid.active = () => [];
+    try {
+      const candidate = {
+        kind: 'torrent', provider: 'knaben', title: 'Sintel', seeds: config.torrentMinSeeds,
+        magnet: 'magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10', fileIdx: 2, sizeMB: 100,
+      };
+      const out = await resolver.resolveCandidate(candidate, { season: 1, episode: 2, quality: 720 });
+      assert.strictEqual(out.kind, 'torrent');
+      assert.strictEqual(out.url, candidate.magnet);
+      assert.strictEqual(out.magnet, candidate.magnet);
+      assert.strictEqual(out.fileIdx, 2);
+      assert.strictEqual(out.season, 1);
+      assert.strictEqual(out.episode, 2);
+      assert.strictEqual(out.verified, true);
+      await assert.rejects(
+        () => resolver.resolveCandidate({ ...candidate, seeds: config.torrentMinSeeds - 1 }, {}),
+        /not enough torrent seeds/,
+      );
+    } finally {
+      debrid.active = originalActive;
+    }
+  });
+
+  await test('download routes torrent sources to torrentToFile with metadata', async () => {
+    const { download, _setTorrentDownloaderForTests } = await import(pathToFileURL(path.join(REPO, 'engine/media/downloader.js')).href);
+    const { default: config } = await import(pathToFileURL(path.join(REPO, 'engine/config.js')).href);
+    let received;
+    _setTorrentDownloaderForTests(async (...args) => {
+      received = args;
+      return { file: '/tmp/selected.mkv' };
+    });
+    try {
+      const result = await download({
+        kind: 'torrent', magnet: 'magnet:?xt=urn:btih:abc', fileIdx: 4, season: 2, episode: 3,
+      }, '/tmp/movie.mp4', () => {});
+      assert.deepStrictEqual(result, { file: '/tmp/selected.mkv' });
+      assert.strictEqual(received[0], 'magnet:?xt=urn:btih:abc');
+      assert.strictEqual(received[1], '/tmp/movie.mp4');
+      assert.strictEqual(received[2].fileIdx, 4);
+      assert.strictEqual(received[2].season, 2);
+      assert.strictEqual(received[2].episode, 3);
+      assert.strictEqual(received[2].maxMB, config.maxDownloadMB);
+      assert.strictEqual(typeof received[2].onProgress, 'function');
+    } finally {
+      _setTorrentDownloaderForTests(null);
+    }
+  });
+
+  await test('MKV media is sent as a document with Matroska MIME type', async () => {
+    const host = require(path.join(REPO, 'utils/movieHost.js'));
+    const file = path.join(sandbox, 'direct-torrent.mkv');
+    fs.writeFileSync(file, 'mkv-data');
+    let sent;
+    await host.sendMedia({ sendMessage: async (_chat, content) => { sent = content; } }, 'chat', {}, {
+      file, title: 'Sintel',
+    });
+    assert.ok(sent.document, 'MKV was not sent as a document');
+    assert.strictEqual(sent.mimetype, 'video/x-matroska');
+    assert.strictEqual(sent.fileName, 'Sintel.mkv');
   });
 
   // ─── silent-video regressions (real ffmpeg; skipped when unavailable) ───────

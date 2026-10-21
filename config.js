@@ -131,9 +131,7 @@ module.exports = {
 
   // ─── Movies & series (.movie / .series) ──────────────────────────────────
   // The engine needs a free TMDB key (themoviedb.org) for titles/posters.
-  // Torrent sources additionally need a debrid account (Real-Debrid or
-  // All-Debrid) — without one the engine automatically uses the free
-  // DDL/stream tiers only, so .movie/.series still work out of the box.
+  // Torrent sources use debrid when configured, otherwise download directly.
   movies: {
     // ── metadata sources ──────────────────────────────────────────────────
     // TMDB is the primary source (free key). Everything below it is a fallback
@@ -155,6 +153,10 @@ module.exports = {
     // DEBRID_API_KEY is accepted as a generic alias (Real-Debrid by default)
     realDebridKey: env.REALDEBRID_API_KEY || env.DEBRID_API_KEY || '',
     allDebridKey: env.ALLDEBRID_API_KEY || '',
+    torrentDirect: !/^(0|false|no|off)$/i.test(String(env.TORRENT_DIRECT ?? 'true')),
+    torrentMinSeeds: Number(env.TORRENT_MIN_SEEDS || 3),
+    torrentMetadataTimeoutMs: Number(env.TORRENT_METADATA_TIMEOUT_MS || 90_000),
+    torrentStallTimeoutMs: Number(env.TORRENT_STALL_TIMEOUT_MS || 180_000),
 
     // 1080 → 720 → 480 instead of failing when a quality has no source
     qualityFallback: env.QUALITY_FALLBACK !== '0',
@@ -188,10 +190,10 @@ module.exports = {
     dataDir: env.MOVIE_DATA_DIR || 'temp/movies/data',
 
     queueConcurrency: Number(env.MOVIE_CONCURRENCY || 1),
-    jobTimeoutMs: Number(env.MOVIE_JOB_TIMEOUT_MS || 30 * 60 * 1000),
+    jobTimeoutMs: Number(env.MOVIE_JOB_TIMEOUT_MS || 60 * 60 * 1000),
     dryRun: env.MOVIE_DRY_RUN === '1',                // resolve only, send the link
 
-    // torrents need debrid; set to false to keep trying anyway
+    // Legacy switch for deployments that disable direct torrent downloads.
     skipTorrentWithoutDebrid: env.SKIP_TORRENT_WITHOUT_DEBRID !== 'false',
   },
 

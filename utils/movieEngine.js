@@ -69,6 +69,10 @@ function applyConfig() {
   setIfEmpty('MAX_SEND_MB', m.maxSendMB);
   setIfEmpty('MAX_DOWNLOAD_MB', m.maxDownloadMB);
   setIfEmpty('MIN_FREE_MB', m.minFreeMB);
+  setIfEmpty('TORRENT_DIRECT', m.torrentDirect === false ? '0' : '1');
+  setIfEmpty('TORRENT_MIN_SEEDS', m.torrentMinSeeds);
+  setIfEmpty('TORRENT_METADATA_TIMEOUT_MS', m.torrentMetadataTimeoutMs);
+  setIfEmpty('TORRENT_STALL_TIMEOUT_MS', m.torrentStallTimeoutMs);
   setIfEmpty('REGION', m.region || 'US');
   setIfEmpty('CONCURRENCY', m.queueConcurrency);
   setIfEmpty('JOB_TIMEOUT_MS', m.jobTimeoutMs);

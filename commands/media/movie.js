@@ -121,10 +121,11 @@ async function fetchSource(meta, quality, attempts = 3) {
     }
 
     const dest = await engine.targetFile(meta.title, meta.year, quality, null, null);
+    let downloadedFile = dest;
     try {
       const saved = await engine.download(resolved, dest);
       // HLS sources may land as .ts (no ffmpeg on the host) — use the real path
-      const file = (saved && saved.file) || dest;
+      const file = downloadedFile = (saved && saved.file) || dest;
       const full = resolved.meta || meta;
       await assertFullLength(file, full.runtime, 'movie');
       // indexed files are never swept as orphans while they upload
@@ -134,7 +135,7 @@ async function fetchSource(meta, quality, attempts = 3) {
       lastErr = e;
       log.warn(`${meta.title} ${quality}p · ${resolved.provider} download failed · ${e.message}`);
       exclude.push(resolved.provider);
-      for (const f of [dest, dest.replace(/\.(mp4|mkv|ts|m4v)$/i, '') + '.ts']) {
+      for (const f of new Set([downloadedFile, dest, dest.replace(/\.(mp4|mkv|ts|m4v)$/i, '') + '.ts'])) {
         try { fs.rmSync(f, { force: true }); } catch { /* ignore */ }
       }
       if (exclude.length >= attempts) break;

@@ -3,8 +3,7 @@
 // Fixed in the ZaFar Bot integration:
 //   • DDL candidates are now actually resolved (core/locker.js) instead of being
 //     handed to Real-Debrid as if they were magnets — the whole tier 2 was dead
-//   • torrent candidates are skipped (with one clear line) when no debrid key is
-//     configured, instead of failing 20 candidates on the same error
+//   • torrent candidates download directly when no debrid key is configured
 //   • the final error explains WHY nothing worked (config vs. content vs. dead
 //     links), so ".movie" never just says "no source"
 //   • successful resolves clear the negative cache; config-only failures no
@@ -21,12 +20,15 @@ import { resolveLocker } from './locker.js';
 import { metrics } from './metrics.js';
 import { emit, EVENTS } from './events.js';
 import { log } from './log.js';
+import { magnet as buildMagnet } from '../providers/torrent/_trackers.js';
+import { torrentEngineAvailable } from '../media/torrent.js';
 
 const rlog = log.child('resolver');
 // torrents (debrid, instant when cached) → streams (keyless, host-independent)
 // → DDL (scraped hosts that keep dying). Streams used to sit last, so a dead
 // DDL tier cost ~15s on every single request before the working tier was tried.
-const TIERS = [[1], [3], [2]];
+const DEBRID_TIERS = [[1], [3], [2]];
+const KEYLESS_TIERS = [[3], [1], [2]];
 const MAX_PER_TIER = 6;
 
 // Not every source deserves the same patience:
@@ -81,7 +83,7 @@ async function searchTier(tier, media, opts) {
   if (!live.length) {
     // every provider is benched — a cached answer still beats a refusal
     const cached = tierCacheGet(tierKey(tier[0], media, opts));
-    return cached.state === 'miss' ? [] : cached.value;
+    return cached.state === 'miss' ? [] : cached.value.filter(cand => !skip.has(cand.provider));
   }
 
   const t0 = Date.now();
@@ -116,7 +118,7 @@ async function searchTier(tier, media, opts) {
     if (cached.state === 'stale') {
       metrics.bump('search.stale');
       rlog.info(`tier ${tier[0]}: live sources empty — reusing cached results`);
-      return cached.value;
+      return cached.value.filter(cand => !skip.has(cand.provider));
     }
   }
   metrics.bump('search.ok');
@@ -137,7 +139,27 @@ export async function resolveCandidate(cand, opts = {}) {
     direct = { url: cand.url, kind: 'hls', headers: cand.headers, sizeMB: 0 };
   } else if (isTorrent(cand)) {
     if (!debrid.active().length) {
-      throw Object.assign(new Error('torrent skipped — no debrid key configured'), { configIssue: true });
+      if (!config.torrentDirect) {
+        throw Object.assign(new Error('torrent skipped — no debrid key configured'), { configIssue: true });
+      }
+      if ((cand.seeds || 0) < config.torrentMinSeeds) {
+        throw new Error(`not enough torrent seeds (${cand.seeds || 0}, need ${config.torrentMinSeeds})`);
+      }
+      const magnetUri = cand.magnet || (cand.hash ? buildMagnet(cand.hash, cand.title) : null);
+      if (!magnetUri) throw new Error('torrent candidate has no magnet or info hash');
+      return {
+        kind: 'torrent',
+        url: magnetUri,
+        magnet: magnetUri,
+        fileIdx: cand.fileIdx,
+        season: opts.season,
+        episode: opts.episode,
+        sizeMB: cand.sizeMB,
+        provider: cand.provider,
+        title: cand.title,
+        quality: cand.quality || opts.quality,
+        verified: true
+      };
     }
     direct = await debrid.resolve(cand, opts);
     direct.kind = 'file';
@@ -180,9 +202,18 @@ async function resolve(media, opts = {}) {
   // is the truth. Kept aside so a normal verified source always wins.
   let lastResort = null;
 
-  const noDebrid = !debrid.active().length && config.skipTorrentWithoutDebrid;
+  const hasDebrid = debrid.active().length > 0;
+  const directTorrentAvailable = !hasDebrid && config.torrentDirect
+    ? await torrentEngineAvailable()
+    : false;
+  const noDebrid = !hasDebrid && (!config.torrentDirect || !directTorrentAvailable) && config.skipTorrentWithoutDebrid;
+  const torrentStatus = directTorrentAvailable
+    ? 'download directly when seeded'
+    : config.torrentDirect
+      ? 'unavailable — run npm rebuild node-datachannel'
+      : 'need a debrid account — set REALDEBRID_API_KEY or ALLDEBRID_API_KEY';
 
-  for (const tier of TIERS) {
+  for (const tier of hasDebrid ? DEBRID_TIERS : KEYLESS_TIERS) {
     // don't even hammer the indexers when their results could never be played
     if (tier[0] === 1 && noDebrid) {
       if (!reasons.includes('torrent sources skipped (no debrid key)')) {
@@ -210,7 +241,9 @@ async function resolve(media, opts = {}) {
           limits.perCandidateMs,
           `${cand.provider} resolve`,
         );
-        cache.lset(`${cand.hash || cand.provider}:${cand.fileIdx ?? 0}:${opts.season ?? ''}:${opts.episode ?? ''}`, out.url);
+        if (out.kind !== 'torrent' && !/^magnet:/i.test(out.url || '')) {
+          cache.lset(`${cand.hash || cand.provider}:${cand.fileIdx ?? 0}:${opts.season ?? ''}:${opts.episode ?? ''}`, out.url);
+        }
         cache.ndel(cacheKey);                       // it exists after all
         metrics.bump(`tier.${tier[0]}`);
         metrics.bump('resolve.ok');
@@ -259,7 +292,7 @@ async function resolve(media, opts = {}) {
     if (noDebrid) {
       throw new Error([
         `no free source found for “${media.title}”.`,
-        '• torrent sources need a debrid account — set REALDEBRID_API_KEY or ALLDEBRID_API_KEY',
+        `• torrent sources ${torrentStatus}`,
         '• the free DDL/stream sources returned nothing — try another quality or title'
       ].join('\n'));
     }
@@ -268,7 +301,7 @@ async function resolve(media, opts = {}) {
   if (configIssue && !debrid.active().length) {
     throw new Error([
       'found sources but none could be used.',
-      '• torrent results need a debrid account — set REALDEBRID_API_KEY or ALLDEBRID_API_KEY',
+      `• torrent results ${torrentStatus}`,
       '• free stream/DDL sources were unreachable right now — try again or pick another quality'
     ].join('\n'));
   }

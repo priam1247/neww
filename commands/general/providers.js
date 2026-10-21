@@ -55,7 +55,9 @@ const providersCommand = {
         ...lines,
         '',
         `🔑 TMDB: ${m.tmdbKey ? 'set' : 'MISSING'}`,
-        `🔑 debrid: ${debrid.length ? debrid.join(', ') : 'none — torrents skipped, free sources only'}`,
+        `🔑 debrid: ${debrid.length ? debrid.join(', ') : config.movies?.torrentDirect !== false
+          ? 'none — torrents download directly'
+          : 'none — torrents skipped, free sources only'}`,
         `🧩 host: ${host.statusLine()}`,
         '',
         ...(mirrorPools.length ? [

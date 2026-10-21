@@ -70,9 +70,12 @@ const cfg = {
     anime: bool(process.env.META_ANIME, true),
   },
 
-  // debrid is optional: without a key, torrent results are skipped and the
-  // cascade runs on the DDL + HLS tiers (which need no account at all).
+  // Debrid is optional; direct torrent downloads are enabled by default.
   skipTorrentWithoutDebrid: bool(process.env.SKIP_TORRENT_WITHOUT_DEBRID, true),
+  torrentDirect: bool(process.env.TORRENT_DIRECT, true),
+  torrentMinSeeds: num(process.env.TORRENT_MIN_SEEDS, 3),
+  torrentMetadataTimeoutMs: num(process.env.TORRENT_METADATA_TIMEOUT_MS, 90_000),
+  torrentStallTimeoutMs: num(process.env.TORRENT_STALL_TIMEOUT_MS, 180_000),
 
   // storage (all inside the bot's ./temp)
   tempDir: process.env.TEMP_DIR || './temp/movies',
@@ -124,7 +127,7 @@ const cfg = {
   // perf
   concurrency: num(process.env.CONCURRENCY, 1),
   perUserQueueCap: num(process.env.PER_USER_QUEUE_CAP, 3),
-  jobTimeoutMs: num(process.env.JOB_TIMEOUT_MS, 15 * 60_000),
+  jobTimeoutMs: num(process.env.JOB_TIMEOUT_MS, 60 * 60_000),
   providerTimeoutMs: num(process.env.PROVIDER_TIMEOUT_MS, 12_000),
   tierTimeoutMs: num(process.env.TIER_TIMEOUT_MS, 15_000),
   // Hard wall for one resolve attempt (all qualities, all tiers). Without it a
@@ -144,7 +147,9 @@ const cfg = {
 const problems = [];
 if (!cfg.tmdbKey) problems.push('TMDB_API_KEY is not set — falling back to Cinemeta/IMDb/TVMaze for titles');
 if (!cfg.realDebridKey && !cfg.allDebridKey) {
-  problems.push('no debrid key — torrent sources are skipped (DDL + stream tiers still work). Add REALDEBRID_API_KEY or ALLDEBRID_API_KEY for 4K/1080p torrents.');
+  problems.push(cfg.torrentDirect
+    ? 'no debrid key — torrent sources download directly to this server.'
+    : 'no debrid key — torrent sources are skipped (DDL + stream tiers still work). Add REALDEBRID_API_KEY or ALLDEBRID_API_KEY for 4K/1080p torrents.');
 }
 if (problems.length && !cfg.quiet) {
   console.error('⚠️  movie engine configuration:');

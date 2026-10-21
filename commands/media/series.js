@@ -249,9 +249,10 @@ async function fetchEpisodeSource(meta, season, ep, quality, attempts = 3) {
     }
 
     const dest = await engine.targetFile(meta.title, meta.year, quality, season, ep);
+    let downloadedFile = dest;
     try {
       const saved = await engine.download(resolved, dest);
-      const realFile = (saved && saved.file) || dest;
+      const realFile = downloadedFile = (saved && saved.file) || dest;
       const size = fs.statSync(realFile).size;
       if (!size) throw new Error('download produced an empty file');
       const epRuntime = resolved.episodeRuntime || (resolved.meta || meta).episodeRuntime || (resolved.meta || meta).runtime;
@@ -262,7 +263,7 @@ async function fetchEpisodeSource(meta, season, ep, quality, attempts = 3) {
       lastErr = e;
       log.warn(`${meta.title} S${pad(season)}E${pad(ep)} · ${resolved.provider} download failed · ${e.message}`);
       exclude.push(resolved.provider);
-      for (const f of [dest, dest.replace(/\.(mp4|mkv|ts|m4v)$/i, '') + '.ts']) {
+      for (const f of new Set([downloadedFile, dest, dest.replace(/\.(mp4|mkv|ts|m4v)$/i, '') + '.ts'])) {
         try { fs.rmSync(f, { force: true }); } catch { /* ignore */ }
       }
       if (exclude.length >= attempts) break;
