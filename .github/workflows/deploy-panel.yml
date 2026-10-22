@@ -131,14 +131,22 @@ jobs:
           fi
           [ ${#CANDS[@]} -eq 0 ] && CANDS=("https://panel.xsystemshosting.com")
 
+          # Pterodactyl's client API addresses a server by its SHORT identifier
+          # (32197077), not the UUID (32197077-0d94-…). Try both shapes.
+          IDS=("$PANEL_SERVER_ID")
+          case "$PANEL_SERVER_ID" in
+            *-*) IDS+=("${PANEL_SERVER_ID%%-*}") ;;
+          esac
+
           ok=""; LAST="none"
           for raw in "${CANDS[@]}"; do
             BASE=${raw%/}
             BASE=${BASE%%/server/*}
             [ -z "$BASE" ] && continue
-            echo "→ $BASE"
+          for id in "${IDS[@]}"; do
+            echo "→ $BASE  server=$id"
             code=$(curl -sS --max-time 20 -o /tmp/out -w '%{http_code}' -X POST \
-              "$BASE/api/client/servers/$PANEL_SERVER_ID/power" \
+              "$BASE/api/client/servers/$id/power" \
               -H "Authorization: Bearer $PANEL_API_KEY" \
               -H 'Accept: application/json' \
               -H 'Content-Type: application/json' \
@@ -146,12 +154,14 @@ jobs:
             body=$(head -c 200 /tmp/out 2>/dev/null | tr -d '\n')
             err=$(head -c 160 /tmp/err 2>/dev/null | tr -d '\n')
             echo "   $code $body $err"
-            LAST="$code @ $BASE"
+            LAST="$code @ $BASE (server=$id)"
             case "$code" in
-              200|204) ok="$BASE"; break ;;
-              000|curl:6|curl:7|curl:28|curl:35) continue ;;   # unreachable — try the next host
-              *) break ;;                                      # reachable, refused: report it
+              200|204) ok="$BASE"; break 2 ;;
+              404) continue ;;                                 # wrong id shape — next id
+              000|curl:6|curl:7|curl:28|curl:35) continue 2 ;; # unreachable — next host
+              *) break 2 ;;                                    # reachable, refused: report it
             esac
+            done
           done
 
           if [ -n "$ok" ]; then
