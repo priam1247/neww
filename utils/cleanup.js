@@ -1,18 +1,17 @@
 /**
  * Global Cleanup System
  *
- * Keeps ./temp from growing forever. Two independent brakes:
+ * Keeps ./temp from growing forever. Three independent brakes:
  *
- *   1. age   — a file older than its threshold is deleted
+ *   1. boot  — `sweepBootPartials()` removes any leftover `.part`, `.ytdl`,
+ *              `.tmp`, DASH fragments, and unheld staging media from a crashed
+ *              or restarted process before new jobs begin.
+ *   2. age   — a file older than its threshold is deleted
  *              (downloads 30 min, media jobs 60 min, everything else 6 h)
- *   2. size  — if ./temp is still bigger than TEMP_MAX_MB (default 1024 MB)
- *              the oldest files go first, whatever their age
+ *   3. size  — if ./temp is still bigger than TEMP_MAX_MB (default 2048 MB)
+ *              the oldest unheld files go first, whatever their age
  *
- * The whole tree is walked, including temp/movies: delivered movies are
- * removed by the delivery path itself (utils/movieHost.release), but a crashed
- * job or a killed download must not leave a 2 GB partial on a 3 GB disk.
- *
- * The WhatsApp session directory is never touched.
+ * The WhatsApp session directory and database files are never touched.
  */
 
 const fs = require('fs');
@@ -27,27 +26,32 @@ const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 const SCRAP_AGE_MS = 30 * 60 * 1000;        // download scraps, part files
 const MEDIA_AGE_MS = 60 * 60 * 1000;        // ytv_/song_/movie files
 const OTHER_AGE_MS = 6 * 60 * 60 * 1000;    // anything else in temp/
-const MEDIA_PREFIX = /^(ytv_|song_|dl_|fb_|paper_|conv_|audio_|video_|movie_)/i;
+const MEDIA_PREFIX = /^(ytv_|song_|aud_|dl_|fb_|paper_|conv_|audio_|video_|movie_)/i;
+const PARTIAL_NAME = /(\.(part|ytdl|tmp|f\d+\.[a-z0-9]+)$|\.(part|ytdl)-Frag)/i;
 
 // yt-dlp/ffmpeg can stamp a fresh file with the source's old Last-Modified
 // time; ctime is set when the file is written here, so take the newer one.
 const ageOf = (stats, now = Date.now()) => now - Math.max(stats.mtimeMs, stats.ctimeMs);
 
-// Size cap for the whole temp tree (0 = no cap)
-const TEMP_MAX_MB = Number(process.env.TEMP_MAX_MB || 1024);
+// Size cap for the whole temp tree (sensible default: 2048 MB for a 10 GB plan)
+const configuredTempMaxMB = () => {
+  const raw = process.env.TEMP_MAX_MB ?? config.disk?.tempMaxMB ?? 2048;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 2048;
+};
 
 // Session directory name (must NOT be cleaned)
 const SESSION_DIR_NAME = config.sessionName || 'session';
 
-// Engine bookkeeping that must survive a sweep (small, but they are state)
-const KEEP_NAMES = /^(cache\.json|.*\.tmp)$/i;
+// Engine bookkeeping that must survive a regular age/size sweep
+const KEEP_NAMES = /^(cache\.json(\.bak)?|imdb-index\.tsv)$/i;
 
 let cleanupInterval = null;
 
 const thresholdFor = (name) => {
+  if (PARTIAL_NAME.test(name)) return SCRAP_AGE_MS;
   if (MEDIA_PREFIX.test(name)) return MEDIA_AGE_MS;
-  if (/\.(part|ytdl|tmp)$/i.test(name)) return SCRAP_AGE_MS;
-  return SCRAP_AGE_MS;
+  return OTHER_AGE_MS;
 };
 
 /** Every regular file under `dir`, with its raw size/mtime/ctime. */
@@ -58,7 +62,7 @@ function walk(dir, out = []) {
   for (const e of entries) {
     const p = path.join(dir, e.name);
     if (e.isDirectory()) {
-      if (e.name === SESSION_DIR_NAME) continue;
+      if (e.name === SESSION_DIR_NAME || e.name === 'database') continue;
       walk(p, out);
       continue;
     }
@@ -71,13 +75,52 @@ function walk(dir, out = []) {
 }
 
 /** Total bytes in the temp tree (used by the boot log and `.moviestatus`). */
-function tempUsage() {
-  const files = walk(getTempDir());
+function tempUsage(dir = null) {
+  const files = walk(dir || getTempDir());
   return files.reduce((n, f) => n + f.size, 0);
 }
 
 function unlink(file) {
   try { fs.unlinkSync(file); return true; } catch { return false; }
+}
+
+/**
+ * Boot-time sweep: nothing is downloading yet, and delivered files are never
+ * cached, so any leftover `.part`/`.ytdl`/`.tmp`, media job file, or stranded
+ * movie file inside `temp/` from an interrupted run can be deleted immediately.
+ */
+function sweepBootPartials(dir = null) {
+  const result = { files: 0, freedBytes: 0 };
+  try {
+    const tempDir = dir || getTempDir();
+    if (!fs.existsSync(tempDir)) return result;
+
+    const moviesSubdir = path.resolve(tempDir, 'movies');
+    const all = walk(tempDir).filter((f) => !KEEP_NAMES.test(f.name) && !isHeld(f.path));
+
+    for (const f of all) {
+      const resolved = path.resolve(f.path);
+      const inMovies = resolved.startsWith(`${moviesSubdir}${path.sep}`);
+      const isLeftoverMedia = PARTIAL_NAME.test(f.name)
+        || MEDIA_PREFIX.test(f.name)
+        || (inMovies && /\.(mp4|mkv|webm|ts|m4v|avi|srt|vtt|part|tmp)$/i.test(f.name));
+
+      if (isLeftoverMedia && unlink(f.path)) {
+        result.files++;
+        result.freedBytes += f.size;
+      }
+    }
+
+    if (result.files > 0) {
+      console.log(
+        `🧹 Boot sweep: removed ${result.files} leftover partial/staging file(s) ` +
+        `(${(result.freedBytes / 1048576).toFixed(1)} MB freed)`
+      );
+    }
+  } catch (error) {
+    console.error('Error during boot partial sweep:', error.message);
+  }
+  return result;
 }
 
 /**
@@ -92,6 +135,7 @@ function cleanupOldFiles(dir = null, opts = {}) {
 
     // `now` is injectable so tests can age a whole tree without touching clocks
     const now = Number(opts.now) || Date.now();
+    const maxMB = opts.maxMB !== undefined ? Number(opts.maxMB) : configuredTempMaxMB();
     // holdTemp() keys (a running .dl/.ytv/movie job) are never swept
     const all = walk(tempDir).filter((f) => !KEEP_NAMES.test(f.name) && !isHeld(f.path));
 
@@ -108,10 +152,10 @@ function cleanupOldFiles(dir = null, opts = {}) {
 
     // ── 2. size cap ───────────────────────────────────────────────────────
     let total = survivors.reduce((n, f) => n + f.size, 0);
-    if (TEMP_MAX_MB > 0 && total > TEMP_MAX_MB * 1024 * 1024) {
+    if (maxMB > 0 && total > maxMB * 1024 * 1024) {
       survivors.sort((a, b) => a.mtime - b.mtime);       // oldest first
       for (const f of survivors) {
-        if (total <= TEMP_MAX_MB * 1024 * 1024) break;
+        if (total <= maxMB * 1024 * 1024) break;
         if (unlink(f.path)) { total -= f.size; result.files++; result.freedBytes += f.size; }
       }
     }
@@ -130,17 +174,22 @@ function cleanupOldFiles(dir = null, opts = {}) {
 }
 
 /**
- * Start the cleanup system
- * Runs cleanup at startup and then every CLEANUP_INTERVAL_MS
+ * Start the cleanup system:
+ *   1. Sweep leftover partial/interrupted files from previous boot,
+ *   2. Run age + size cap cleanup,
+ *   3. Schedule periodic sweeps every CLEANUP_INTERVAL_MS.
  */
 function startCleanup() {
   console.log('🧹 Starting temp file cleanup system...');
+  sweepBootPartials();
   const first = cleanupOldFiles();
+  const capMB = configuredTempMaxMB();
   console.log(
     `🧹 temp ${(first.remainingBytes / 1048576).toFixed(1)} MB after cleanup` +
-    `${TEMP_MAX_MB ? ` (cap ${TEMP_MAX_MB} MB)` : ''}`
+    `${capMB ? ` (cap ${capMB} MB)` : ''}`
   );
 
+  if (cleanupInterval) clearInterval(cleanupInterval);
   cleanupInterval = setInterval(() => { cleanupOldFiles(); }, CLEANUP_INTERVAL_MS);
   cleanupInterval.unref?.();
 
@@ -170,7 +219,9 @@ process.on('SIGTERM', () => {
 module.exports = {
   thresholdFor,
   ageOf,
+  sweepBootPartials,
   cleanupOldFiles,
+  configuredTempMaxMB,
   startCleanup,
   stopCleanup,
   tempUsage,

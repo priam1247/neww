@@ -147,10 +147,15 @@ const execute = async (sock, msg, args, extra) => {
     const stamp = `ytv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const outBase = path.join(getTempDir(), stamp);
     const release = require('../../utils/tempManager').holdTemp(stamp);
+    let diskReservation = null;
 
     try {
     if (!waited) await react('⏳');
-    diskSpace.requireMediaDownloadSpace(getTempDir(), config.media || {});
+    diskReservation = diskSpace.reserveMediaSpace(getTempDir(), config.media || {}, {
+      label: 'ytv',
+      tagDir: getTempDir(),
+      tagPrefix: stamp,
+    });
 
     // ── Download: yt-dlp first, with automatic quality fallback ────────────
     let file = null;
@@ -264,6 +269,7 @@ const execute = async (sock, msg, args, extra) => {
     }
     await react('❌');
   } finally {
+    diskReservation?.release?.();
     release();
     sweep(stamp);
     if (typeof global.gc === 'function') global.gc();

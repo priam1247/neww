@@ -93,6 +93,14 @@ module.exports = [
       const uniqueCmds = new Set(cmds.values()).size;
       let botVersion = '';
       try { botVersion = require('../../package.json').version; } catch (_) { /* ignore */ }
+      const { inspectDisk } = require('../../utils/diskSpace');
+      const disk = inspectDisk();
+      const diskLine = `│ 💿 Folder: ${disk.folderUsedMB.toFixed(0)} / ${disk.budgetMB} MB` +
+        (disk.reservedMB > 0 ? ` (+${disk.reservedMB.toFixed(0)} MB reserved)` : '') + '\n';
+      const statfsLine = disk.statfsFreeMB != null
+        ? `│ 🗄️ statfs: ${(disk.statfsFreeMB / 1024).toFixed(1)} GB free` +
+          (disk.statfsSeesHostNode ? ' (host node)' : '') + '\n'
+        : '';
 
       const t =
         `╭─ *${config.botName} — Stats*\n` +
@@ -101,6 +109,8 @@ module.exports = [
         `│ 📦 Commands: ${uniqueCmds}\n` +
         (botVersion ? `│ 🏷️ Version: ${botVersion}\n` : '') +
         `│ 💾 RAM: ${mb(mem.rss)}\n` +
+        diskLine +
+        statfsLine +
         `│ 🕒 ${now}\n` +
         `│ 🖥️ Node: ${process.version}\n` +
         `│ ⚙️ Prefix: \`${config.prefix}\`\n` +

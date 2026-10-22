@@ -1822,6 +1822,56 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       assert.strictEqual(warnings.length, 1);
     });
 
+    await test('disk guard enforces 9 GB folder budget, flags host-node statfs, and reserves per-job space', () => {
+      const disk = require(path.join(REPO, 'utils', 'diskSpace'));
+      const guard = require(path.join(REPO, 'utils', 'diskGuard'));
+      const fakeRoot = fs.mkdtempSync(path.join(sandbox, 'botroot-'));
+      fs.writeFileSync(path.join(fakeRoot, 'payload.bin'), Buffer.alloc(1024 * 1024, 1)); // 1 MB
+
+      // Host node claims 400 GB free out of 500 GB, while bot quota is 9000 MB
+      const hostNodeStatfs = () => ({ bavail: 400 * 1024, blocks: 500 * 1024, bsize: 1024 * 1024 });
+      const info = disk.inspectDisk(fakeRoot, { rootDir: fakeRoot, budget: 9000, statfsSync: hostNodeStatfs });
+      assert.strictEqual(info.statfsSeesHostNode, true, 'did not detect shared host-node statfs');
+      assert.ok(info.effectiveFreeMB < 9000 && info.effectiveFreeMB > 8990, `unexpected effectiveFreeMB: ${info.effectiveFreeMB}`);
+      assert.match(guard.formatBootComparison(info), /sees host node disk, NOT panel quota/);
+
+      // Concurrent reservation test: two 5 GB movie jobs cannot over-commit a 9 GB budget
+      const r1 = disk.reserveSpace(fakeRoot, 5000, { label: 'movie-1', rootDir: fakeRoot, budget: 9000, statfsSync: hostNodeStatfs });
+      assert.throws(
+        () => disk.reserveSpace(fakeRoot, 5000, { label: 'movie-2', rootDir: fakeRoot, budget: 9000, statfsSync: hostNodeStatfs }),
+        /not enough disk.*reserved by 1 running job/,
+      );
+      r1.release();
+      const r2 = disk.reserveSpace(fakeRoot, 5000, { label: 'movie-2', rootDir: fakeRoot, budget: 9000, statfsSync: hostNodeStatfs });
+      r2.release();
+      disk._clearReservationsForTests();
+    });
+
+    await test('heavy concurrency is capped at 1–2 and boot sweep removes leftover partials', () => {
+      const cfg = require(path.join(REPO, 'config'));
+      const jq = require(path.join(REPO, 'utils', 'jobQueue'));
+      const cleanup = require(path.join(REPO, 'utils', 'cleanup'));
+      assert.ok(cfg.queue.heavy >= 1 && cfg.queue.heavy <= 2, `heavy queue limit ${cfg.queue.heavy} exceeds 1–2`);
+      assert.ok(cfg.movies.queueConcurrency >= 1 && cfg.movies.queueConcurrency <= 2, `movie concurrency ${cfg.movies.queueConcurrency} exceeds 1–2`);
+      assert.ok(jq.stats().heavy.limit <= 2, 'jobQueue heavy limit exceeds 2');
+      assert.strictEqual(cleanup.configuredTempMaxMB(), 2048);
+
+      const bootTemp = fs.mkdtempSync(path.join(sandbox, 'boottemp-'));
+      fs.mkdirSync(path.join(bootTemp, 'movies'), { recursive: true });
+      const partFile = path.join(bootTemp, 'ytv_123.mp4.part');
+      const strandedMovie = path.join(bootTemp, 'movies', 'Dune.1080p.mp4');
+      const keepCache = path.join(bootTemp, 'movies', 'cache.json');
+      fs.writeFileSync(partFile, 'partial');
+      fs.writeFileSync(strandedMovie, 'partial-movie');
+      fs.writeFileSync(keepCache, '{}');
+
+      const swept = cleanup.sweepBootPartials(bootTemp);
+      assert.strictEqual(swept.files, 2);
+      assert.strictEqual(fs.existsSync(partFile), false);
+      assert.strictEqual(fs.existsSync(strandedMovie), false);
+      assert.strictEqual(fs.existsSync(keepCache), true, 'boot sweep deleted cache.json');
+    });
+
     const getFfmpeg = require(path.join(REPO, 'utils', 'ffmpeg'));
     if (getFfmpeg.works()) {
       await test('.movie rejects a downloaded trailer-length file', async () => {

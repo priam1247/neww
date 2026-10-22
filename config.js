@@ -121,18 +121,23 @@ module.exports = {
     maxMinutes: Number(env.VIDEO_MAX_MINUTES || 0),   // 0 = no length limit
   },
   media: {
-    diskMinFreeMB: Number(env.MEDIA_DISK_MIN_FREE_MB ?? 1500),
+    diskMinFreeMB: Number(env.MEDIA_DISK_MIN_FREE_MB ?? 1200),
     diskCopyMultiplier: Number(env.MEDIA_DISK_COPY_MULTIPLIER ?? 1.2),
     diskCopyOverheadMB: Number(env.MEDIA_DISK_COPY_OVERHEAD_MB ?? 300),
   },
+  // ─── Disk guard (bot folder quota vs shared host disk) ───────────────────
+  // Counts the bot's own folder against ~9 GB by default (for a 10 GB plan)
+  // instead of trusting statfs, which often reports the whole host node.
+  disk: {
+    budgetMB: Number(env.DISK_BUDGET_MB ?? 9000),
+    tempMaxMB: Number(env.TEMP_MAX_MB ?? 2048),
+  },
   // ─── Download concurrency ────────────────────────────────────────────────
   // light  = link/YouTube downloads: 20 at a time (QUEUE_LIGHT)
-  // heavy  = movie/episode jobs: 4 at a time (QUEUE_HEAVY)
-  // A memory guard in utils/jobQueue.js still holds a job back when the box is
-  // nearly out of RAM, so 20 never means "20 × 1 GB in memory".
+  // heavy  = movie/episode jobs: 2 at a time (QUEUE_HEAVY, tuned for 10 GB disk)
   queue: {
     light: Math.max(1, Math.floor(Number(env.QUEUE_LIGHT) || 20)),
-    heavy: Math.max(1, Math.floor(Number(env.QUEUE_HEAVY) || 4)),
+    heavy: Math.max(1, Math.floor(Number(env.QUEUE_HEAVY) || 2)),
     minFreeMB: Math.max(0, Number(env.QUEUE_MIN_FREE_MB || 220)),
   },
 
@@ -204,8 +209,8 @@ module.exports = {
     // puts anything bigger than drimeThresholdMB on Drime and posts the link.
     maxDownloadMB: Number(env.MOVIE_MAX_DOWNLOAD_MB || movieCapDefault),
     minFreeMB: Number(env.MOVIE_MIN_FREE_MB || 800),  // refuse a download below this
-    diskSizeMultiplier: Number(env.MOVIE_DISK_SIZE_MULTIPLIER ?? 2),
-    diskOverheadMB: Number(env.MOVIE_DISK_OVERHEAD_MB ?? 500),
+    diskSizeMultiplier: Number(env.MOVIE_DISK_SIZE_MULTIPLIER ?? 1.5),
+    diskOverheadMB: Number(env.MOVIE_DISK_OVERHEAD_MB ?? 400),
     unknownSizeMB: Number(env.MOVIE_DISK_UNKNOWN_SIZE_MB ?? 2000),
 
     region: env.REGION || 'US',
@@ -222,8 +227,8 @@ module.exports = {
     tempDir: env.MOVIE_TEMP_DIR || 'temp/movies',
     dataDir: env.MOVIE_DATA_DIR || 'temp/movies/data',
 
-    // movies from different chats download in parallel (no head-of-line block)
-    queueConcurrency: Math.max(1, Number(env.MOVIE_CONCURRENCY || 3)),
+    // movies from different chats download in parallel (1–2 for a 10 GB plan)
+    queueConcurrency: Math.max(1, Number(env.MOVIE_CONCURRENCY || 2)),
     jobTimeoutMs: Number(env.MOVIE_JOB_TIMEOUT_MS || 60 * 60 * 1000),
     dryRun: env.MOVIE_DRY_RUN === '1',                // resolve only, send the link
 

@@ -124,15 +124,20 @@ async function fetchSource(meta, quality, attempts = 3) {
 
     const dest = await engine.targetFile(meta.title, meta.year, quality, null, null);
     let downloadedFile = dest;
-    diskSpace.requireMovieSpace(getTempDir(), resolved.sizeMB, MOVIES());
+    const reservation = diskSpace.reserveMovieSpace(getTempDir(), resolved.sizeMB, MOVIES(), {
+      label: `movie:${meta.title}`,
+      tagDir: path.dirname(dest),
+      tagPrefix: path.basename(dest, path.extname(dest)),
+    });
     try {
       const saved = await engine.download(resolved, dest);
       // HLS sources may land as .ts (no ffmpeg on the host) — use the real path
       const file = downloadedFile = (saved && saved.file) || dest;
       const full = resolved.meta || meta;
       await assertFullLength(file, full.runtime, 'movie');
-      return { res: resolved, file };
+      return { res: resolved, file, reservation };
     } catch (e) {
+      reservation.release();
       lastErr = e;
       log.warn(`${meta.title} ${quality}p · ${resolved.provider} download failed · ${e.message}`);
       exclude.push(resolved.provider);
@@ -254,10 +259,12 @@ async function deliver(sock, msg, extra, meta, job) {
   const say = (text) => sock.sendMessage(chatId, { text }, { quoted: msg });
 
   await react('⏳');
+  let activeReservation = null;
+  let activeFile = null;
 
   try {
-    // resolve + download inside ONE queue slot: concurrency stays 1, so a
-    // second movie waits instead of competing for bandwidth/disk
+    // resolve + download inside ONE queue slot: concurrency stays bounded, so a
+    // second movie cannot over-commit bandwidth or disk
     log.info(`${meta.title}${meta.year ? ` (${meta.year})` : ''} · ${quality}p · start`);
     const t0 = Date.now();
     const jobResult = await engine.enqueue(
@@ -267,7 +274,9 @@ async function deliver(sock, msg, extra, meta, job) {
       { timeoutMs: MOVIES().jobTimeoutMs }
     );
 
-    const { res, file } = jobResult;
+    const { res, file, reservation } = jobResult;
+    activeReservation = reservation || null;
+    activeFile = file || null;
 
     if (MOVIES().dryRun) {
       await react('🔗');
@@ -292,6 +301,7 @@ async function deliver(sock, msg, extra, meta, job) {
     await trySubtitles(sock, chatId, msg, meta);
     // The chat has the file now — delete it, nothing is cached.
     await host.release(file).catch(() => false);
+    activeFile = null;
     await react('✅');
   } catch (e) {
     // full message: the logger collapses the bullets onto one line, so the
@@ -311,6 +321,9 @@ async function deliver(sock, msg, extra, meta, job) {
     }
     if (e.code === 'NOT_ENOUGH_DISK') return say(`❌ ${e.message}`);
     await say(`❌ No source for ${matched}.${hint}`);
+  } finally {
+    if (activeFile) await host.release(activeFile).catch(() => false);
+    activeReservation?.release?.();
   }
 }
 

@@ -212,6 +212,8 @@ async function deliverSeasonPack(sock, msg, extra, meta, job) {
   const say = (text) => sock.sendMessage(chatId, { text }, { quoted: msg });
 
   await react('⏳');
+  let packReservation = null;
+  let packFile = null;
 
   try {
     // resolve + (if it fits) download inside one queue slot
@@ -235,12 +237,23 @@ async function deliverSeasonPack(sock, msg, extra, meta, job) {
       }
 
       const dest = await engine.targetFile(meta.title, meta.year, job.quality, season, null);
-      diskSpace.requireMovieSpace(getTempDir(), resolved.sizeMB, MOVIES());
-      const saved = await engine.download(resolved, dest);
-      return { res: resolved, file: (saved && saved.file) || dest };
+      const reservation = diskSpace.reserveMovieSpace(getTempDir(), resolved.sizeMB, MOVIES(), {
+        label: `season:${meta.title}:S${pad(season)}`,
+        tagDir: path.dirname(dest),
+        tagPrefix: path.basename(dest, path.extname(dest)),
+      });
+      try {
+        const saved = await engine.download(resolved, dest);
+        return { res: resolved, file: (saved && saved.file) || dest, reservation };
+      } catch (e) {
+        reservation.release();
+        throw e;
+      }
     }, { timeoutMs: MOVIES().jobTimeoutMs });
 
-    const { res, file } = out;
+    const { res, file, reservation } = out;
+    packReservation = reservation || null;
+    packFile = file || null;
 
     if (MOVIES().dryRun) {
       await react('🔗');
@@ -264,11 +277,15 @@ async function deliverSeasonPack(sock, msg, extra, meta, job) {
     });
 
     await host.release(file).catch(() => false);
+    packFile = null;
     return react('✅');
   } catch (e) {
     log.error(`${meta.title} S${pad(season)} pack · ${e.code || 'FAIL'} · ${String(e.message || '').split('\n')[0]}`);
     await react('❌');
     return say(`❌ *${meta.title}* S${pad(season)} pack\n${String(e.message || '').split('\n')[0]}`);
+  } finally {
+    if (packFile) await host.release(packFile).catch(() => false);
+    packReservation?.release?.();
   }
 }
 
@@ -297,7 +314,11 @@ async function fetchEpisodeSource(meta, season, ep, quality, attempts = 3) {
 
     const dest = await engine.targetFile(meta.title, meta.year, quality, season, ep);
     let downloadedFile = dest;
-    diskSpace.requireMovieSpace(getTempDir(), resolved.sizeMB, MOVIES());
+    const reservation = diskSpace.reserveMovieSpace(getTempDir(), resolved.sizeMB, MOVIES(), {
+      label: `episode:${meta.title}:S${pad(season)}E${pad(ep)}`,
+      tagDir: path.dirname(dest),
+      tagPrefix: path.basename(dest, path.extname(dest)),
+    });
     try {
       const saved = await engine.download(resolved, dest);
       const realFile = downloadedFile = (saved && saved.file) || dest;
@@ -305,8 +326,9 @@ async function fetchEpisodeSource(meta, season, ep, quality, attempts = 3) {
       if (!size) throw new Error('download produced an empty file');
       const epRuntime = resolved.episodeRuntime || (resolved.meta || meta).episodeRuntime || (resolved.meta || meta).runtime;
       await require('./movie')._assertFullLength(realFile, epRuntime, 'episode');
-      return { res: resolved, file: realFile };
+      return { res: resolved, file: realFile, reservation };
     } catch (e) {
+      reservation.release();
       lastErr = e;
       log.warn(`${meta.title} S${pad(season)}E${pad(ep)} · ${resolved.provider} download failed · ${e.message}`);
       exclude.push(resolved.provider);
@@ -360,6 +382,8 @@ async function deliver(sock, msg, extra, meta, job) {
 
   for (const ep of episodes) {
     const tag = `S${pad(season)}E${pad(ep)}`;
+    let epReservation = null;
+    let epFile = null;
     try {
       // resolve + download in ONE queue slot so a batch stays sequential
       const done = await engine.enqueue(
@@ -369,7 +393,9 @@ async function deliver(sock, msg, extra, meta, job) {
         { timeoutMs: MOVIES().jobTimeoutMs }
       );
 
-      const { res, file } = done;
+      const { res, file, reservation } = done;
+      epReservation = reservation || null;
+      epFile = file || null;
 
       if (MOVIES().dryRun) {
         await say(`🔗 ${tag}: ${res.url || '(cached)'}`);
@@ -385,10 +411,14 @@ async function deliver(sock, msg, extra, meta, job) {
 
       log.info(`${meta.title} ${tag} · ${res.provider} · ${res.quality || job.quality}p · ${host.fmtMB(fs.statSync(file).size)}`);
       await sendEpisode(sock, msg, chatId, file, meta, season, ep, job.quality, res);
+      epFile = null;
       sent++;
     } catch (e) {
       log.error(`${meta.title} ${tag} · ${e.code || 'FAIL'} · ${e.message}`);
       failures.push(`${tag}: ${String(e.message || '').split('\n')[0]}`);
+    } finally {
+      if (epFile) await host.release(epFile).catch(() => false);
+      epReservation?.release?.();
     }
   }
 

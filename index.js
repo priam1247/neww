@@ -24,11 +24,10 @@ process.env.NODE_ENV = process.env.NODE_ENV || 'production';
 const { formatArgs } = require('./utils/safeLog');
 const { initializeTempSystem } = require('./utils/tempManager');
 const { startCleanup } = require('./utils/cleanup');
-const { startMemoryWatchdog } = require('./utils/memoryWatchdog');
+const { startDiskGuard } = require('./utils/diskGuard');
 initializeTempSystem();
 startCleanup();
-// NOTE: startMemoryWatchdog() is called further down, after `store` exists,
-// so it receives live references and can actually trim the store.
+startDiskGuard();
 const originalConsoleLog = console.log;
 const originalConsoleError = console.error;
 const originalConsoleWarn = console.warn;
@@ -141,9 +140,6 @@ const store = {
     return store.messages.get(jid)?.get(id) || null;
   }
 };
-
-// Start RAM watchdog with live references (see NOTE above)
-startMemoryWatchdog(store);
 
 // Optimized message deduplication (Set-based, no timestamps needed)
 const processedMessages = new Set();

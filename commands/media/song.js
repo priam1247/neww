@@ -33,7 +33,8 @@ const {
   downloadToFile, sniffFile, audioToMp3, tagMp3, safeName, fmtMB,
 } = require('../../utils/mediaTransfer');
 const log = require('../../utils/logger')('song');
-const { getTempDir, deleteTempFile } = require('../../utils/tempManager');
+const { getTempDir, deleteTempFile, holdTemp } = require('../../utils/tempManager');
+const diskSpace = require('../../utils/diskSpace');
 
 const MAX_AUDIO_MB = Number(config.song?.maxMB) || 120;
 const MAX_AUDIO_SECONDS = Number(config.song?.maxMinutes ? config.song.maxMinutes * 60 : 3 * 60 * 60);
@@ -165,6 +166,13 @@ const execute = async (sock, msg, args, extra) => {
       }
 
       return await jobQueue.runInLane('light', async () => {
+      const releaseHold = holdTemp(id);
+      const diskReservation = diskSpace.reserveSpace(getTempDir(), MAX_AUDIO_MB * 2, {
+        label: 'song',
+        tagDir: getTempDir(),
+        tagPrefix: id,
+      });
+      try {
       await react('📥');
 
       // ── 3. Engine 1: yt-dlp ───────────────────────────────────────────────
@@ -292,6 +300,10 @@ const execute = async (sock, msg, args, extra) => {
         }, { quoted: msg });
       }
       await react('✅');
+      } finally {
+        diskReservation.release();
+        releaseHold();
+      }
       }, async () => {
         await react('⏳');
       });
