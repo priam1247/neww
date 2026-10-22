@@ -43,6 +43,7 @@ engine/             movie/series engine (ESM, loaded on demand)
 database/           runtime data (papers index, sent-log, settings)
 scripts/            install-ytdlp.sh, selftest.js
 admin-server.js     HTTP bridge the web portal talks to (see "Dashboard")
+dashboard/          the Next.js web portal (own package.json — deploy root on Vercel)
 Procfile            panel/Heroku start command
 ```
 
@@ -168,6 +169,11 @@ The local yt-dlp engine is tried first. If it cannot handle a source, configured
 For YouTube hosting-IP checks, an owner can upload a Netscape-format cookies file with `.cookies set`; use `.cookies status` to inspect availability and `.cookies clear` to remove it. Treat cookies as account credentials. `.ytdl` reports engine status; `.ytdl test <link>`, `.ytdl raw <link>`, `.ytdl update`, `.ytdl repair`, and `.ytdl proxy <url|off>` help diagnose or repair downloads.
 
 ## Dashboard link (web portal → bot)
+
+The portal source lives in `dashboard/`. It is a **separate app**, so on Vercel
+set the project's **Root Directory** to `dashboard` once; the bot at the repo
+root and the portal then deploy from the same repository without interfering.
+Details in `dashboard/README.md`.
 
 The portal (`troykunsauka@gmail.com` admin console) links to a running bot with
 two values: a **Bot Server URL** and an **ADMIN_DASHBOARD_TOKEN**. The bot side
