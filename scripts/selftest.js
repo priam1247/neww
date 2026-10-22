@@ -1744,6 +1744,173 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     }
   }
 
+  // ─── concurrency, quality picker, no cache ─────────────────────────────────
+  console.log('\n▶ 20 downloads at once, quality menu, nothing cached');
+  {
+    const jobQueue = require(path.join(REPO, 'utils', 'jobQueue'));
+    const selections = require(path.join(REPO, 'utils', 'selections'));
+
+    await test('20 link downloads run at the same time', async () => {
+      let running = 0;
+      let peak = 0;
+      const waiting = [];
+      const jobs = Array.from({ length: 20 }, () => jobQueue.runInLane('light', async () => {
+        running += 1;
+        peak = Math.max(peak, running);
+        await new Promise((resolve) => waiting.push(resolve));
+        running -= 1;
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.strictEqual(peak, 20, `only ${peak} of 20 downloads started together`);
+      while (waiting.length) waiting.shift()();
+      await Promise.all(jobs);
+    });
+
+    await test('a 21st download waits for a free slot instead of failing', async () => {
+      const running = [];
+      const waiting = [];
+      const holders = Array.from({ length: 20 }, () => jobQueue.runInLane('light', () => new Promise((resolve) => {
+        running.push(resolve);
+        waiting.push(resolve);
+      })));
+      await new Promise((resolve) => setTimeout(resolve, 120));
+
+      let started = false;
+      const extra = jobQueue.runInLane('light', async () => { started = true; });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      assert.strictEqual(started, false, 'the 21st job ignored the lane limit');
+
+      waiting.shift()();                       // exactly one slot freed
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.strictEqual(started, true, 'the waiting job did not start when a slot freed');
+
+      waiting.forEach((resolve) => resolve());
+      running.forEach((resolve) => resolve());
+      await Promise.all([...holders, extra]);
+    });
+
+    await test('a WhatsApp list tap resolves by row id', async () => {
+      const items = [{ quality: 1080 }, { quality: 720 }];
+      selections.offer({
+        chatId: 'list@s.whatsapp.net', sender: 'u1@s.whatsapp.net',
+        items, ids: ['q1080', 'q720'], run: () => {},
+      });
+      const picked = selections.match('list@s.whatsapp.net', 'u1@s.whatsapp.net', 'q720');
+      assert.ok(picked, 'the row id was not matched');
+      assert.strictEqual(picked.item.quality, 720);
+      assert.strictEqual(selections.match('list@s.whatsapp.net', 'u1@s.whatsapp.net', '2'), null,
+        'a finished choice was matched twice');
+    });
+
+    const movie = require(path.join(REPO, 'commands', 'media', 'movie'));
+    const engine = require(path.join(REPO, 'utils', 'movieEngine'));
+
+    await test('.movie records an explicitly typed quality', () => {
+      assert.strictEqual(movie._parseArgs(['dune', '2021', '1080']).explicitQuality, true);
+      assert.strictEqual(movie._parseArgs(['dune', '2021']).explicitQuality, false);
+      assert.strictEqual(movie._parseArgs(['dune', '2021', '1080']).quality, 1080);
+    });
+
+    await test('.movie offers every quality with its size', async () => {
+      const original = engine.qualityOptions;
+      engine.qualityOptions = async () => ({
+        options: [
+          { quality: 1080, sizeMB: 2100, provider: 'moviebox', candidates: 2 },
+          { quality: 720, sizeMB: 900, provider: 'moviebox', candidates: 1 },
+        ],
+      });
+      const sent = [];
+      const sock = { sendMessage: async (_jid, content) => { sent.push(content); return { key: { id: 'k' } }; } };
+      const msg = { key: { remoteJid: 'q@s.whatsapp.net', id: 'm1' } };
+      const extra = { from: 'q@s.whatsapp.net', sender: 'u@s.whatsapp.net' };
+      try {
+        await movie._askQuality(sock, msg, extra, { title: 'Spider-Man', year: 2026 }, { quality: 720, matches: [] });
+      } finally {
+        engine.qualityOptions = original;
+        selections.clear('q@s.whatsapp.net', 'u@s.whatsapp.net');
+      }
+      const list = sent.find((m) => Array.isArray(m.sections));
+      assert.ok(list, 'no quality list message was sent');
+      assert.strictEqual(list.sections[0].rows.length, 2);
+      assert.match(list.sections[0].rows[0].description, /2\.1 GB/);
+      assert.strictEqual(list.sections[0].rows[0].rowId, 'q1080');
+    });
+
+    await test('.movie falls back to a numbered list when the client rejects lists', async () => {
+      const original = engine.qualityOptions;
+      engine.qualityOptions = async () => ({
+        options: [
+          { quality: 1080, sizeMB: 2100, provider: 'moviebox', candidates: 1 },
+          { quality: 480, sizeMB: 300, provider: 'moviebox', candidates: 1 },
+        ],
+      });
+      const sent = [];
+      const sock = {
+        sendMessage: async (_jid, content) => {
+          if (Array.isArray(content.sections)) throw new Error('list messages unsupported');
+          sent.push(content);
+          return { key: { id: 'k' } };
+        },
+      };
+      const msg = { key: { remoteJid: 'f@s.whatsapp.net', id: 'm2' } };
+      const extra = { from: 'f@s.whatsapp.net', sender: 'u@s.whatsapp.net' };
+      try {
+        await movie._askQuality(sock, msg, extra, { title: 'Dune', year: 2021 }, { quality: 720, matches: [] });
+      } finally {
+        engine.qualityOptions = original;
+        selections.clear('f@s.whatsapp.net', 'u@s.whatsapp.net');
+      }
+      const text = sent.map((m) => m.text || '').join('\n');
+      assert.match(text, /1\.\*?\s*1080p/);
+      assert.match(text, /480p/);
+    });
+
+    await test('nothing is cached: a delivered movie file is deleted', async () => {
+      const host = require(path.join(REPO, 'utils', 'movieHost'));
+      const file = path.join(host.tempDir(), `no-cache-${Date.now()}.mp4`);
+      fs.writeFileSync(file, 'x');
+      const deleted = await host.release(file);
+      assert.strictEqual(deleted, true);
+      assert.strictEqual(fs.existsSync(file), false, 'the file survived release()');
+    });
+
+    await test('yt-dlp can repair itself and is watched while running', () => {
+      const YT = require(path.join(REPO, 'utils', 'youtubedl'));
+      assert.strictEqual(typeof YT.selfHeal, 'function');
+      assert.strictEqual(typeof YT.healthCheck, 'function');
+      assert.strictEqual(typeof YT.startWatchdog, 'function');
+      assert.strictEqual(typeof YT.stopWatchdog, 'function');
+    });
+
+    await test('.ytv never sends a silent video', async () => {
+      const ff = require(path.join(REPO, 'utils', 'ffmpeg'));
+      if (!ff.works()) return;                     // no ffmpeg → no fixture
+      const dir = fs.mkdtempSync(path.join(sandbox, 'silent-'));
+      const silent = path.join(dir, 'silent.mp4');
+      require('child_process').execFileSync(ff(), [
+        '-y', '-hide_banner', '-loglevel', 'error',
+        '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=25', '-t', '6', '-an',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', silent,
+      ]);
+      const YT = require(path.join(REPO, 'utils', 'youtubedl'));
+      const pipeline = require(path.join(REPO, 'utils', 'mediaPipeline'));
+      const original = YT.downloadVideo;
+      YT.downloadVideo = async () => ({ file: silent, profile: 'test', attempts: [], hasAudio: false });
+      const sent = [];
+      const sock = { sendMessage: async (_jid, content) => { sent.push(content); return { key: { id: 'x' } }; } };
+      const msg = { key: { remoteJid: 's@s.whatsapp.net', id: 'm3' }, message: { conversation: '.ytv x' } };
+      try {
+        const out = await pipeline.downloadAndSend(sock, msg, { from: 's@s.whatsapp.net' },
+          { url: 'https://example.com/v', kind: 'video', title: 'silent', height: 720 });
+        assert.strictEqual(out.sent, false, 'a silent video was reported as sent');
+        assert.ok(!sent.some((m) => m.video || m.document), 'a silent video was sent to the chat');
+        assert.ok(sent.some((m) => /audio/i.test(m.text || '')), 'the user was not told about the missing audio');
+      } finally {
+        YT.downloadVideo = original;
+      }
+    });
+  }
+
   // ─── summary ────────────────────────────────────────────────────────────────
   console.log(`\n${'─'.repeat(52)}`);
   if (failures.length) {

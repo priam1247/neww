@@ -32,8 +32,8 @@
 
 const env = process.env;
 const list = (raw, fallback) => String(raw || fallback).split(',').map(s => s.trim()).filter(Boolean);
-const drimeMoviesMode = String(env.DRIME_MOVIES || 'off').toLowerCase();
-const movieCapDefault = ['big', 'always'].includes(drimeMoviesMode) ? 4096 : 2000;
+// WhatsApp documents cap at 2 GB: that is the download ceiling too.
+const movieCapDefault = Math.min(2000, Number(env.VIDEO_MAX_MB || 2000));
 
 module.exports = {
   ownerNumber: list(env.OWNER_NUMBER, '265894016453'),
@@ -121,15 +121,19 @@ module.exports = {
     maxMinutes: Number(env.VIDEO_MAX_MINUTES || 0),   // 0 = no length limit
   },
   media: {
-    sendCacheDays: Number(env.MEDIA_SEND_CACHE_DAYS ?? 7),
-    progressCard: !/^(0|false|no|off)$/i.test(String(env.MEDIA_PROGRESS_CARD ?? 'true')),
     diskMinFreeMB: Number(env.MEDIA_DISK_MIN_FREE_MB ?? 1500),
     diskCopyMultiplier: Number(env.MEDIA_DISK_COPY_MULTIPLIER ?? 1.2),
     diskCopyOverheadMB: Number(env.MEDIA_DISK_COPY_OVERHEAD_MB ?? 300),
   },
+  // ─── Download concurrency ────────────────────────────────────────────────
+  // light  = link/YouTube downloads: 20 at a time (QUEUE_LIGHT)
+  // heavy  = movie/episode jobs: 4 at a time (QUEUE_HEAVY)
+  // A memory guard in utils/jobQueue.js still holds a job back when the box is
+  // nearly out of RAM, so 20 never means "20 × 1 GB in memory".
   queue: {
-    light: Math.max(1, Math.floor(Number(env.QUEUE_LIGHT) || 3)),
-    heavy: Math.max(1, Math.floor(Number(env.QUEUE_HEAVY) || 2)),
+    light: Math.max(1, Math.floor(Number(env.QUEUE_LIGHT) || 20)),
+    heavy: Math.max(1, Math.floor(Number(env.QUEUE_HEAVY) || 4)),
+    minFreeMB: Math.max(0, Number(env.QUEUE_MIN_FREE_MB || 220)),
   },
 
   messages: {
@@ -204,15 +208,6 @@ module.exports = {
     diskOverheadMB: Number(env.MOVIE_DISK_OVERHEAD_MB ?? 500),
     unknownSizeMB: Number(env.MOVIE_DISK_UNKNOWN_SIZE_MB ?? 2000),
 
-    // ── Drime Cloud delivery (the same account .paper uses) ───────────────
-    // OFF by default: this host has plenty of disk, and a chat never needs a
-    // cloud link for a file WhatsApp can carry itself.
-    // 'off'    → never upload (default)
-    // 'big'    → upload only files above drimeThresholdMB
-    // 'always' → every finished movie/episode gets a permanent Drime link
-    drimeUpload: (env.DRIME_MOVIES || 'off').toLowerCase(),
-    drimeThresholdMB: Number(env.DRIME_MOVIES_MB || 0),   // 0 = use video.maxMB
-    drimeFolderId: Number(env.DRIME_MOVIES_FOLDER_ID || 0), // 0 = Drime root
     region: env.REGION || 'US',
     episodeBatchLimit: Number(env.MOVIE_BATCH_LIMIT || 10),
     // attach the English subtitle (.srt) that MovieBox serves with the stream
@@ -220,20 +215,15 @@ module.exports = {
     subtitleLang: env.MOVIE_SUBTITLE_LANG || 'en',
 
     // ── disk hygiene ─────────────────────────────────────────────────────
-    // A delivered movie is DELETED once WhatsApp has taken it. Keeping a 2 GB
-    // file "in case someone asks again" is what filled a 3 GB panel disk.
-    // MOVIE_KEEP_CACHE=1 turns the old behaviour back on (files stay for
-    // cacheTTLHours, up to cacheMaxMB total).
-    keepCache: env.MOVIE_KEEP_CACHE === '1',
-    cacheTTLHours: Number(env.MOVIE_CACHE_HOURS || (env.MOVIE_KEEP_CACHE === '1' ? 48 : 1)),
-    cacheMaxMB: Number(env.MOVIE_CACHE_MB || (env.MOVIE_KEEP_CACHE === '1' ? 8000 : 0)),
+    // Nothing is cached: a delivered movie/episode is DELETED as soon as
+    // WhatsApp has taken it (the file, its temp copy and its subtitle).
 
     // engine storage — stays inside the bot's ./temp folder
     tempDir: env.MOVIE_TEMP_DIR || 'temp/movies',
-    cacheFile: env.MOVIE_CACHE_FILE || 'temp/movies/cache.json',
     dataDir: env.MOVIE_DATA_DIR || 'temp/movies/data',
 
-    queueConcurrency: Number(env.MOVIE_CONCURRENCY || 1),
+    // movies from different chats download in parallel (no head-of-line block)
+    queueConcurrency: Math.max(1, Number(env.MOVIE_CONCURRENCY || 3)),
     jobTimeoutMs: Number(env.MOVIE_JOB_TIMEOUT_MS || 60 * 60 * 1000),
     dryRun: env.MOVIE_DRY_RUN === '1',                // resolve only, send the link
 

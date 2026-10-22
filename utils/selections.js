@@ -24,18 +24,24 @@ const prune = () => {
 };
 
 /**
- * Register a numbered choice.
- * @param {{chatId:string, sender:string, items:any[], run:Function, ttlMs?:number, label?:string}} opts
+ * Register a pending choice.
+ *
+ * Items may be picked by number ("2") or, when the bot sent a WhatsApp list /
+ * button message, by their own row id ("q1080"). One pending entry per
+ * chat+sender, so a new question replaces the previous one.
+ *
+ * @param {{chatId:string, sender:string, items:any[], run:Function, ttlMs?:number, label?:string, ids?:string[]}} opts
  *        run(sock, msg, extra, item) continues the command.
+ *        ids[i] is the id of items[i] for list/button picks.
  * @returns {string} the map key (useful for tests)
  */
-function offer({ chatId, sender, items, run, ttlMs = DEFAULT_TTL_MS, label = '' }) {
+function offer({ chatId, sender, items, run, ttlMs = DEFAULT_TTL_MS, label = '', ids = null }) {
   if (!Array.isArray(items) || !items.length || typeof run !== 'function') {
     throw new Error('offer() needs items and a run callback');
   }
   prune();
   const k = keyOf(chatId, sender);
-  pending.set(k, { at: Date.now(), ttlMs, items, run, label });
+  pending.set(k, { at: Date.now(), ttlMs, items, run, label, ids: Array.isArray(ids) ? ids : null });
   return k;
 }
 
@@ -65,7 +71,15 @@ const peek = (chatId, sender) => {
 function match(chatId, sender, text) {
   const entry = peek(chatId, sender);
   if (!entry) return null;
-  const n = parseChoice(text);
+
+  const raw = String(text || '').trim();
+  if (entry.ids && raw && entry.ids.includes(raw)) {
+    const index = entry.ids.indexOf(raw);
+    pending.delete(keyOf(chatId, sender));
+    return { entry, item: entry.items[index], index };
+  }
+
+  const n = parseChoice(raw);
   if (n === null || n > entry.items.length) return null;
   pending.delete(keyOf(chatId, sender));
   return { entry, item: entry.items[n - 1], index: n - 1 };

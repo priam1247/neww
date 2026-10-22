@@ -145,18 +145,18 @@ Requirements and behaviour:
   `node-datachannel`, `npm install` still succeeds and only torrents are lost
   (`npm rebuild node-datachannel` adds them back). `.providers` shows what is live.
 * Files are staged in `temp/movies/` — inside the bot's own temp dir, in a
-  subfolder `cleanup.js` never touches — and are indexed by an LRU that survives
-  restarts. A file still downloading is never swept away: every job holds its
-  temp stamp (`holdTemp`) and both the 10-minute sweep and the memory watchdog
-  skip held files and judge age by write time, not by the source's Last-Modified.
-* **Big files are delivered, not refused.** Anything above `DRIME_MOVIES_MB`
-  (default: `video.maxMB`, 300 MB) is uploaded to the same Drime Cloud account
-  `.paper` uses — documented S3 multipart flow — and the chat gets the file plus
-  a permanent link. `DRIME_MOVIES=off` disables it, `=always` uploads every
-  title. Upload progress shows in the same status card as the download.
+  subfolder `cleanup.js` never touches. A file still downloading is never swept
+  away: every job holds its temp stamp (`holdTemp`) and both the 10-minute sweep
+  and the memory watchdog skip held files and judge age by write time.
+* **Nothing is cached.** The file is deleted as soon as WhatsApp has accepted
+  it — no LRU, no cloud link, no second copy. Ask again and it downloads again.
+* **Quality menu with sizes.** `.movie spiderman brand new day 2026` asks the
+  sources first and sends a WhatsApp list of the qualities that actually exist,
+  each with its real size (e.g. *1080p ~2.1 GB*). Tap a row — or reply with its
+  number if your client does not support list messages.
+* **Every match, in one message.** A vague title (`spiderman`) lists *all*
+  matching films with year and rating; reply with a number to continue.
 * Episode batches run one episode at a time (`MOVIE_BATCH_LIMIT`, default 10).
-* `.movie <title>` shows a numbered list when several films match — the bot
-  downloads exactly the one you pick, never "result 1" silently.
 
 Troubleshooting:
 
@@ -322,9 +322,10 @@ Paper search uses the configured Drime Cloud API and a local vault snapshot. Con
 
 Delivered files do not stay on the panel:
 
-- `.movie` / `.series` delete the file as soon as WhatsApp has accepted it
-  (`utils/movieHost.release`), and its cache entry goes with it. Set
-  `MOVIE_KEEP_CACHE=1` to restore the old "keep for a day" behaviour.
+- `.movie` / `.series` / `.dl` / `.ytv` / `.song` / `.paper` delete the file as
+  soon as WhatsApp has accepted it (`utils/movieHost.release`, and the `finally`
+  block of `utils/mediaPipeline.js`). There is no movie cache and no send cache:
+  nothing is kept "in case someone asks again".
 - `utils/cleanup.js` walks the whole `temp/` tree (including `temp/movies/`,
   which used to be skipped because it is a sub-folder) every 10 minutes:
   downloads older than 30 min, media jobs older than 60 min, and — whatever
@@ -333,6 +334,34 @@ Delivered files do not stay on the panel:
 
 `.moviestatus` prints `temp disk ... MB` and whether files are kept or
 deleted after sending.
+
+## Many downloads at once
+
+Two lanes (`utils/jobQueue.js`):
+
+| lane | what uses it | at the same time |
+|---|---|---|
+| light | `.ytv` `.dl` `.song` `.spotify` `.facebook` links | **20** (`QUEUE_LIGHT`) |
+| heavy | `.movie` `.series` jobs | **4** (`QUEUE_HEAVY`) |
+
+A 21st download waits for a free slot (the chat gets a ⏳ reaction) instead of
+failing, and messages are handled concurrently, so a running movie never blocks
+`.song`, `.paper` or another chat. A memory guard (`QUEUE_MIN_FREE_MB`, default
+220 MB) delays a start when the box is nearly out of RAM, so 20 slots never
+means 20 downloads fighting over the last megabyte.
+
+## yt-dlp repairs itself
+
+`utils/youtubedl.js` owns its own health:
+
+* **at boot** — if the binary is missing or does not run, it is re-downloaded
+  (standalone build first, then pip);
+* **while running** — a download that reports `NO_YTDLP` triggers one repair and
+  the download is retried; a 30-minute watchdog re-checks the binary;
+* **on bot-check** — an outdated build is updated once before giving up.
+
+`.ytdl` shows the resolved path, version and the last error; `.ytdl update`
+forces an update.
 
 ## Configuration
 
@@ -344,11 +373,11 @@ DRIME_API_TOKEN DRIME_BASE_URL DRIME_PAPERS_FOLDER_ID DRIME_PAPERS_FOLDER_HASH D
 TMDB_API_KEY REALDEBRID_API_KEY ALLDEBRID_API_KEY MOVIE_QUALITY MOVIE_MAX_MB MOVIE_BATCH_LIMIT MOVIE_DRY_RUN
 OMDB_API_KEY TRAKT_CLIENT_ID IMDB_INDEX_FILE QUALITY_FALLBACK
 META_CINEMETA META_IMDB META_TVMAZE META_OMDB META_TRAKT META_ANIME
-MOVIE_MAX_DOWNLOAD_MB DRIME_MOVIES DRIME_MOVIES_MB DRIME_MOVIES_FOLDER_ID
+MOVIE_MAX_DOWNLOAD_MB MOVIE_CONCURRENCY QUEUE_LIGHT QUEUE_HEAVY QUEUE_MIN_FREE_MB
 GIFTED_API_KEY GIFTED_API_URL
 YOUTUBE_COOKIES YOUTUBE_COOKIES_FILE YTDLP_PROXY YTDLP_DEADLINE_MS
 COBALT_INSTANCES COBALT_USE_DEFAULTS SONG_SEND_AS SONG_MAX_MINUTES SEARCH_PICKER SEARCH_RESULTS
-PREFER_PROVIDERS (default moviebox)  MOVIE_SUBTITLES  MOVIE_SUBTITLE_LANG  DRIME_MOVIES
+PREFER_PROVIDERS (default moviebox)  MOVIE_SUBTITLES  MOVIE_SUBTITLE_LANG
 SEARCH_TTL_MINUTES SPOTIFY_CLIENT_ID SPOTIFY_CLIENT_SECRET FFMPEG_PATH TZ
 HEAP_MB (or MEMORY_LIMIT_MB) — heap size; auto = RAM − 450 MB, capped at 4200
 ```

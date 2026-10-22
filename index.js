@@ -567,7 +567,16 @@ require('./utils/logger').banner([
 
 // Proactively delete Puppeteer cache so it doesn't fill disk on panels
 cleanupPuppeteerCache();
-require('./utils/youtubedl').scheduleAutoUpdate();
+// yt-dlp looks after itself: install/repair at boot, verify every 30 minutes,
+// and re-download the binary when a download reports it as missing or broken.
+(() => {
+  const YT = require('./utils/youtubedl');
+  YT.scheduleAutoUpdate();
+  YT.healthCheck().then((cmd) => {
+    console.log(cmd ? `🎬 yt-dlp  ${YT.version() || 'ready'}` : '🎬 yt-dlp  ❌ not available (will retry while running)');
+  }).catch(() => {});
+  YT.startWatchdog({ everyMinutes: 30 });
+})();
 
 // ── Dashboard API + whitelist sync ───────────────────────────────────────────
 // The web dashboard (Cloudflare app) links to this bot with a URL + token and

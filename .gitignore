@@ -24,3 +24,6 @@ database/dashboard_sync.json
 dashboard/.next/
 .vercel/
 next-env.d.ts
+
+# next.js incremental build info
+dashboard/tsconfig.tsbuildinfo

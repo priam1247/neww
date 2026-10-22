@@ -93,7 +93,7 @@ const statusCommand = {
       // what the panel disk is actually holding, and whether files outlive a send
       const { tempUsage } = require('../../utils/cleanup');
       const tempMB = tempUsage() / 1048576;
-      const retention = (config.movies || {}).keepCache ? 'keep (cache on)' : 'delete after send';
+      const retention = 'delete after send (no cache)';
 
       const text = [
         '📊 *Movie engine*',
