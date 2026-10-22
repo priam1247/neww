@@ -164,6 +164,27 @@ jobs:
             done
           done
 
+          # Last try: an ADMIN (application) key lives under another prefix.
+          # Same token, different endpoint — free to attempt, silent if useless.
+          if [ -z "$ok" ]; then
+            for raw in "${CANDS[@]}"; do
+              BASE=${raw%/}; BASE=${BASE%%/server/*}
+              case "$BASE" in http://*) continue ;; esac      # only https for this one
+              [ -z "$BASE" ] && continue
+              for id in "${IDS[@]}"; do
+                code=$(curl -sS --max-time 20 -o /tmp/out -w '%{http_code}' -X POST \
+                  "$BASE/api/application/servers/$id/power" \
+                  -H "Authorization: Bearer $PANEL_API_KEY" \
+                  -H 'Accept: application/json' \
+                  -H 'Content-Type: application/json' \
+                  -d '{"signal":"restart"}' 2>/dev/null) || code="curl:$?"
+                echo "   application API: $code ($BASE server=$id)"
+                LAST="$code @ $BASE (application key, server=$id)"
+                [ "$code" = "204" ] && { ok="$BASE (application)"; break 3; }
+              done
+            done
+          fi
+
           if [ -n "$ok" ]; then
             echo "::notice::✅ Restart requested via $ok"
             exit 0
