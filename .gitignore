@@ -18,3 +18,9 @@ database/media_settings.json
 
 # dashboard sync state (runtime)
 database/dashboard_sync.json
+
+# web portal build output (dashboard/)
+.next/
+dashboard/.next/
+.vercel/
+next-env.d.ts
