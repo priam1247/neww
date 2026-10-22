@@ -1,0 +1,119 @@
+name: Deploy bot to XS Systems panel
+
+# Pterodactyl-style panels (XS Systems included) have no GitHub integration:
+# no webhook, no git in the File Manager, and the console is the bot's stdin —
+# typing "git pull" there does nothing. So the push happens from GitHub
+# instead: these files go over the SFTP details the panel already shows, then
+# the panel API restarts the server.
+#
+# Nothing runs until the secrets exist — without them this workflow is a green
+# no-op, so forks and pull requests are unaffected.
+#
+#   Repo → Settings → Secrets and variables → Actions → New repository secret
+#   PANEL_SFTP_HOST   e.g. node1.xsystems.hosting     (Settings → SFTP details)
+#   PANEL_SFTP_PORT   2022                            (the port shown there)
+#   PANEL_SFTP_USER   troykunsauka6.xxxx              (not your login e-mail)
+#   PANEL_SFTP_PASS   the password shown in SFTP details
+#   PANEL_URL         https://panel.xsystems.hosting  (optional: auto-restart)
+#   PANEL_SERVER_ID   the id in the panel URL         (optional)
+#   PANEL_API_KEY     Account → API Credentials       (optional, client key)
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'dashboard/**'      # the web portal deploys to Vercel, not to the panel
+      - '**.md'
+  workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: 'First upload: also send .git so the server can "git pull" later'
+        type: boolean
+        default: false
+
+concurrency:
+  group: panel-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Upload to panel over SFTP
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Are the panel secrets configured?
+        id: cfg
+        run: |
+          if [ -n "${{ secrets.PANEL_SFTP_HOST }}" ] && [ -n "${{ secrets.PANEL_SFTP_USER }}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::PANEL_SFTP_HOST / PANEL_SFTP_USER are not set — skipping the panel deploy."
+          fi
+
+      - name: Install lftp
+        if: steps.cfg.outputs.ready == 'true'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lftp
+
+      # mirror -R = upload, and deliberately NO --delete: a deploy can add or
+      # overwrite files but never removes anything from the server, so session/,
+      # .env and database/*.json live on untouched.
+      - name: Upload the bot
+        if: steps.cfg.outputs.ready == 'true'
+        env:
+          SFTP_HOST: ${{ secrets.PANEL_SFTP_HOST }}
+          SFTP_PORT: ${{ secrets.PANEL_SFTP_PORT }}
+          SFTP_USER: ${{ secrets.PANEL_SFTP_USER }}
+          SFTP_PASS: ${{ secrets.PANEL_SFTP_PASS }}
+          INCLUDE_GIT: ${{ inputs.bootstrap == true && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          # a password containing " or \ would break the lftp command string
+          SAFE_PASS=${SFTP_PASS//\\/\\\\}
+          SAFE_PASS=${SAFE_PASS//\"/\\\"}
+          EXCLUDES=(
+            --exclude-glob .github/
+            --exclude-glob node_modules/
+            --exclude-glob dashboard/
+            --exclude-glob session/
+            --exclude-glob temp/
+            --exclude-glob data/
+            --exclude-glob .env
+            --exclude-glob 'database/*.json'
+            --exclude-glob '*.log'
+          )
+          if [ "$INCLUDE_GIT" != "1" ]; then
+            EXCLUDES+=(--exclude-glob .git/)
+          fi
+
+          lftp -c "
+            set sftp:auto-confirm yes;
+            set net:timeout 25;
+            set net:max-retries 3;
+            set net:reconnect-interval-base 5;
+            open -u \"$SFTP_USER\",\"$SAFE_PASS\" sftp://$SFTP_HOST:${SFTP_PORT:-2022};
+            mirror -R --verbose --no-perms --parallel=4 ${EXCLUDES[*]} ./ /;
+            bye
+          "
+
+      - name: Restart the server so the new code runs
+        if: steps.cfg.outputs.ready == 'true'
+        env:
+          PANEL_URL: ${{ secrets.PANEL_URL }}
+          PANEL_SERVER_ID: ${{ secrets.PANEL_SERVER_ID }}
+          PANEL_API_KEY: ${{ secrets.PANEL_API_KEY }}
+        run: |
+          if [ -z "$PANEL_URL" ] || [ -z "$PANEL_SERVER_ID" ] || [ -z "$PANEL_API_KEY" ]; then
+            echo "::notice::PANEL_URL / PANEL_SERVER_ID / PANEL_API_KEY not set — press Restart in the panel."
+            exit 0
+          fi
+          code=$(curl -s -o /tmp/out -w '%{http_code}' -X POST \
+            "$PANEL_URL/api/client/servers/$PANEL_SERVER_ID/power" \
+            -H "Authorization: Bearer $PANEL_API_KEY" \
+            -H 'Accept: application/json' \
+            -H 'Content-Type: application/json' \
+            -d '{"signal":"restart"}')
+          echo "panel responded $code"
+          cat /tmp/out || true
+          [ "$code" = "204" ] || exit 1
