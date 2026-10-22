@@ -41,8 +41,15 @@ module.exports = [
         await react(sock, msg, '⚠️');
         return extra.reply(`╭─ ⚠️ *Already Allowed*\n│ +${number}\n╰─ ${config.botName}`);
       }
-      wl.users.push({ number, ...(alt.length ? { alt } : {}), addedAt: Date.now() });
+      wl.users.push({
+        number,
+        ...(alt.length ? { alt } : {}),
+        addedBy: 'whatsapp',
+        enabled: true,
+        addedAt: Date.now(),
+      });
       writeWL(wl);
+      try { require('../../utils/dashboardSync').triggerImmediateSync(); } catch { /* ignore */ }
       await react(sock, msg, '✅');
       return extra.reply(`╭─ ✅ *User Added*\n│ +${number}\n╰─ ${config.botName}`);
     },
@@ -66,6 +73,7 @@ module.exports = [
       }
       wl.users.splice(idx, 1);
       writeWL(wl);
+      try { require('../../utils/dashboardSync').triggerImmediateSync(); } catch { /* ignore */ }
       await react(sock, msg, '✅');
       return extra.reply(`╭─ ✅ *User Removed*\n│ +${number}\n╰─ ${config.botName}`);
     },

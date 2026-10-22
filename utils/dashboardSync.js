@@ -3,8 +3,8 @@
  *
  * Works cleanly behind Hydrodactyl / Pterodactyl NAT with ZERO open ports:
  *   1. Pushes live heartbeat ("last seen Xs ago", WhatsApp socket state, disk MB)
- *   2. Pulls versioned `whitelist.json` deltas (`whitelistVersion`) and applies
- *      them atomically via `utils/jsonStore.js`
+ *   2. Pushes unsynced WhatsApp `.allow` numbers up to Cloudflare D1 and pulls
+ *      versioned `whitelist.json` deltas down atomically via `accessControl.js`
  *   3. Claims queued `pair` and `restart` commands from Cloudflare D1 and reports
  *      the 8-character pairing code back immediately
  *   4. Signs every request with `HMAC-SHA256` + timestamp + random nonce
@@ -15,7 +15,7 @@
 const crypto = require('crypto');
 const path = require('path');
 const config = require('../config');
-const { readJsonSafe, writeJsonAtomic } = require('./jsonStore');
+const { readWL, writeWL } = require('./accessControl');
 const { inspectDisk } = require('./diskSpace');
 const { panelRestart } = require('./panelClient');
 const log = require('./logger')('dashboardSync');
@@ -55,18 +55,35 @@ function buildSignedHeaders(token, _method, _urlPath, bodyText = '') {
   };
 }
 
+function collectUnsyncedLocalUsers(wlFile = WL_FILE) {
+  const current = readWL({ force: true, filePath: wlFile });
+  const list = Array.isArray(current?.users) ? current.users : [];
+  const out = [];
+  for (const u of list) {
+    const num = cleanDigits(u?.number);
+    if (num.length < 7 || num.length > 15) continue;
+    const isUnsyncedLocal =
+      !u.syncedToPortal && (!u.addedBy || u.addedBy === 'whatsapp');
+    if (isUnsyncedLocal && u.enabled !== false) {
+      out.push({
+        number: num,
+        label: String(u.label || 'Added via WhatsApp .allow'),
+      });
+    }
+  }
+  return out;
+}
+
 function applyWhitelistSnapshot(users, wlFile = WL_FILE) {
   if (!Array.isArray(users)) return false;
-  const loaded = readJsonSafe(wlFile, { fallback: { users: [] } });
-  const current = loaded.data || { users: [] };
+  const current = readWL({ force: true, filePath: wlFile });
   const existingByNum = new Map();
   for (const u of Array.isArray(current.users) ? current.users : []) {
     const num = cleanDigits(u?.number);
     if (num) existingByNum.set(num, u);
   }
 
-  // Merge remote portal users (authoritative for portal-managed numbers) while
-  // preserving WhatsApp-added `.allow` numbers that were never added via portal
+  // Portal snapshot is authoritative while preserving any LID `alt` aliases learned in WhatsApp
   const remoteMap = new Map();
   for (const raw of users) {
     const num = cleanDigits(raw?.number);
@@ -74,32 +91,35 @@ function applyWhitelistSnapshot(users, wlFile = WL_FILE) {
     const prev = existingByNum.get(num);
     remoteMap.set(num, {
       number: num,
+      ...(Array.isArray(prev?.alt) && prev.alt.length ? { alt: prev.alt } : {}),
       label: String(raw?.label || prev?.label || ''),
       addedBy: String(raw?.addedBy || prev?.addedBy || 'dashboard'),
       addedAt: Number(raw?.addedAt || prev?.addedAt || Date.now()),
       enabled: raw?.enabled !== false,
+      syncedToPortal: true,
     });
   }
 
+  // Keep brand-new `.allow` entries that haven't been pushed to the portal yet
   for (const [num, prev] of existingByNum.entries()) {
-    if (!remoteMap.has(num) && prev.addedBy && prev.addedBy !== 'dashboard' && !String(prev.addedBy).includes('@')) {
+    if (!remoteMap.has(num) && !prev.syncedToPortal && (!prev.addedBy || prev.addedBy === 'whatsapp')) {
       remoteMap.set(num, prev);
     }
   }
 
-  writeJsonAtomic(wlFile, { users: Array.from(remoteMap.values()) });
+  writeWL({ users: Array.from(remoteMap.values()) }, { filePath: wlFile });
   return true;
 }
 
 function upsertAllowedNumber(number, label, wlFile = WL_FILE) {
   const num = cleanDigits(number);
   if (num.length < 7 || num.length > 15) return;
-  const loaded = readJsonSafe(wlFile, { fallback: { users: [] } });
-  const data = loaded.data || { users: [] };
+  const data = readWL({ force: true, filePath: wlFile });
   if (!Array.isArray(data.users)) data.users = [];
   const existing = data.users.find((u) => cleanDigits(u?.number) === num);
   if (existing) {
     existing.enabled = true;
+    existing.syncedToPortal = true;
     if (label) existing.label = String(label);
   } else {
     data.users.push({
@@ -108,9 +128,10 @@ function upsertAllowedNumber(number, label, wlFile = WL_FILE) {
       addedBy: 'dashboard',
       addedAt: Date.now(),
       enabled: true,
+      syncedToPortal: true,
     });
   }
-  writeJsonAtomic(wlFile, data);
+  writeWL(data, { filePath: wlFile });
 }
 
 function startDashboardSync(opts = {}) {
@@ -187,10 +208,9 @@ function startDashboardSync(opts = {}) {
           result: { restarting: true },
         });
         setTimeout(async () => {
-          if (typeof opts.requestRestart === 'function') {
+          const panelRes = await panelRestart();
+          if (!panelRes.ok && typeof opts.requestRestart === 'function') {
             await opts.requestRestart();
-          } else {
-            await panelRestart();
           }
         }, 600).unref?.();
         return;
@@ -233,6 +253,7 @@ function startDashboardSync(opts = {}) {
       /* non-fatal */
     }
 
+    const localUsers = collectUnsyncedLocalUsers(wlFile);
     const batchResults = pendingResults.splice(0, pendingResults.length);
     const bodyObj = {
       connected: Boolean(status.connected),
@@ -243,6 +264,7 @@ function startDashboardSync(opts = {}) {
       diskUsedMB,
       diskBudgetMB,
       whitelistVersion: lastWhitelistVersion,
+      ...(localUsers.length ? { localUsers } : {}),
       completedResults: batchResults,
     };
 
@@ -344,4 +366,5 @@ module.exports = {
   triggerImmediateSync,
   buildSignedHeaders,
   applyWhitelistSnapshot,
+  collectUnsyncedLocalUsers,
 };

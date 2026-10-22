@@ -11,7 +11,9 @@ export function normalizePanelBaseUrl(rawUrl: string): {
   const clean = (rawUrl || DEFAULT_PANEL_URL)
     .trim()
     .replace(/\/server\/.*$/i, '')
+    .replace(/\/servers\/.*$/i, '')
     .replace(/\/account\/.*$/i, '')
+    .replace(/\/api\/.*$/i, '')
     .replace(/\/+$/, '');
 
   try {
@@ -36,9 +38,53 @@ export function normalizePanelBaseUrl(rawUrl: string): {
 function explainPanelKeyRejection(status: number, apiKey: string): string {
   const looksTruncated = apiKey.length > 0 && apiKey.length <= 20;
   const hint = looksTruncated
-    ? ' Note: Your key looks short (<= 20 chars) — on Hydrodactyl/Pterodactyl, copy the full secret key shown once right when you click Create in API Keys, not just the short Key Identifier.'
+    ? ' Note: Your key looks short (<= 20 chars) — copy the full secret key shown right when you click Create in Account → API Keys.'
     : '';
-  return `Panel rejected PANEL_API_KEY (HTTP ${status}). Verify it is a valid Client API Key from Account → API Keys.${hint}`;
+  return `Panel rejected PANEL_API_KEY (HTTP ${status}). Verify it is a valid API Key from Account → API Keys.${hint}`;
+}
+
+function parseServerEntries(body: unknown): PanelServerSummary[] {
+  if (!body || typeof body !== 'object') return [];
+  const obj = body as Record<string, unknown>;
+  const rawList = Array.isArray(body)
+    ? body
+    : Array.isArray(obj.data)
+      ? obj.data
+      : Array.isArray(obj.servers)
+        ? obj.servers
+        : [];
+
+  const out: PanelServerSummary[] = [];
+  for (const entry of rawList) {
+    if (!entry || typeof entry !== 'object') continue;
+    const item = entry as Record<string, unknown>;
+    const attrs =
+      item.attributes && typeof item.attributes === 'object'
+        ? (item.attributes as Record<string, unknown>)
+        : item;
+
+    const identifier = String(
+      attrs.identifier || attrs.shortId || attrs.server_id || attrs.id || '',
+    ).trim();
+    const uuid = String(attrs.uuid || '').trim();
+    const name = String(attrs.name || 'Server').trim();
+    if (identifier || uuid) {
+      out.push({
+        id: identifier || uuid.split('-')[0],
+        uuid: uuid || identifier,
+        name,
+      });
+    }
+  }
+  return out;
+}
+
+function buildAuthHeaders(apiKey: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${apiKey}`,
+    'X-API-Key': apiKey,
+    Accept: 'application/json',
+  };
 }
 
 export async function discoverPanelServers(custom?: {
@@ -48,6 +94,7 @@ export async function discoverPanelServers(custom?: {
   ok: boolean;
   status: number;
   servers: PanelServerSummary[];
+  matchedEndpoint?: string;
   error?: string;
 }> {
   const saved = await getPanelConnectionConfig();
@@ -66,60 +113,68 @@ export async function discoverPanelServers(custom?: {
     };
   }
 
-  try {
-    const res = await fetch(`${normalized.baseUrl}/api/client`, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: 'application/json',
-      },
-      cache: 'no-store',
-      signal: AbortSignal.timeout(PANEL_TIMEOUT_MS),
-    });
+  const discoveryPaths = [
+    '/api/client',
+    '/api/v1/client',
+    '/api/v1/servers',
+    '/api/servers',
+    '/api/account/servers',
+  ];
 
-    if (res.status === 401 || res.status === 403) {
+  const statuses: string[] = [];
+
+  for (const p of discoveryPaths) {
+    try {
+      const res = await fetch(`${normalized.baseUrl}${p}`, {
+        method: 'GET',
+        headers: buildAuthHeaders(apiKey),
+        cache: 'no-store',
+        signal: AbortSignal.timeout(PANEL_TIMEOUT_MS),
+      });
+
+      if (res.status === 401 || res.status === 403) {
+        return {
+          ok: false,
+          status: res.status,
+          servers: [],
+          error: explainPanelKeyRejection(res.status, apiKey),
+        };
+      }
+
+      const contentType = res.headers.get('content-type') || '';
+      if (!res.ok || !contentType.includes('json')) {
+        statuses.push(`${p}→${res.status}`);
+        continue;
+      }
+
+      const body = await res.json().catch(() => null);
+      if (!body) continue;
+
+      const servers = parseServerEntries(body);
+      return {
+        ok: true,
+        status: 200,
+        servers,
+        matchedEndpoint: p,
+      };
+    } catch (err) {
       return {
         ok: false,
-        status: res.status,
+        status: 502,
         servers: [],
-        error: explainPanelKeyRejection(res.status, apiKey),
+        error: `Could not reach panel (${
+          err instanceof Error ? err.message : 'network error'
+        }).`,
       };
     }
-    if (!res.ok) {
-      return {
-        ok: false,
-        status: res.status,
-        servers: [],
-        error: `Panel answered HTTP ${res.status} on /api/client.`,
-      };
-    }
-
-    const body = (await res.json().catch(() => null)) as {
-      data?: Array<{
-        attributes?: { identifier?: string; uuid?: string; name?: string };
-      }>;
-    } | null;
-
-    const list = Array.isArray(body?.data) ? body!.data : [];
-    const servers: PanelServerSummary[] = list
-      .map((item) => ({
-        id: String(item?.attributes?.identifier || ''),
-        uuid: String(item?.attributes?.uuid || ''),
-        name: String(item?.attributes?.name || 'Server'),
-      }))
-      .filter((s) => Boolean(s.id || s.uuid));
-
-    return { ok: true, status: 200, servers };
-  } catch (err) {
-    return {
-      ok: false,
-      status: 502,
-      servers: [],
-      error: `Could not reach panel (${
-        err instanceof Error ? err.message : 'network error'
-      }).`,
-    };
   }
+
+  return {
+    ok: false,
+    status: 404,
+    servers: [],
+    error: `Panel API endpoints did not return JSON (${statuses.join(', ')}).`,
+  };
 }
 
 export async function sendPanelPowerSignal(
@@ -144,85 +199,117 @@ export async function sendPanelPowerSignal(
     };
   }
 
-  let candidateIds = [
-    cfg.panelServerId,
-    cfg.panelServerId.includes('-') ? cfg.panelServerId.split('-')[0] : '',
-  ].filter(Boolean);
-
-  // Auto-discover server ID from /api/client when PANEL_SERVER_ID was left blank!
-  if (candidateIds.length === 0) {
-    const discovered = await discoverPanelServers({
-      panelUrl: normalized.baseUrl,
-      panelApiKey: cfg.panelApiKey,
-    });
-    if (!discovered.ok) {
-      return { ok: false, status: discovered.status, error: discovered.error };
-    }
-    if (discovered.servers.length === 0) {
-      return {
-        ok: false,
-        status: 404,
-        error: 'No servers were found on this panel account/subuser.',
-      };
-    }
-    const chosen = discovered.servers[0];
-    candidateIds = [chosen.id, chosen.uuid].filter(Boolean);
-    if (chosen.id) {
-      await savePanelConnectionConfig({ panelServerId: chosen.id });
+  const candidateIds: string[] = [];
+  if (cfg.panelServerId) {
+    candidateIds.push(cfg.panelServerId);
+    if (cfg.panelServerId.includes('-')) {
+      candidateIds.push(cfg.panelServerId.split('-')[0]);
     }
   }
 
-  const uniqueIds = Array.from(new Set(candidateIds));
-  let lastError = 'Panel did not accept power signal.';
+  // Also query discovery if blank OR so we have any alternate UUID/identifier on the account
+  const discovered = await discoverPanelServers({
+    panelUrl: normalized.baseUrl,
+    panelApiKey: cfg.panelApiKey,
+  });
+
+  if (discovered.ok) {
+    for (const s of discovered.servers) {
+      if (s.id) candidateIds.push(s.id);
+      if (s.uuid) candidateIds.push(s.uuid);
+    }
+    if (!cfg.panelServerId && discovered.servers[0]?.id) {
+      await savePanelConnectionConfig({ panelServerId: discovered.servers[0].id });
+    }
+  } else if (discovered.status === 401 || discovered.status === 403) {
+    return { ok: false, status: discovered.status, error: discovered.error };
+  }
+
+  const uniqueIds = Array.from(new Set(candidateIds.filter(Boolean)));
+  if (uniqueIds.length === 0) {
+    return {
+      ok: false,
+      status: 404,
+      error: discovered.ok
+        ? 'Your API key works, but 0 servers were found on that panel account. Make sure you created the hydro_… key while logged into the exact XS Systems account that owns your bot server!'
+        : discovered.error || 'No Server ID configured or discovered.',
+    };
+  }
+
+  const powerRoutes = (id: string) => [
+    { path: `/api/client/servers/${encodeURIComponent(id)}/power`, body: { signal } },
+    { path: `/api/v1/client/servers/${encodeURIComponent(id)}/power`, body: { signal } },
+    { path: `/api/v1/servers/${encodeURIComponent(id)}/power`, body: { signal, action: signal } },
+    { path: `/api/servers/${encodeURIComponent(id)}/power`, body: { signal, action: signal } },
+    { path: `/api/server/${encodeURIComponent(id)}/power`, body: { signal, action: signal } },
+  ];
+
+  let lastStatus = 404;
 
   for (const id of uniqueIds) {
-    try {
-      const res = await fetch(
-        `${normalized.baseUrl}/api/client/servers/${encodeURIComponent(id)}/power`,
-        {
+    for (const route of powerRoutes(id)) {
+      try {
+        const res = await fetch(`${normalized.baseUrl}${route.path}`, {
           method: 'POST',
           headers: {
-            Authorization: `Bearer ${cfg.panelApiKey}`,
-            Accept: 'application/json',
+            ...buildAuthHeaders(cfg.panelApiKey),
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ signal }),
+          body: JSON.stringify(route.body),
           cache: 'no-store',
           signal: AbortSignal.timeout(PANEL_TIMEOUT_MS),
-        },
-      );
+        });
 
-      if (res.status === 204 || res.status === 200) {
-        return {
-          ok: true,
-          status: 200,
-          serverId: id,
-          message: `Sent "${signal}" signal to server ${id} on ${normalized.baseUrl}.`,
-        };
-      }
-      if (res.status === 401 || res.status === 403) {
+        if (res.status === 204 || res.status === 200 || res.status === 202) {
+          const ct = res.headers.get('content-type') || '';
+          // Guard against SPA HTML fallback returning 200 text/html for unknown routes
+          if (res.status === 200 && ct.includes('text/html')) {
+            continue;
+          }
+          return {
+            ok: true,
+            status: 200,
+            serverId: id,
+            message: `Sent "${signal}" signal to server ${id} on ${normalized.baseUrl}.`,
+          };
+        }
+        if (res.status === 401 || res.status === 403) {
+          return {
+            ok: false,
+            status: res.status,
+            error: explainPanelKeyRejection(res.status, cfg.panelApiKey),
+          };
+        }
+        lastStatus = res.status;
+        if (res.status === 404 || res.status === 405) continue;
+      } catch (err) {
         return {
           ok: false,
-          status: res.status,
-          error: explainPanelKeyRejection(res.status, cfg.panelApiKey),
+          status: 502,
+          error: `Could not reach panel (${
+            err instanceof Error ? err.message : 'network error'
+          }).`,
         };
       }
-      if (res.status === 404) {
-        lastError = `Server "${id}" not found on ${normalized.baseUrl} (HTTP 404).`;
-        continue;
-      }
-      lastError = `Panel answered HTTP ${res.status} for server "${id}".`;
-      break;
-    } catch (err) {
-      return {
-        ok: false,
-        status: 502,
-        error: `Could not reach panel (${
-          err instanceof Error ? err.message : 'network error'
-        }).`,
-      };
     }
   }
 
-  return { ok: false, status: 404, error: lastError };
+  const accountMismatchHint =
+    discovered.ok && discovered.servers.length === 0
+      ? ' Note: /api/client returned 0 servers for this key — double-check that you created the hydro_… API key under the same XS Systems login that owns server ' +
+        uniqueIds[0] +
+        ' (e.g. troykunsauka@gmail.com vs troykunsauka6@gmail.com).'
+      : discovered.ok &&
+          discovered.servers.length > 0 &&
+          !discovered.servers.some((s) => s.id === cfg.panelServerId)
+        ? ` Note: This API key sees server(s): ${discovered.servers
+            .map((s) => `${s.name} (${s.id})`)
+            .join(', ')}.`
+        : '';
+
+  return {
+    ok: false,
+    status: lastStatus,
+    error: `Server "${uniqueIds[0]}" was not accepted on ${normalized.baseUrl} (HTTP ${lastStatus}).${accountMismatchHint}`,
+  };
 }
