@@ -40,7 +40,7 @@ jobs:
     name: Upload to panel over SFTP
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Are the panel secrets configured?
         id: cfg
