@@ -127,6 +127,7 @@ How a request flows:
                             (every other source stays as a fallback)
    └─ quality ladder: 1080 → 720 → 480 (and up when only 4K exists)
    └─ verification: real size, container magic bytes, ffprobe quality check when present
+   └─ fake-clip guard: a download shorter than 40 min / 60 % of the runtime is rejected
    └─ no ffmpeg needed: HLS is fetched and concatenated by engine/media/hls.js
    └─ streamed download (resume + stall guard) → document upload → LRU cache
 ```
@@ -137,11 +138,17 @@ Requirements and behaviour:
   Not a hard requirement any more: without it the bot runs on Cinemeta + IMDb +
   TVMaze (`.providers` shows which sources are live).
 * **Debrid is optional.** Real-Debrid / All-Debrid unlock the torrent tier (best
-  quality). Without a key the torrent tier is skipped automatically and the bot
-  uses the free DDL and stream tiers; `.providers` shows exactly what is live.
+  quality). Without a key the bot downloads the torrent itself (WebTorrent,
+  seeded magnets only) and falls back to the free DDL and stream tiers when that
+  is not possible. `TORRENT_DIRECT=false` restores the old "skip torrents"
+  behaviour. WebTorrent is an *optional* dependency: if the host cannot build
+  `node-datachannel`, `npm install` still succeeds and only torrents are lost
+  (`npm rebuild node-datachannel` adds them back). `.providers` shows what is live.
 * Files are staged in `temp/movies/` — inside the bot's own temp dir, in a
   subfolder `cleanup.js` never touches — and are indexed by an LRU that survives
-  restarts. A file still downloading is never swept away.
+  restarts. A file still downloading is never swept away: every job holds its
+  temp stamp (`holdTemp`) and both the 10-minute sweep and the memory watchdog
+  skip held files and judge age by write time, not by the source's Last-Modified.
 * **Big files are delivered, not refused.** Anything above `DRIME_MOVIES_MB`
   (default: `video.maxMB`, 300 MB) is uploaded to the same Drime Cloud account
   `.paper` uses — documented S3 multipart flow — and the chat gets the file plus

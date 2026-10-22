@@ -170,13 +170,27 @@ async function playerDomain(force = false) {
 
 const norm = (s) => String(s || '')
   .toLowerCase()
-  .replace(/\((\d{4})\)/g, '$1')
+  .replace(/\[[^\]]*\]|\([^)]*\)/g, ' ')
+  .replace(/&/g, ' and ')
   .replace(/[^a-z0-9]+/g, ' ')
+  .replace(/\s+/g, ' ')
   .trim();
+
+// Re-uploads with tags in the name are where trailers and 2-minute fakes live.
+const JUNK_RX = /\[[^\]]*\]|\b(trailer|teaser|full movie|hdcam|cam ?rip|reaction|review|clip)\b/i;
+
+/** Seconds a stream must run to be the real thing (null → no check). */
+function minStreamSeconds(media, isSeries) {
+  const rt = Number(isSeries ? (media.episodeRuntime || media.runtime) : media.runtime) || 0;
+  if (isSeries) return rt ? rt * 60 * 0.5 : 5 * 60;
+  return Math.max(40 * 60, rt * 60 * 0.6);
+}
 
 /** Best search hit for a title (+ optional year). */
 function pickMatch(items, { title, year, type = null }) {
   const want = norm(title);
+  const wantedTokens = want.split(' ').filter(Boolean);
+  const wantedSet = new Set(wantedTokens);
   let best = null;
   let bestScore = -Infinity;
 
@@ -185,20 +199,31 @@ function pickMatch(items, { title, year, type = null }) {
     const name = sub?.title || it?.title || '';
     if (!name) continue;
 
-    // subjectType: 1 = movie, 2 = series
-    const kind = Number(sub?.subjectType) === 2 ? 'series' : 'movie';
-    let s = 0;
-    if (type) s += kind === type ? 15 : -25;
+    // subjectType: 1 = movie, 2 = series, anything else (6 = music …) is not a title
+    const st = Number(sub?.subjectType);
+    if (st !== 1 && st !== 2) continue;
+    const kind = st === 2 ? 'series' : 'movie';
     const got = norm(name);
-    if (got === want) s += 60;
-    else if (got.startsWith(want) || want.startsWith(got)) s += 30;
-    else if (got.includes(want)) s += 15;
-    else s -= 20;
-
+    const gotTokens = got.split(' ').filter(Boolean);
     const rel = String(sub?.releaseDate || it?.releaseDate || '').slice(0, 4);
+    if (kind === 'movie' && year && rel && Math.abs(Number(rel) - Number(year)) > 1) continue;
+    if (got !== want) {
+      const gotSet = new Set(gotTokens);
+      if (!wantedTokens.every(token => gotSet.has(token))) continue;
+      const extraTokens = gotTokens.filter(token => !wantedSet.has(token)).length;
+      if (extraTokens > 2) continue;
+    }
+
+    let s = 0;
+    if (JUNK_RX.test(name)) s -= 35;
+    const dur = Number(sub?.duration || it?.duration) || 0;
+    if (kind === 'movie' && dur > 0 && dur < 40 * 60) s -= 60;
+    if (type) s += kind === type ? 15 : -25;
+    s += got === want ? 120 : 70;
+
     if (year && rel) {
       const d = Math.abs(Number(rel) - Number(year));
-      s += d === 0 ? 25 : d === 1 ? 10 : -20;
+      s += d === 0 ? 25 : 10;
     }
     if (sub?.hasResource) s += 12;
 
@@ -439,10 +464,16 @@ class MovieBox extends Provider {
     const headers = { referer: payload.referer };
     const label = `${match.title}${match.year ? ` ${match.year}` : ''}`;
 
+    const minSec = minStreamSeconds(media, isSeries);
     // direct MP4 per resolution — the best case for this bot (no ffmpeg, no HLS)
     for (const st of payload.streams) {
       const url = st?.url;
       if (!url || !/^https?:/i.test(url)) continue;
+      const secs = Number(st.duration) || 0;
+      if (secs && secs < minSec) {
+        mlog.debug(`${match.title} · ${st.resolutions}p stream is ${secs}s — trailer/fake, skipped`);
+        continue;
+      }
       const height = Number(st.resolutions) || 0;
       out.push({
         provider: this.id,
@@ -499,4 +530,4 @@ class MovieBox extends Provider {
 const instance = new MovieBox();
 register(instance);
 export default instance;
-export { MovieBox, pickMatch, toMB, locate };
+export { MovieBox, pickMatch, toMB, locate, minStreamSeconds };

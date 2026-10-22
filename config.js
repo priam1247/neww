@@ -32,6 +32,8 @@
 
 const env = process.env;
 const list = (raw, fallback) => String(raw || fallback).split(',').map(s => s.trim()).filter(Boolean);
+const drimeMoviesMode = String(env.DRIME_MOVIES || 'off').toLowerCase();
+const movieCapDefault = ['big', 'always'].includes(drimeMoviesMode) ? 4096 : 2000;
 
 module.exports = {
   ownerNumber: list(env.OWNER_NUMBER, '265894016453'),
@@ -67,9 +69,11 @@ module.exports = {
     ipv4: true,                                  // force IPv4 (IPv6 egress is often blocked)
     noCheckCertificates: true,                   // many free hosts ship an outdated CA bundle
     updateOnBotCheck: true,                      // self-update yt-dlp once per run after a bot-check
+    fragments: Number(env.YTDLP_FRAGMENTS || 4),
+    autoUpdateHours: Number(env.YTDLP_AUTO_UPDATE_HOURS ?? 24),
     // Total time one .song/.ytv job may spend trying player clients before it
     // gives up (prevents a hopeless download from hanging for an hour).
-    deadlineMs: Number(env.YTDLP_DEADLINE_MS || 10 * 60 * 1000),
+    deadlineMs: Number(env.YTDLP_DEADLINE_MS || 45 * 60 * 1000),
   },
 
   // ─── Spotify (.spotify) ──────────────────────────────────────────────────
@@ -112,8 +116,20 @@ module.exports = {
   },
   video: {
     defaultQuality: 720,
-    maxMB: 300,
-    maxMinutes: 60,
+    // WhatsApp documents top out at 2 GB; anything over 50 MB goes as a document.
+    maxMB: Number(env.VIDEO_MAX_MB || 2000),
+    maxMinutes: Number(env.VIDEO_MAX_MINUTES || 0),   // 0 = no length limit
+  },
+  media: {
+    sendCacheDays: Number(env.MEDIA_SEND_CACHE_DAYS ?? 7),
+    progressCard: !/^(0|false|no|off)$/i.test(String(env.MEDIA_PROGRESS_CARD ?? 'true')),
+    diskMinFreeMB: Number(env.MEDIA_DISK_MIN_FREE_MB ?? 1500),
+    diskCopyMultiplier: Number(env.MEDIA_DISK_COPY_MULTIPLIER ?? 1.2),
+    diskCopyOverheadMB: Number(env.MEDIA_DISK_COPY_OVERHEAD_MB ?? 300),
+  },
+  queue: {
+    light: Math.max(1, Math.floor(Number(env.QUEUE_LIGHT) || 3)),
+    heavy: Math.max(1, Math.floor(Number(env.QUEUE_HEAVY) || 2)),
   },
 
   messages: {
@@ -147,9 +163,7 @@ module.exports = {
 
   // ─── Movies & series (.movie / .series) ──────────────────────────────────
   // The engine needs a free TMDB key (themoviedb.org) for titles/posters.
-  // Torrent sources additionally need a debrid account (Real-Debrid or
-  // All-Debrid) — without one the engine automatically uses the free
-  // DDL/stream tiers only, so .movie/.series still work out of the box.
+  // Torrent sources use debrid when configured, otherwise download directly.
   movies: {
     // ── metadata sources ──────────────────────────────────────────────────
     // TMDB is the primary source (free key). Everything below it is a fallback
@@ -171,17 +185,24 @@ module.exports = {
     // DEBRID_API_KEY is accepted as a generic alias (Real-Debrid by default)
     realDebridKey: env.REALDEBRID_API_KEY || env.DEBRID_API_KEY || '',
     allDebridKey: env.ALLDEBRID_API_KEY || '',
+    torrentDirect: !/^(0|false|no|off)$/i.test(String(env.TORRENT_DIRECT ?? 'true')),
+    torrentMinSeeds: Number(env.TORRENT_MIN_SEEDS || 3),
+    torrentMetadataTimeoutMs: Number(env.TORRENT_METADATA_TIMEOUT_MS || 90_000),
+    torrentStallTimeoutMs: Number(env.TORRENT_STALL_TIMEOUT_MS || 180_000),
 
     // 1080 → 720 → 480 instead of failing when a quality has no source
     qualityFallback: env.QUALITY_FALLBACK !== '0',
 
     defaultQuality: Number(env.MOVIE_QUALITY || 720),
     // WhatsApp send ceiling (used by the engine's own ranking) …
-    maxSendMB: Number(env.MOVIE_MAX_MB || 1500),
+    maxSendMB: Number(env.MOVIE_MAX_MB || movieCapDefault),
     // … and the download cap. Above maxSendMB files are still sent: the bot
     // puts anything bigger than drimeThresholdMB on Drime and posts the link.
-    maxDownloadMB: Number(env.MOVIE_MAX_DOWNLOAD_MB || 4096),
+    maxDownloadMB: Number(env.MOVIE_MAX_DOWNLOAD_MB || movieCapDefault),
     minFreeMB: Number(env.MOVIE_MIN_FREE_MB || 800),  // refuse a download below this
+    diskSizeMultiplier: Number(env.MOVIE_DISK_SIZE_MULTIPLIER ?? 2),
+    diskOverheadMB: Number(env.MOVIE_DISK_OVERHEAD_MB ?? 500),
+    unknownSizeMB: Number(env.MOVIE_DISK_UNKNOWN_SIZE_MB ?? 2000),
 
     // ── Drime Cloud delivery (the same account .paper uses) ───────────────
     // OFF by default: this host has plenty of disk, and a chat never needs a
@@ -213,10 +234,10 @@ module.exports = {
     dataDir: env.MOVIE_DATA_DIR || 'temp/movies/data',
 
     queueConcurrency: Number(env.MOVIE_CONCURRENCY || 1),
-    jobTimeoutMs: Number(env.MOVIE_JOB_TIMEOUT_MS || 30 * 60 * 1000),
+    jobTimeoutMs: Number(env.MOVIE_JOB_TIMEOUT_MS || 60 * 60 * 1000),
     dryRun: env.MOVIE_DRY_RUN === '1',                // resolve only, send the link
 
-    // torrents need debrid; set to false to keep trying anyway
+    // Legacy switch for deployments that disable direct torrent downloads.
     skipTorrentWithoutDebrid: env.SKIP_TORRENT_WITHOUT_DEBRID !== 'false',
   },
 

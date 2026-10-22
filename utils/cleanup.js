@@ -17,7 +17,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { getTempDir } = require('./tempManager');
+const { getTempDir, isHeld } = require('./tempManager');
 const config = require('../config');
 
 // Cleanup interval: 10 minutes
@@ -28,6 +28,10 @@ const SCRAP_AGE_MS = 30 * 60 * 1000;        // download scraps, part files
 const MEDIA_AGE_MS = 60 * 60 * 1000;        // ytv_/song_/movie files
 const OTHER_AGE_MS = 6 * 60 * 60 * 1000;    // anything else in temp/
 const MEDIA_PREFIX = /^(ytv_|song_|dl_|fb_|paper_|conv_|audio_|video_|movie_)/i;
+
+// yt-dlp/ffmpeg can stamp a fresh file with the source's old Last-Modified
+// time; ctime is set when the file is written here, so take the newer one.
+const ageOf = (stats, now = Date.now()) => now - Math.max(stats.mtimeMs, stats.ctimeMs);
 
 // Size cap for the whole temp tree (0 = no cap)
 const TEMP_MAX_MB = Number(process.env.TEMP_MAX_MB || 1024);
@@ -46,7 +50,7 @@ const thresholdFor = (name) => {
   return SCRAP_AGE_MS;
 };
 
-/** Every regular file under `dir`, with its size and mtime. */
+/** Every regular file under `dir`, with its raw size/mtime/ctime. */
 function walk(dir, out = []) {
   let entries;
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
@@ -60,7 +64,7 @@ function walk(dir, out = []) {
     }
     try {
       const st = fs.statSync(p);
-      out.push({ path: p, name: e.name, size: st.size, mtime: st.mtimeMs });
+      out.push({ path: p, name: e.name, size: st.size, mtime: st.mtimeMs, ctime: st.ctimeMs });
     } catch { /* raced with a delete */ }
   }
   return out;
@@ -80,19 +84,21 @@ function unlink(file) {
  * Delete old files, then enforce the size cap.
  * @returns {{files:number, freedBytes:number, remainingBytes:number}}
  */
-function cleanupOldFiles() {
+function cleanupOldFiles(dir = null, opts = {}) {
   const result = { files: 0, freedBytes: 0, remainingBytes: 0 };
   try {
-    const tempDir = getTempDir();
+    const tempDir = dir || getTempDir();
     if (!fs.existsSync(tempDir)) return result;
 
-    const now = Date.now();
-    const all = walk(tempDir).filter((f) => !KEEP_NAMES.test(f.name));
+    // `now` is injectable so tests can age a whole tree without touching clocks
+    const now = Number(opts.now) || Date.now();
+    // holdTemp() keys (a running .dl/.ytv/movie job) are never swept
+    const all = walk(tempDir).filter((f) => !KEEP_NAMES.test(f.name) && !isHeld(f.path));
 
     // ── 1. age ────────────────────────────────────────────────────────────
     const survivors = [];
     for (const f of all) {
-      if (now - f.mtime > thresholdFor(f.name)) {
+      if (ageOf({ mtimeMs: f.mtime, ctimeMs: f.ctime }, now) > thresholdFor(f.name)) {
         if (unlink(f.path)) { result.files++; result.freedBytes += f.size; }
         else survivors.push(f);
       } else {
@@ -162,6 +168,8 @@ process.on('SIGTERM', () => {
 });
 
 module.exports = {
+  thresholdFor,
+  ageOf,
   cleanupOldFiles,
   startCleanup,
   stopCleanup,

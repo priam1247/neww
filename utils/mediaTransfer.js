@@ -46,8 +46,15 @@ function sniff(head) {
     if (['avif', 'heic', 'heix', 'mif1'].includes(brand)) return { kind: 'image', ext: brand === 'avif' ? 'avif' : 'heic', mime: 'image/heic' };
     // An mp4 with no video track is an .m4a — label it correctly instead of
     // sending audio to WhatsApp as a video ("cannot play this media").
-    const hasVideoCodec = /avc1|avc3|hev1|hvc1|av01|vp09|vp08/.test(b.toString('latin1'));
-    if (!hasVideoCodec) return { kind: 'audio', ext: 'm4a', mime: 'audio/mp4' };
+    // The codec boxes live in `moov`, which ffmpeg/yt-dlp write at the END of
+    // the file unless +faststart was used — so "no video codec in the first
+    // 4 KB" is not proof of audio. Only call it audio when an audio codec is
+    // visible without a video one, or when the brand itself says audio.
+    const ascii = b.toString('latin1');
+    const hasVideoCodec = /avc1|avc3|hev1|hvc1|av01|vp09|vp08/.test(ascii);
+    const hasAudioCodec = /mp4a|Opus|ac-3|ec-3|fLaC/.test(ascii);
+    const audioBrand = /^M4[ABP] $/.test(brand);
+    if (!hasVideoCodec && (hasAudioCodec || audioBrand)) return { kind: 'audio', ext: 'm4a', mime: 'audio/mp4' };
     return { kind: 'video', ext: 'mp4', mime: 'video/mp4' };
   }
   if (b.toString('ascii', 0, 3) === 'ID3' || (b[0] === 0xFF && (b[1] & 0xE0) === 0xE0)) return { kind: 'audio', ext: 'mp3', mime: 'audio/mpeg' };
@@ -275,43 +282,78 @@ function readId3(fileOrBuffer) {
 }
 
 /**
+ * Inspect a media file with `ffmpeg -i` (ffprobe is not always installed).
+ * `probed:false` means ffmpeg could not read it — callers must treat every
+ * other field as unknown in that case, never as "missing".
+ * @returns {Promise<{probed:boolean,container:string,hasVideo:boolean,hasAudio:boolean,videoCodec:string,audioCodec:string,duration:number}>}
+ */
+async function probeMedia(file) {
+  const out = { probed: false, container: '', hasVideo: false, hasAudio: false, videoCodec: '', audioCodec: '', duration: 0 };
+  if (!getFfmpeg.works() || !file || !fs.existsSync(file)) return out;
+  let stderr = '';
+  try { await execFileAsync(getFfmpeg(), ['-hide_banner', '-i', file], { timeout: 60000, maxBuffer: 4 * 1024 * 1024 }); }
+  catch (e) { stderr = String(e.stderr || ''); }
+  const input = stderr.match(/^Input #0,\s*([^,]+(?:,[^,\s]+)*),\s*from/m);
+  if (!input) return out;
+  out.probed = true;
+  out.container = input[1].trim();
+  const dur = stderr.match(/Duration:\s*(\d+):(\d+):([\d.]+)/);
+  if (dur) out.duration = Number(dur[1]) * 3600 + Number(dur[2]) * 60 + Number(dur[3]);
+  const video = stderr.match(/Stream #0:\d+[^:]*:\s*Video:\s*([a-z0-9_]+)/i);
+  const audio = stderr.match(/Stream #0:\d+[^:]*:\s*Audio:\s*([a-z0-9_]+)/i);
+  // Cover art in an m4a is reported as a video stream — it is not a picture track.
+  if (video && !/\(attached pic\)/i.test(stderr.slice(video.index, stderr.indexOf('\n', video.index)))) {
+    out.hasVideo = true;
+    out.videoCodec = video[1].toLowerCase();
+  }
+  if (audio) { out.hasAudio = true; out.audioCodec = audio[1].toLowerCase(); }
+  return out;
+}
+
+const WA_AUDIO_CODECS = new Set(['aac', 'mp3']);
+
+/**
  * Make a video file playable in WhatsApp (H.264 + AAC inside mp4).
  * Remuxes when already compatible; transcodes AV1/VP9/HEVC when not.
  * @returns {Promise<string>} path to a playable file (input when nothing to do)
  */
-async function ensureWhatsAppMp4(input, output, { timeoutMs = 20 * 60 * 1000 } = {}) {
+async function ensureWhatsAppMp4(input, output, { timeoutMs = 90 * 60 * 1000 } = {}) {
   const ff = getFfmpeg();
   if (!getFfmpeg.works()) return input;
 
-  let stderr = '';
-  try { await execFileAsync(ff, ['-hide_banner', '-i', input], { timeout: 60000, maxBuffer: 4 * 1024 * 1024 }); }
-  catch (e) { stderr = String(e.stderr || ''); }
+  const info = await probeMedia(input);
+  if (!info.probed) return input; // ffmpeg could not read it — send whatever we got
 
-  const isH264 = /Video:\s*h264\b/i.test(stderr);
-  const isMp4 = sniffFile(input).ext === 'mp4';
-
-  if (isH264 && isMp4) {
-    // Already fine — remux for a fast start, but never fail the send over it.
+  const run = async (args, timeout) => {
     try {
-      await execFileAsync(ff, ['-y', '-i', input, '-c', 'copy', '-movflags', '+faststart', output], { timeout: 180000, maxBuffer: 4 * 1024 * 1024 });
+      await execFileAsync(ff, ['-y', '-hide_banner', '-loglevel', 'error', '-i', input, ...args, output],
+        { timeout, maxBuffer: 4 * 1024 * 1024 });
       if (fs.existsSync(output) && fs.statSync(output).size > 1024) return output;
-    } catch { /* fall through */ }
+    } catch (e) {
+      console.warn('[media] ffmpeg step failed:', String(e.stderr || e.message).trim().split('\n').pop());
+    }
     deleteTempFile(output);
-    return input;
-  }
-  if (!stderr) return input; // ffmpeg could not probe it — send whatever we got
+    return null;
+  };
 
-  try {
-    await execFileAsync(ff, [
-      '-y', '-i', input, '-map', '0:v:0', '-map', '0:a:0?',
-      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-      '-c:v', 'libx264', '-profile:v', 'main', '-preset', 'veryfast', '-crf', '26', '-pix_fmt', 'yuv420p',
-      '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', output,
-    ], { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 });
-    if (fs.existsSync(output) && fs.statSync(output).size > 1024) return output;
-  } catch { /* conversion failed — send the original rather than nothing */ }
-  deleteTempFile(output);
-  return input;
+  const isMp4 = /mp4|mov/.test(info.container);
+  const isH264 = info.videoCodec === 'h264';
+  const audioOk = !info.hasAudio || WA_AUDIO_CODECS.has(info.audioCodec);
+  const maps = ['-map', '0:v:0', '-map', '0:a:0?'];
+
+  if (isH264 && isMp4 && audioOk) {
+    return (await run([...maps, '-c', 'copy', '-movflags', '+faststart'], 180000)) || input;
+  }
+  if (isH264) {
+    const fixed = await run([...maps, '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-movflags', '+faststart'], timeoutMs);
+    if (fixed) return fixed;
+  }
+  return (await run([
+    ...maps,
+    '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+    '-c:v', 'libx264', '-profile:v', 'main', '-preset', 'veryfast', '-crf', '26', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-movflags', '+faststart',
+  ], timeoutMs)) || input;
 }
 
 /** Filesystem-safe file name. */
@@ -324,4 +366,4 @@ const safeName = (s, fallback = 'media') => {
   return clean || fallback;
 };
 
-module.exports = { downloadToFile, sniff, sniffFile, headOf, audioToMp3, tagMp3, readId3, ensureWhatsAppMp4, safeName, fmtMB, UA };
+module.exports = { downloadToFile, sniff, sniffFile, headOf, audioToMp3, tagMp3, readId3, probeMedia, ensureWhatsAppMp4, safeName, fmtMB, UA };

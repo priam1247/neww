@@ -36,7 +36,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // playlist's segments itself, so stream sources work on a bare Node host.
 export async function hlsToFile(url, dest, onProgress, { headers = {}, maxHeight } = {}) {
   // Prefer the binary the bot itself verified (system → user install →
-  // ffmpeg-static); fall back to a PATH lookup so the engine still works alone.
+  // packaged fallback); fall back to a PATH lookup so the engine still works alone.
   const ffmpeg = (await ffmpegPath()) || await which('ffmpeg');
   if (!ffmpeg) {
     // hard cap so a runaway playlist can never eat the host's disk
@@ -183,7 +183,7 @@ export async function httpToFile(url, dest, { onProgress, onAbort, headers = {} 
         const stalled = e.name === 'AbortError' || /aborted|stalled/i.test(e.message || '');
         if (attempt >= config.downloadRetries) {
           // Last resort: the bot's own downloader (different TLS/agent stack).
-          // Some DDL mirrors reject Node's fetch fingerprint but serve axios.
+          // Some hosts reject Node's fetch fingerprint but serve axios.
           try {
             fs.rmSync(dest, { force: true });     // restart clean: host has no resume
           } catch { /* ignore */ }

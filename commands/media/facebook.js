@@ -14,8 +14,7 @@ const getFfmpeg = require('../../utils/ffmpeg');
 
 const execFileAsync = promisify(execFile);
 
-// Shared resolver: system ffmpeg → user install → ffmpeg-static (the static
-// build does not run on Termux/Android, the system one does).
+// Shared resolver: system ffmpeg → user install → packaged fallback.
 const ffmpegPath = getFfmpeg();
 const ffmpegWorks = getFfmpeg.works();
 
