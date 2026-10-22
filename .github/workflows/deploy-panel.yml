@@ -109,15 +109,22 @@ jobs:
         # perfectly good upload. Nothing here may fail the job.
         shell: bash
         env:
-          PANEL_URL: ${{ vars.PANEL_URL || secrets.PANEL_URL || 'https://panel.xsystems.hosting.com' }}
+          PANEL_URL: ${{ vars.PANEL_URL || secrets.PANEL_URL }}
           PANEL_SERVER_ID: ${{ vars.PANEL_SERVER_ID || secrets.PANEL_SERVER_ID }}
           PANEL_API_KEY: ${{ secrets.PANEL_API_KEY }}
+          SFTP_HOST: ${{ secrets.PANEL_SFTP_HOST }}
         run: |
           set +e
           if [ -z "$PANEL_SERVER_ID" ] || [ -z "$PANEL_API_KEY" ]; then
             echo "PANEL_SERVER_ID / PANEL_API_KEY not set — press Restart in the panel."
             echo "::notice::Restart skipped: files were uploaded, restart the server from the panel."
             exit 0
+          fi
+
+          # No PANEL_URL set? The panel always sits next to the SFTP node:
+          #   eu3-node.xsystemshosting.com  →  panel.xsystemshosting.com
+          if [ -z "$PANEL_URL" ] && [ -n "$SFTP_HOST" ]; then
+            PANEL_URL="https://panel.${SFTP_HOST#*.}"
           fi
 
           # tolerate a trailing slash or a copied …/server/<id> URL
