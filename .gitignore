@@ -1,17 +1,11 @@
-# dependencies
-node_modules/
-
-# WhatsApp credentials — never commit
-session/
-*.session/
-
-# runtime scratch (also used by the movie/series engine)
-temp/
-data/
-*.log
-
-# runtime settings written by the bot itself
-database/media_settings.json
-
-# local secrets
+node_modules
+.next
+out
+build
+coverage
+.vercel
 .env
+.env*.local
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store

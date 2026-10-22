@@ -1,7 +1,0 @@
-{
-  "name": "zafar-movie-engine",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
-  "description": "Movies & series engine (ESM) embedded in the CommonJS ZaFar Bot. Its own package.json makes every .js file below this folder an ES module, so the bot can load it with a plain dynamic import()."
-}
