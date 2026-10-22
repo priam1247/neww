@@ -88,7 +88,18 @@ const canonicalIdentity = (jid) => {
   return { number: number ? String(number) : null, alt };
 };
 
+// System JID filter — true for WhatsApp status, broadcast, and newsletter JIDs
+const isSystemJid = (jid) => {
+  if (!jid || typeof jid !== 'string') return true;
+  return (
+    jid === 'status@broadcast' ||
+    jid.includes('@broadcast') ||
+    jid.includes('status.broadcast') ||
+    jid.includes('@newsletter')
+  );
+};
+
 module.exports = {
   normalizeJid, normalizeJidWithLid, getLidMappingValue,
-  splitIdentity, jidVariants, canonicalIdentity,
+  splitIdentity, jidVariants, canonicalIdentity, isSystemJid,
 };

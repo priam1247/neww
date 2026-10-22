@@ -10,17 +10,14 @@ temp/
 data/
 *.log
 
-# runtime settings written by the bot itself
-database/media_settings.json
+# runtime state & vault snapshots written by the bot itself (never overwrite on deploy)
+database/*.json
 database/*.bak
 database/*.corrupt*
 database/*.tmp
 
 # local secrets
 .env
-
-# dashboard sync state (runtime)
-database/dashboard_sync.json
 
 # web portal build output (dashboard/)
 .next/

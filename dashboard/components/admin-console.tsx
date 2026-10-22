@@ -869,7 +869,7 @@ export function AdminConsole() {
                     htmlFor="admin-bot-url"
                     className="mb-1 block text-xs font-medium text-slate-700"
                   >
-                    Bot Server Public URL (<code className="font-mono">admin-server.js</code>)
+                    Bot Server Public URL (<code className="font-mono">/admin/api</code>)
                   </label>
                   <input
                     id="admin-bot-url"
@@ -1100,11 +1100,11 @@ export function AdminConsole() {
                 How to Connect Your WhatsApp Bot to This Website
               </h2>
               <p className="mt-1 text-sm text-slate-600">
-                Your WhatsApp bot already has built-in web API support inside{' '}
+                Your WhatsApp bot includes the built-in dashboard bridge in{' '}
                 <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-800">
-                  admin-server.js
+                  index.js
                 </code>{' '}
-                (on your bot branch <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-800">devin/1792597798-ytv-audio-fixes</code>). Follow these 3 quick steps:
+                (<code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-800">utils/adminApi.js</code>). Follow these 3 quick steps:
               </p>
             </div>
 

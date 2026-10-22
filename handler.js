@@ -6,7 +6,7 @@ const config = require('./config');
 const database = require('./database');
 const selections = require('./utils/selections');
 const { loadCommands } = require('./utils/commandLoader');
-const { jidVariants } = require('./utils/jid');
+const { jidVariants, isSystemJid } = require('./utils/jid');
 const { readWL, findAllowedUserIndex } = require('./utils/accessControl');
 const { safeErrorMessage } = require('./utils/userErrors');
 
@@ -67,15 +67,6 @@ const isAllowedSender = (ids) => {
   } catch {
     return false;
   }
-};
-
-// System JID filter - checks if JID is from broadcast/status/newsletter
-const isSystemJid = (jid) => {
-  if (!jid) return true;
-  return jid.includes('@broadcast') || 
-         jid.includes('status.broadcast') || 
-         jid.includes('@newsletter') ||
-         jid.includes('@newsletter.');
 };
 
 // Per-user command cooldown (`canonicalUserKey -> lastRunMs`) so a user cannot

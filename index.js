@@ -14,9 +14,6 @@
   }
 })();
 
-process.env.PUPPETEER_SKIP_DOWNLOAD = 'true';
-process.env.PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = 'true';
-process.env.PUPPETEER_CACHE_DIR = process.env.PUPPETEER_CACHE_DIR || '/tmp/puppeteer_cache_disabled';
 // Production by default: skips the pino-pretty worker thread + dev overhead.
 // Override with NODE_ENV=development when debugging locally.
 process.env.NODE_ENV = process.env.NODE_ENV || 'production';
@@ -83,63 +80,10 @@ const qrcode = require('qrcode-terminal');
 const config = require('./config');
 const handler = require('./handler');
 const { createReconnector } = require('./utils/reconnect');
+const { isSystemJid } = require('./utils/jid');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
-const os = require('os');
-
-// Remove Puppeteer cache (if some dependency downloaded Chromium into ~/.cache/puppeteer)
-function cleanupPuppeteerCache() {
-  try {
-    const home = os.homedir();
-    const cacheDir = path.join(home, '.cache', 'puppeteer');
-
-    if (fs.existsSync(cacheDir)) {
-      console.log('🧹 Removing Puppeteer cache at:', cacheDir);
-      fs.rmSync(cacheDir, { recursive: true, force: true });
-      console.log('✅ Puppeteer cache removed');
-    }
-  } catch (err) {
-    console.error('⚠️ Failed to cleanup Puppeteer cache:', err.message || err);
-  }
-}
-// Optimized in-memory store with hard limits (Map-based for better memory management)
-const store = {
-  messages: new Map(), // Use Map instead of plain object
-  maxPerChat: 20, // Limit to 20 messages per chat
-  maxChats: 300, // Limit total chats (oldest chat evicted)
-
-  bind: (ev) => {
-    ev.on('messages.upsert', ({ messages }) => {
-      for (const msg of messages) {
-        if (!msg.key?.id) continue;
-
-        const jid = msg.key.remoteJid;
-        if (!store.messages.has(jid)) {
-          store.messages.set(jid, new Map());
-        }
-
-        const chatMsgs = store.messages.get(jid);
-        chatMsgs.set(msg.key.id, msg);
-
-        // Aggressive cleanup per chat - keep only recent messages
-        if (chatMsgs.size > store.maxPerChat) {
-          // Remove oldest message (first entry in Map)
-          const oldestKey = chatMsgs.keys().next().value;
-          chatMsgs.delete(oldestKey);
-        }
-        // Cap total chats - evict oldest chat (Map preserves insertion order)
-        if (store.messages.size > store.maxChats) {
-          store.messages.delete(store.messages.keys().next().value);
-        }
-      }
-    });
-  },
-
-  loadMessage: async (jid, id) => {
-    return store.messages.get(jid)?.get(id) || null;
-  }
-};
 
 // Optimized message deduplication (Set-based, no timestamps needed)
 const processedMessages = new Set();
@@ -350,11 +294,8 @@ async function startBot() {
     syncFullHistory: false,
     downloadHistory: false,
     markOnlineOnConnect: false,
-    getMessage: async () => undefined // Don't load messages from store
+    getMessage: async () => undefined
   });
-
-  // Bind store to socket
-  store.bind(sock.ev);
 
   // ─── Pairing code (alternative to scanning a QR) ─────────────────────────
   if (!state.creds.registered && config.pairNumber) {
@@ -420,30 +361,11 @@ async function startBot() {
       const ownerNames = Array.isArray(config.ownerName) ? config.ownerName.join(',') : config.ownerName;
       console.log(`👑 Owner: ${ownerNames}\n`);
       console.log('Bot is ready to receive messages!\n');
-
-      // Cleanup old chats (keep only active ones, e.g., last touched <1 day)
-      const now = Date.now();
-      for (const [jid, chatMsgs] of store.messages.entries()) {
-        const timestamps = Array.from(chatMsgs.values()).map(m => m.messageTimestamp * 1000 || 0);
-        if (timestamps.length > 0 && now - Math.max(...timestamps) > 24 * 60 * 60 * 1000) { // 1 day old chat
-          store.messages.delete(jid);
-        }
-      }
-      console.log(`🧹 Store cleaned. Active chats: ${store.messages.size}`);
     }
   });
 
   // Credentials update handler
   sock.ev.on('creds.update', saveCreds);
-
-  // System JID filter - checks if JID is from broadcast/status/newsletter
-  const isSystemJid = (jid) => {
-    if (!jid) return true;
-    return jid.includes('@broadcast') ||
-      jid.includes('status.broadcast') ||
-      jid.includes('@newsletter') ||
-      jid.includes('@newsletter.');
-  };
 
   // Messages handler - Process only new messages
   sock.ev.on('messages.upsert', ({ messages, type }) => {
@@ -483,9 +405,6 @@ async function startBot() {
       // Mark message as processed
       processedMessages.add(msgId);
 
-      // NOTE: the message is already cached by store.bind() above — this used to
-      // run a second, expensive copy (sort + evict) on every single message.
-
       // Process command IMMEDIATELY (don't block on other operations)
       handler.handleMessage(sock, msg).catch(err => {
         if (!err.message?.includes('rate-overlimit') &&
@@ -494,16 +413,6 @@ async function startBot() {
         }
       });
     }
-  });
-
-  // Message receipt updates (silently handled, no logging)
-  sock.ev.on('message-receipt.update', () => {
-    // Silently handle receipt updates
-  });
-
-  // Message updates (silently handled, no logging)
-  sock.ev.on('messages.update', () => {
-    // Silently handle message updates
   });
 
   // Handle errors - suppress common stream errors
@@ -531,8 +440,6 @@ require('./utils/logger').banner([
   `node     ${process.version}`,
 ]);
 
-// Proactively delete Puppeteer cache so it doesn't fill disk on panels
-cleanupPuppeteerCache();
 // yt-dlp looks after itself: install/repair at boot, verify every 30 minutes,
 // and re-download the binary when a download reports it as missing or broken.
 (() => {

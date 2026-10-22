@@ -2182,15 +2182,29 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       assert.strictEqual(parsedApril.moduleNumber, '2201');
       assert.ok(paperCmd.MAX_PAPERS_PER_QUERY <= 5, 'papers per query not capped');
 
+      const prevVault = paperCmd._getVaultForTests();
+      const fakeVaultFiles = Array.from({ length: 60 }, (_, idx) => ({
+        id: idx + 1,
+        hash: `h${idx + 1}`,
+        name: `BIOL ${1100 + idx} 2024 END OF SEMESTER.pdf`,
+        size: 1024,
+        created_at: '2025-01-01T00:00:00Z',
+      }));
+      paperCmd._setVaultFilesForTests(fakeVaultFiles);
       const browseSock = { sendMessage: async () => ({ key: { id: 'b' } }) };
       let browseOut = '';
-      await paperCmd.execute(browseSock, { key: { remoteJid: 'c@s.whatsapp.net' } }, ['browse', 'b'], {
-        from: 'c@s.whatsapp.net',
-        reply: async (t) => { browseOut = t; },
-        status: async () => ({ update: async (t) => { browseOut = t; } }),
-      });
+      try {
+        await paperCmd.execute(browseSock, { key: { remoteJid: 'c@s.whatsapp.net' } }, ['browse', 'b'], {
+          from: 'c@s.whatsapp.net',
+          reply: async (t) => { browseOut = t; },
+          status: async () => ({ update: async (t) => { browseOut = t; } }),
+        });
+      } finally {
+        if (prevVault?.files) paperCmd._setVaultFilesForTests(prevVault.files);
+        else paperCmd._setVaultFilesForTests(null);
+      }
       assert.ok(browseOut.length > 0 && browseOut.length < 4500, `.paper browse b too huge (${browseOut.length} chars)`);
-      assert.match(browseOut, /page 1\//i);
+      assert.match(browseOut, /page 1\/3/i);
 
       // 4. .menu hides admin + .health from non-owners, fixes .on/.off description, honours prefix & botName
       const userCard = menu._buildCard(menu._buildGroups('!', { isOwner: false }), 'alice', { prefix: '!', botName: 'CustomBot' });
@@ -2223,6 +2237,30 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
         console.warn = origWarn;
       }
       assert.ok(warns.some((w) => /Gifted API fallback failed.*GIFTED_API_KEY/.test(w)), 'missing Gifted key warning');
+    });
+
+    await test('Phase 4: dead files/packages/listeners removed while webtorrent is preserved', () => {
+      for (const removed of [
+        'admin-server.js',
+        'utils/heapPlan.js',
+        'utils/memoryWatchdog.js',
+        'commands/media/instagram.js',
+        'commands/media/facebook.js',
+        'engine/core/locker.js',
+      ]) {
+        assert.strictEqual(fs.existsSync(path.join(REPO, removed)), false, `${removed} should be deleted`);
+      }
+      const pkg = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+      assert.ok(!pkg.dependencies?.['ruhend-scraper'], 'ruhend-scraper still in dependencies');
+      assert.ok(!pkg.devDependencies?.nodemon, 'nodemon still in devDependencies');
+      assert.ok(!pkg.scripts?.['install:no-puppeteer'] && !pkg.scripts?.check && !pkg.scripts?.dev, 'unused scripts remain');
+      assert.ok(pkg.optionalDependencies?.webtorrent, 'webtorrent must remain in optionalDependencies');
+
+      const idxSrc = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8');
+      assert.ok(!idxSrc.includes('cleanupPuppeteerCache'), 'Puppeteer cache cleanup still in index.js');
+      assert.ok(!idxSrc.includes('store.bind'), 'in-memory store still in index.js');
+      assert.ok(!idxSrc.includes('message-receipt.update'), 'empty receipt listener still in index.js');
+      assert.ok(!idxSrc.includes("sock.ev.on('messages.update'"), 'empty messages.update listener still in index.js');
     });
 
     await test('nothing is cached: a delivered movie file is deleted', async () => {

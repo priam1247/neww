@@ -256,8 +256,6 @@ function startAdminApi({ port, token, hooks = {} } = {}) {
   server.listen(port, '0.0.0.0', () => {
     log.info(`dashboard API listening on 0.0.0.0:${port} (/admin/api/status)`);
   });
-  // NOTE: no server.unref() — a standalone `node admin-server.js` must keep the
-  // process alive, and inside the bot the WhatsApp socket already does.
 
   return {
     server,

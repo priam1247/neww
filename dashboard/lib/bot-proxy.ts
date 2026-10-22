@@ -119,7 +119,7 @@ export async function fetchLiveBotStatus(customTarget?: {
 }
 
 /**
- * Push a number state change to the live bot (`admin-server.js`) whenever
+ * Push a number state change to the live bot (`utils/adminApi.js`) whenever
  * a Bot Server URL + Token is configured. Fails softly if bot is offline so
  * D1 records always remain authoritative.
  */

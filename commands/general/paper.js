@@ -859,8 +859,21 @@ const refreshpapersCmd = {
   },
 };
 
+const _getVaultForTests = () => _vault;
+const _setVaultFilesForTests = (files) => {
+  if (!files) { _vault = null; return; }
+  indexVault(files, 'test');
+};
+
 module.exports = [
-  Object.assign(module.exports, { _parsePaper: parsePaper, _browseAll: browseAll, _browseCode: browseCode, MAX_PAPERS_PER_QUERY }),
+  Object.assign(module.exports, {
+    _parsePaper: parsePaper,
+    _browseAll: browseAll,
+    _browseCode: browseCode,
+    _getVaultForTests,
+    _setVaultFilesForTests,
+    MAX_PAPERS_PER_QUERY,
+  }),
   countpapersCmd,
   refreshpapersCmd,
 ];
