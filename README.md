@@ -190,6 +190,12 @@ panel already shows and then restarts the server through the panel API.
 3. Push to `main` (or **Actions → Deploy bot to XS Systems panel → Run
    workflow**). The first run can take a couple of minutes.
 
+The **restart** at the end is best-effort: the workflow tries the panel's client
+API (both server-id shapes) and then its application API. On this panel those
+answer `404`/`405`, so the run ends with a warning telling you to press
+**Restart** — the upload itself has already succeeded. A `401`/`403` there means
+`PANEL_API_KEY` is not a *client* key, or was revoked.
+
 Without those secrets the workflow is a green no-op — nothing breaks.
 
 What it does **not** upload, by design: `session/` (your WhatsApp login),
