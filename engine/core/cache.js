@@ -56,6 +56,16 @@ function fget(k) {
 }
 function fset(k, v) { files.set(k, { ...v, at: now() }); dirty = true; }
 
+/** Drop one entry (and its file) — used after the bot has delivered it. */
+function fdel(k) {
+  const v = files.get(k);
+  if (!v) return false;
+  files.delete(k);
+  dirty = true;
+  try { if (v.file && fs.existsSync(v.file)) fs.unlinkSync(v.file); } catch { /* locked */ }
+  return true;
+}
+
 // ── persistence (atomic write + boot restore) ──────────────────────────────
 let dirty = false;
 let sweepTimer = null;
@@ -203,7 +213,7 @@ export const _internal = { meta, links, neg, files, active, persist, restore, du
 
 export default {
   init, sweep, stats, wipe, keyOf, persist,
-  mget, mset, lget, lset, nget, nset, ndel, fget, fset, files,
+  mget, mset, lget, lset, nget, nset, ndel, fget, fset, fdel, files,
   markActive, unmarkActive, isActive,
   hit(kind, key) {
     metrics.bump(`cache.${kind}`);       // /stats reads these counters

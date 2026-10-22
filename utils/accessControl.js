@@ -54,6 +54,19 @@ const findUserIndex = (users, ids) => {
   return users.findIndex(u => v.has(u.number) || (u.alt || []).some(a => v.has(a)));
 };
 
+/**
+ * Same lookup, but a disabled entry does not count.
+ *
+ * The dashboard's Allow/Disallow switch writes `enabled: false` instead of
+ * deleting the number, so the gate has to skip it — while `.disallow` (which
+ * removes the entry) keeps using findUserIndex.
+ */
+const findAllowedUserIndex = (users, ids) => {
+  const idx = findUserIndex(users, ids);
+  if (idx === -1) return -1;
+  return users[idx].enabled === false ? -1 : idx;
+};
+
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
-module.exports = { readWL, writeWL, cleanNumber, findUserIndex };
+module.exports = { readWL, writeWL, cleanNumber, findUserIndex, findAllowedUserIndex };

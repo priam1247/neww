@@ -15,3 +15,6 @@ database/media_settings.json
 
 # local secrets
 .env
+
+# dashboard sync state (runtime)
+database/dashboard_sync.json

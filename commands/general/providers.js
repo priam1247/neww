@@ -99,6 +99,10 @@ const statusCommand = {
       const c = stats.counters || {};
       const g = (k) => c[k] || 0;
       const minutes = Math.floor((stats.uptimeMs || 0) / 60000);
+      // what the panel disk is actually holding, and whether files outlive a send
+      const { tempUsage } = require('../../utils/cleanup');
+      const tempMB = tempUsage() / 1048576;
+      const retention = (config.movies || {}).keepCache ? 'keep (cache on)' : 'delete after send';
 
       const text = [
         '📊 *Movie engine*',
@@ -113,6 +117,7 @@ const statusCommand = {
         `verify      ${g('verify.ok')} ok / ${g('verify.fail')} reject`,
         `cache hits  disk ${g('cache.disk')} · link ${g('cache.link')} · meta ${g('cache.meta')}`,
         `cache files ${cache.files} (${(cache.bytes / 1073741824).toFixed(2)} GB) · active ${cache.active}`,
+        `temp disk   ${tempMB.toFixed(1)} MB · ${retention}`,
         `downloads   ${(g('download.bytes') / 1073741824).toFixed(2)} GB`,
         '```',
       ].join('\n');

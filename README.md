@@ -42,6 +42,7 @@ utils/              bot helpers: temp, download providers, Drime, ffmpeg, movie 
 engine/             movie/series engine (ESM, loaded on demand)
 database/           runtime data (papers index, sent-log, settings)
 scripts/            install-ytdlp.sh, selftest.js
+admin-server.js     HTTP bridge the web portal talks to (see "Dashboard")
 Procfile            panel/Heroku start command
 ```
 
@@ -166,9 +167,71 @@ The local yt-dlp engine is tried first. If it cannot handle a source, configured
 
 For YouTube hosting-IP checks, an owner can upload a Netscape-format cookies file with `.cookies set`; use `.cookies status` to inspect availability and `.cookies clear` to remove it. Treat cookies as account credentials. `.ytdl` reports engine status; `.ytdl test <link>`, `.ytdl raw <link>`, `.ytdl update`, `.ytdl repair`, and `.ytdl proxy <url|off>` help diagnose or repair downloads.
 
+## Dashboard link (web portal → bot)
+
+The portal (`troykunsauka@gmail.com` admin console) links to a running bot with
+two values: a **Bot Server URL** and an **ADMIN_DASHBOARD_TOKEN**. The bot side
+of that contract lives here:
+
+```text
+GET    /admin/api/status          { connected, botNumber }        ← "Test connection"
+GET    /admin/api/users           every allowed number
+POST   /admin/api/users           { number, label }               ← member adds / re-enables
+PATCH  /admin/api/users/:number   { enabled: true|false }         ← Allow / Disallow
+DELETE /admin/api/users/:number
+POST   /admin/api/pair            { number } → { code, expiresInSeconds }
+GET    /health                    unauthenticated liveness probe
+```
+
+Every route needs `Authorization: Bearer <ADMIN_DASHBOARD_TOKEN>`; the token is
+compared in constant time. Set on the bot:
+
+```bash
+ADMIN_DASHBOARD_TOKEN=<same value you paste in the portal>
+ADMIN_API_PORT=3000                # a port allocated on the panel, not WhatsApp's
+DASHBOARD_URL=https://your-portal.pages.dev   # optional: pull the member list
+```
+
+Then start the bot as usual — `index.js` brings the API up and logs
+`🌐 Dashboard API: on (port 3000)`. In the portal, the Bot Server URL is
+`http://<node-ip>:<allocated-port>` (or the https tunnel in front of it).
+
+If the portal cannot reach the bot (private VPS, NAT), keep `DASHBOARD_URL` set:
+the bot pulls `GET {DASHBOARD_URL}/api/bot/whitelist` every
+`DASHBOARD_SYNC_MINUTES` (default 5) with the same token, so Allow/Disallow
+still lands even when the inbound port is closed.
+
+`admin-server.js` runs the same API on its own for a quick check:
+
+```bash
+ADMIN_DASHBOARD_TOKEN=... ADMIN_API_PORT=3000 node admin-server.js
+curl -H "Authorization: Bearer ..." http://127.0.0.1:3000/admin/api/status
+```
+
+Pairing codes are only issued while the bot has **no** registered session: a
+`POST /admin/api/pair` wipes the unregistered `./session` folder, reconnects and
+returns WhatsApp's code (valid ~60 s). Once the bot is linked, the API answers
+`409` with the number it is linked to instead of silently breaking the session.
+
 ## Past papers
 
 Paper search uses the configured Drime Cloud API and a local vault snapshot. Configure `DRIME_API_TOKEN`, `DRIME_BASE_URL`, `DRIME_PAPERS_FOLDER_ID`, `DRIME_PAPERS_FOLDER_HASH`, and optionally `DRIME_WORKSPACE_ID`. `.refreshpapers` forces a vault refresh. `.paper browse` shows the course codes represented in the vault.
+
+## Disk
+
+Delivered files do not stay on the panel:
+
+- `.movie` / `.series` delete the file as soon as WhatsApp has accepted it
+  (`utils/movieHost.release`), and its cache entry goes with it. Set
+  `MOVIE_KEEP_CACHE=1` to restore the old "keep for a day" behaviour.
+- `utils/cleanup.js` walks the whole `temp/` tree (including `temp/movies/`,
+  which used to be skipped because it is a sub-folder) every 10 minutes:
+  downloads older than 30 min, media jobs older than 60 min, and — whatever
+  their age — the oldest files until `temp/` is under `TEMP_MAX_MB` (1 GB).
+- The WhatsApp session directory is never touched.
+
+`.moviestatus` prints `temp disk ... MB` and whether files are kept or
+deleted after sending.
 
 ## Configuration
 

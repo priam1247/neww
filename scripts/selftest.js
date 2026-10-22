@@ -1353,6 +1353,110 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     }
   });
 
+  console.log('\n── 22. dashboard bridge (admin API the web app calls) ──');
+
+  await test('status / users / pair answer with the dashboard contract', async () => {
+    const { startAdminApi } = require(path.join(REPO, 'utils/adminApi.js'));
+    const port = 3311;
+    const api = startAdminApi({
+      port,
+      token: 'selftest-token',
+      hooks: {
+        status: async () => ({ connected: true, botNumber: '265894016453' }),
+        requestPair: async () => ({ code: 'ABCD-EFGH', expiresInSeconds: 60 }),
+      },
+    });
+    const call = async (method, pathname, body, auth = true) => {
+      const res = await fetch(`http://127.0.0.1:${port}${pathname}`, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(auth ? { Authorization: 'Bearer selftest-token' } : {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      return { status: res.status, json: await res.json().catch(() => ({})) };
+    };
+
+    try {
+      await new Promise((r) => setTimeout(r, 250));
+
+      const status = await call('GET', '/admin/api/status');
+      // lib/bot-proxy.ts reads exactly these two fields
+      assert.strictEqual(status.status, 200);
+      assert.strictEqual(status.json.connected, true);
+      assert.strictEqual(status.json.botNumber, '265894016453');
+
+      const denied = await call('GET', '/admin/api/status', null, false);
+      assert.strictEqual(denied.status, 401, 'the API answers without a token');
+
+      const added = await call('POST', '/admin/api/users', { number: '+265 99 777 8888', label: 'Test' });
+      assert.strictEqual(added.status, 201);
+      assert.strictEqual(added.json.user.number, '265997778888', 'number was not normalised');
+
+      const off = await call('PATCH', '/admin/api/users/265997778888', { enabled: false });
+      assert.strictEqual(off.json.user.enabled, false);
+
+      const pair = await call('POST', '/admin/api/pair', { number: '265997778888' });
+      assert.strictEqual(pair.json.code, 'ABCD-EFGH');
+      assert.strictEqual(pair.json.expiresInSeconds, 60);
+
+      const gone = await call('DELETE', '/admin/api/users/265997778888');
+      assert.strictEqual(gone.status, 200);
+      const list = await call('GET', '/admin/api/users');
+      assert.ok(!list.json.users.some((u) => u.number === '265997778888'), 'user was not removed');
+    } finally {
+      await api.stop();
+    }
+  });
+
+  await test('a disabled number is in the list but not allowed to use the bot', () => {
+    const { readWL, writeWL, findUserIndex, findAllowedUserIndex } = require(path.join(REPO, 'utils/accessControl.js'));
+    const wl = readWL();
+    wl.users.push({ number: '265912345678', enabled: false, source: 'dashboard' });
+    writeWL(wl);
+    try {
+      const jid = '265912345678@s.whatsapp.net';
+      assert.ok(findUserIndex(readWL().users, jid) !== -1, 'entry should still exist');
+      assert.strictEqual(findAllowedUserIndex(readWL().users, jid), -1, 'disabled number was allowed');
+    } finally {
+      const back = readWL();
+      back.users = back.users.filter((u) => u.number !== '265912345678');
+      writeWL(back);
+    }
+  });
+
+  console.log('\n── 23. disk hygiene (nothing outlives a successful send) ──');
+
+  await test('a delivered movie file is deleted after send', async () => {
+    const host = require(path.join(REPO, 'utils/movieHost.js'));
+    const { getTempDir } = require(path.join(REPO, 'utils/tempManager.js'));
+    const file = path.join(getTempDir(), 'movies', `selftest_${Date.now()}.mp4`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, Buffer.alloc(2048, 1));
+    assert.ok(fs.existsSync(file));
+    const freed = await host.release(file, { meta: { title: 'Selftest' }, quality: 720 });
+    assert.strictEqual(freed, true, 'release() refused to delete');
+    assert.ok(!fs.existsSync(file), 'file survived the delivery');
+  });
+
+  await test('cleanup sweeps temp/movies subfolders, not just loose files', () => {
+    const { cleanupOldFiles } = require(path.join(REPO, 'utils/cleanup.js'));
+    const { getTempDir } = require(path.join(REPO, 'utils/tempManager.js'));
+    const dir = path.join(getTempDir(), 'movies', 'data');
+    fs.mkdirSync(dir, { recursive: true });
+    const stale = path.join(dir, `stale_${Date.now()}.part`);
+    const fresh = path.join(dir, `fresh_${Date.now()}.part`);
+    fs.writeFileSync(stale, Buffer.alloc(64, 1));
+    fs.writeFileSync(fresh, Buffer.alloc(64, 1));
+    const old = (Date.now() - 3 * 60 * 60 * 1000) / 1000;
+    fs.utimesSync(stale, old, old);
+    cleanupOldFiles();
+    assert.ok(!fs.existsSync(stale), 'stale file inside temp/movies survived cleanup');
+    assert.ok(fs.existsSync(fresh), 'a fresh download was deleted');
+    try { fs.unlinkSync(fresh); } catch { /* ignore */ }
+  });
+
   // ─── summary ────────────────────────────────────────────────────────────────
   console.log(`\n${'─'.repeat(52)}`);
   if (failures.length) {

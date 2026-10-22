@@ -128,6 +128,21 @@ module.exports = {
   // QR — useful when the bot host and your WhatsApp phone are the same device.
   pairNumber: env.PAIR_NUMBER || '265894016453',
 
+  // ─── Dashboard control API ───────────────────────────────────────────────
+  // The web dashboard (Cloudflare Pages app) links to this bot with a URL and
+  // a shared token. The bot then serves /admin/api/{status,users,pair} from
+  // this port, and optionally pulls the member whitelist from the dashboard.
+  //
+  //   ADMIN_DASHBOARD_TOKEN  same value saved in the dashboard's Admin Console
+  //   ADMIN_API_PORT         port to listen on inside the panel (default 3000)
+  //   DASHBOARD_URL          dashboard origin, enables whitelist pull sync
+  admin: {
+    token: env.ADMIN_DASHBOARD_TOKEN || '',
+    port: Number(env.ADMIN_API_PORT || 3000),
+    dashboardUrl: (env.DASHBOARD_URL || env.ZAFAR_AUTH_API_URL || '').replace(/\/+$/, ''),
+    syncMinutes: Number(env.DASHBOARD_SYNC_MINUTES || 5),
+  },
+
   // ─── Movies & series (.movie / .series) ──────────────────────────────────
   // The engine needs a free TMDB key (themoviedb.org) for titles/posters.
   // Torrent sources additionally need a debrid account (Real-Debrid or
@@ -180,6 +195,15 @@ module.exports = {
     // attach the English subtitle (.srt) that MovieBox serves with the stream
     subtitles: env.MOVIE_SUBTITLES !== '0',
     subtitleLang: env.MOVIE_SUBTITLE_LANG || 'en',
+
+    // ── disk hygiene ─────────────────────────────────────────────────────
+    // A delivered movie is DELETED once WhatsApp has taken it. Keeping a 2 GB
+    // file "in case someone asks again" is what filled a 3 GB panel disk.
+    // MOVIE_KEEP_CACHE=1 turns the old behaviour back on (files stay for
+    // cacheTTLHours, up to cacheMaxMB total).
+    keepCache: env.MOVIE_KEEP_CACHE === '1',
+    cacheTTLHours: Number(env.MOVIE_CACHE_HOURS || (env.MOVIE_KEEP_CACHE === '1' ? 48 : 1)),
+    cacheMaxMB: Number(env.MOVIE_CACHE_MB || (env.MOVIE_KEEP_CACHE === '1' ? 8000 : 0)),
 
     // engine storage — stays inside the bot's ./temp folder
     tempDir: env.MOVIE_TEMP_DIR || 'temp/movies',

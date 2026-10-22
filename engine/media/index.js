@@ -251,6 +251,17 @@ export function targetFile(title, year, quality, season = null, episode = null) 
   return path.join(config.tempDir, sanitize(`${title}.${year || ''}`, quality, season, episode));
 }
 
+/**
+ * Forget a delivered file: remove its cache entry and delete it from disk.
+ * The bot calls this after WhatsApp has accepted the upload (unless the owner
+ * asked for MOVIE_KEEP_CACHE=1).
+ */
+export function forgetFile(meta, quality, season = null, episode = null) {
+  const id = cacheId(meta);
+  if (!id) return false;
+  return cache.fdel(cache.keyOf(id, season ?? null, episode ?? null, quality));
+}
+
 /** write a finished download into the LRU index */
 export function rememberFile(meta, quality, season, episode, file, sizeMB) {
   const id = cacheId(meta);
@@ -265,6 +276,6 @@ export function rememberFile(meta, quality, season, episode, file, sizeMB) {
 export { boot, cache, config, tv, parseRelease, matchesEpisode, tmdb, metadata, debrid, resolver, registry, queue, mlog, mirrorReport };
 export default {
   boot, identify, resolveMovie, resolveEpisode, resolveSeason,
-  targetFile, rememberFile, qualityLadder, subtitles,
+  targetFile, rememberFile, forgetFile, qualityLadder, subtitles,
   cache, config, tmdb, metadata, resolver, debrid, registry, queue, mirrorReport, subtitles
 };

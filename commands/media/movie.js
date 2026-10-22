@@ -202,6 +202,9 @@ async function deliver(sock, msg, extra, meta, job) {
     });
 
     await trySubtitles(sock, chatId, msg, meta);
+    // The chat has the file now — free the disk (MOVIE_KEEP_CACHE=1 keeps it).
+    const freed = await host.release(file, { meta, quality: shownQuality }).catch(() => false);
+    log.debug(freed ? `released ${path.basename(file)}` : `kept ${path.basename(file)} (cache on)`);
     await react('✅');
   } catch (e) {
     // full message: the logger collapses the bullets onto one line, so the

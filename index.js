@@ -248,6 +248,56 @@ const createSuppressedLogger = (level = 'silent') => {
 // Every restart path goes through scheduleRestart(): a socket that dies must
 // never end up with two live connections (watchdog + close handler used to race).
 let currentSock = null;
+
+// ── pairing (dashboard-driven) ───────────────────────────────────────────────
+// A pairing code can only exist while the bot has no registered session, so a
+// request from the dashboard (POST /admin/api/pair) wipes the unregistered
+// session folder and lets WhatsApp issue a fresh code. The code is captured
+// here because the socket emits it asynchronously.
+const pairing = { number: null, code: null, at: 0, error: null, waiters: [] };
+
+function notePairingCode(number, code) {
+  pairing.number = String(number || '');
+  pairing.code = String(code || '');
+  pairing.at = Date.now();
+  pairing.error = null;
+  for (const w of pairing.waiters.splice(0)) w.resolve({ code: pairing.code, expiresInSeconds: 60 });
+}
+
+function notePairingError(err) {
+  pairing.error = err?.message || String(err);
+  for (const w of pairing.waiters.splice(0)) w.reject(new Error(pairing.error));
+}
+
+/** Wait for the socket to hand over a code (or fail) — max 25s. */
+function waitForPairingCode(timeoutMs = 25_000) {
+  if (pairing.code && Date.now() - pairing.at < 60_000) {
+    return Promise.resolve({ code: pairing.code, expiresInSeconds: 60 });
+  }
+  return new Promise((resolve, reject) => {
+    const waiter = {
+      resolve,
+      reject: (e) => reject(Object.assign(e, { statusCode: 502 })),
+    };
+    pairing.waiters.push(waiter);
+    setTimeout(() => {
+      const i = pairing.waiters.indexOf(waiter);
+      if (i !== -1) pairing.waiters.splice(i, 1);
+      reject(Object.assign(
+        new Error(pairing.error || 'WhatsApp did not issue a pairing code — check the bot logs.'),
+        { statusCode: 504 },
+      ));
+    }, timeoutMs).unref?.();
+  });
+}
+
+/** Bot number, when connected. */
+const connectedNumber = () => {
+  try {
+    const id = currentSock?.user?.id;
+    return id ? String(id).split(':')[0].split('@')[0] : null;
+  } catch { return null; }
+};
 let restartScheduled = false;
 
 function scheduleRestart(delayMs = 3000) {
@@ -342,8 +392,10 @@ async function startBot() {
         const code = await sock.requestPairingCode(config.pairNumber.replace(/[^0-9]/g, ''));
         console.log(`\n🔗 Pairing code: ${code}`);
         console.log('On your phone: WhatsApp → Linked Devices → Link a device → "Link with phone number instead" → enter this code.\n');
+        notePairingCode(config.pairNumber, code);
       } catch (e) {
         console.error('Failed to generate pairing code:', e.message);
+        notePairingError(e);
       }
     }, 3000);
   }
@@ -499,6 +551,68 @@ require('./utils/logger').banner([
 
 // Proactively delete Puppeteer cache so it doesn't fill disk on panels
 cleanupPuppeteerCache();
+
+// ── Dashboard API + whitelist sync ───────────────────────────────────────────
+// The web dashboard (Cloudflare app) links to this bot with a URL + token and
+// then drives it over /admin/api/*. Without ADMIN_DASHBOARD_TOKEN nothing here
+// starts, so a plain WhatsApp-only deployment is byte-for-byte the same.
+(function startDashboardBridge() {
+  const admin = config.admin || {};
+  const { startAdminApi } = require('./utils/adminApi');
+  const { startAllowlistSync } = require('./utils/allowlistSync');
+
+  if (!admin.token) {
+    console.log('🌐 Dashboard API: off (ADMIN_DASHBOARD_TOKEN not set)');
+    return;
+  }
+
+  startAdminApi({
+    port: admin.port,
+    token: admin.token,
+    hooks: {
+      status: async () => {
+        const number = connectedNumber();
+        const { readWL } = require('./utils/accessControl');
+        return {
+          connected: Boolean(number),
+          botNumber: number,
+          botName: config.botName,
+          paired: Boolean(config.pairNumber),
+          members: readWL().users.filter((u) => u.enabled !== false).length,
+          pendingPairing: Boolean(pairing.code && Date.now() - pairing.at < 60_000),
+        };
+      },
+
+      requestPair: async (number) => {
+        if (!/^\d{7,15}$/.test(number)) {
+          throw Object.assign(new Error('WhatsApp numbers must be 7–15 digits, country code first.'), { statusCode: 400 });
+        }
+        const live = connectedNumber();
+        if (live) {
+          throw Object.assign(new Error(
+            `This bot is already linked to +${live}. Log it out in WhatsApp → Linked devices before linking another number.`,
+          ), { statusCode: 409 });
+        }
+
+        // fresh session: WhatsApp only issues a code for an unregistered socket
+        const folder = `./${config.sessionName}`;
+        try { fs.rmSync(folder, { recursive: true, force: true }); } catch { /* ignore */ }
+
+        pairing.number = number;
+        pairing.code = null;
+        pairing.at = 0;
+        pairing.error = null;
+        config.pairNumber = number;
+
+        await startBot();
+        return waitForPairingCode();
+      },
+    },
+  });
+
+  startAllowlistSync();
+  console.log(`🌐 Dashboard API: on (port ${admin.port}${admin.dashboardUrl ? `, sync ${admin.dashboardUrl}` : ''})`);
+})();
 
 startBot().catch(err => {
   console.error('Error starting bot:', err);

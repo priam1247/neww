@@ -7,7 +7,7 @@ const database = require('./database');
 const selections = require('./utils/selections');
 const { loadCommands } = require('./utils/commandLoader');
 const { jidVariants } = require('./utils/jid');
-const { readWL, findUserIndex } = require('./utils/accessControl');
+const { readWL, findAllowedUserIndex } = require('./utils/accessControl');
 
 // Load all commands
 const commands = loadCommands();
@@ -48,7 +48,8 @@ const isOwner = (ids) => {
 // Owner/admin or whitelisted user — everyone else gets no response at all
 const isAllowedSender = (ids) => {
   if (isOwner(ids)) return true;
-  return findUserIndex(readWL().users, ids) !== -1;
+  // enabled:false (dashboard "Disallow") = present but blocked
+  return findAllowedUserIndex(readWL().users, ids) !== -1;
 };
 
 // System JID filter - checks if JID is from broadcast/status/newsletter

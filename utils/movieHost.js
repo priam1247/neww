@@ -79,14 +79,23 @@ function tempDir() {
 /** Absolute path inside the movies temp dir. */
 const tempFile = (name) => path.join(tempDir(), name);
 
-/** Delete a temp file through the bot's temp manager (best effort). */
+/**
+ * Delete a temp file through the bot's temp manager (best effort).
+ *
+ * deleteTempFile() refuses anything outside its own temp dir, and it can be
+ * initialised against a different root than the one the engine used — so a
+ * refusal falls through to a direct unlink. Both paths are inside the bot.
+ */
 function cleanup(file) {
   if (!file) return;
   const t = tempMod();
   try {
-    if (t && typeof t.deleteTempFile === 'function') return t.deleteTempFile(file);
+    if (t && typeof t.deleteTempFile === 'function') {
+      if (t.deleteTempFile(file) === true) return;
+      if (!fs.existsSync(file)) return true;
+    }
   } catch { /* fall through */ }
-  try { fs.unlinkSync(file); } catch { /* already gone */ }
+  try { fs.unlinkSync(file); return true; } catch { return false; }
 }
 
 const fmtMB = (bytes) => `${(Number(bytes || 0) / MB).toFixed(1)} MB`;
@@ -418,6 +427,29 @@ async function deliver(sock, chatId, msg, { file, title = '', caption = '', onPr
   return sendMedia(sock, chatId, msg, { file, title, caption });
 }
 
+/**
+ * Delete a file the chat has already received.
+ *
+ * Disk is the scarce resource on a panel, not bandwidth: keeping a 2 GB movie
+ * for a repeat request is what pushed a 3 GB disk to full. The cache entry (if
+ * any) goes with it, so the next request downloads again instead of handing
+ * back a path that no longer exists.
+ *
+ * @returns {Promise<boolean>} true when something was deleted
+ */
+async function release(file, { meta = null, quality = null, season = null, episode = null } = {}) {
+  if (moviesCfg().keepCache === true) return false;
+  if (meta && quality) {
+    try {
+      const engine = require('./movieEngine');
+      await engine.forget(meta, quality, season, episode);
+    } catch { /* engine not loaded / no cache entry */ }
+  }
+  if (!file) return false;
+  cleanup(file);
+  return true;
+}
+
 /** One-line capability summary used by `.moviestatus` / `.providers`. */
 function statusLine() {
   const caps = capabilities();
@@ -434,7 +466,7 @@ module.exports = {
   tempDir, tempFile, cleanup, fmtMB,
   // media
   sniff, safeName, ffmpeg, ffmpegPath, defaultQuality, maxDownloadMB,
-  download, sendMedia, sendSubtitle,
+  download, sendMedia, sendSubtitle, release,
   // drime
   drimeReady, drimeMode, drimeThresholdMB, shouldUploadDrime, drimeUpload,
   // delivery

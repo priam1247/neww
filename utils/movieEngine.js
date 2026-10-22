@@ -66,6 +66,10 @@ function applyConfig() {
   setIfEmpty('DATA_DIR', abs(m.dataDir || path.join(movieTemp, 'data')));
 
   // behaviour
+  // disk: after-send deletion (default) vs. the old keep-everything cache
+  setIfEmpty('CACHE_MAX_MB', m.cacheMaxMB);
+  setIfEmpty('CACHE_TTL_HOURS', m.cacheTTLHours);
+
   setIfEmpty('MAX_SEND_MB', m.maxSendMB);
   setIfEmpty('MAX_DOWNLOAD_MB', m.maxDownloadMB);
   setIfEmpty('MIN_FREE_MB', m.minFreeMB);
@@ -165,6 +169,16 @@ module.exports = {
    * Subtitle file for a title (MovieBox BFF). Returns null when there is none.
    * @returns {Promise<{file:string, language:string}|null>}
    */
+  /**
+   * Drop a finished file from the disk cache (and delete it).
+   * Called right after a successful WhatsApp send when caching is off, so a
+   * 2 GB movie does not sit on the panel disk for another 24 hours.
+   */
+  async forget(meta, quality, season = null, episode = null) {
+    const { forgetFile } = await load();
+    try { return forgetFile(meta, quality, season, episode); } catch { return false; }
+  },
+
   async subtitles(meta, { season = null, episode = null, lang = 'en', dest = null } = {}) {
     const { subtitles } = await load();
     return subtitles(meta, { season, episode, lang, dest });

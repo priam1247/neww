@@ -156,6 +156,8 @@ async function sendEpisode(sock, msg, chatId, file, meta, season, episode, quali
   });
 
   await trySubtitles(sock, msg, chatId, meta, season, episode);
+  // delivered → delete, unless the owner turned the disk cache back on
+  await host.release(file, { meta, quality: shownQuality, season, episode }).catch(() => false);
 
   return stat.size;
 }
@@ -217,6 +219,7 @@ async function deliverSeasonPack(sock, msg, extra, meta, job) {
       caption: `📺 *${meta.title}* — S${pad(season)} pack`,
     });
 
+    await host.release(file, { meta, quality: job.quality, season }).catch(() => false);
     return react('✅');
   } catch (e) {
     log.error(`${meta.title} S${pad(season)} pack · ${e.code || 'FAIL'} · ${String(e.message || '').split('\n')[0]}`);
