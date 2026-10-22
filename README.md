@@ -217,6 +217,39 @@ GitHub → **Code → Download ZIP** → panel → **Files → Upload** → righ
 archive → **Unarchive** → **Restart**. Keep `session/` and `.env` from the
 server: never replace them with the archive's.
 
+### Reinstalling the server (XS Systems)
+
+A reinstall stops the server and re-runs the egg install script — **files on the
+server are gone**, startup variables are kept. Order matters:
+
+1. **Before**, save the three things the bot cannot rebuild on its own, using the
+   panel's SFTP details (`Files → SFTP` in any client, e.g. WinSCP/FileZilla):
+   - `session/` → your WhatsApp login (without it the bot needs a new pairing code)
+   - `database/*.json` → the allowed-user list
+   - `.env`, if the server has one
+2. **Reinstall** from the panel. The 3 GB that `temp/` had accumulated goes with
+   it — that is the disk you were missing.
+3. In **Startup → Server Variables** (they survive a reinstall) make sure you
+   have:
+   - `ADMIN_DASHBOARD_TOKEN` — same value you paste in the portal
+   - `PAIR_NUMBER` — the number the bot logs in with
+   - anything else secret (`TMDB_API_KEY`, `REALDEBRID_API_KEY`, …)
+
+   The panel already provides `SERVER_PORT` / `SERVER_MEMORY` / `SERVER_IP`;
+   the bot uses `SERVER_PORT` for the dashboard API and sizes its heap from
+   `SERVER_MEMORY`.
+4. **Upload the code**: Actions → *Deploy bot to XS Systems panel* →
+   *Run workflow*. (The push-triggered run already does this on every `main`
+   commit — the manual run is for a freshly reinstalled server.)
+5. Check the Startup Command runs the install once, e.g.
+   `npm install && node index.js`. Without `npm install` the bot stops with
+   `❌ Dependencies are missing`.
+6. Start, then put `session/` back over SFTP if the bot asks for a pairing code.
+
+With `SERVER_PORT` = the allocated port, the portal's **Bot Server URL** is
+`http://<SERVER_IP>:<SERVER_PORT>` (e.g. `http://195.0.0.1:25763`); the log line
+`🌐 Dashboard API: on (port …)` confirms it is listening.
+
 ## Dashboard link (web portal → bot)
 
 The portal source lives in `dashboard/`. It is a **separate app**, so on Vercel

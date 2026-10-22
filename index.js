@@ -44,6 +44,18 @@ function respawnWithBiggerHeap() {
 
 if (respawnWithBiggerHeap()) return;
 
+// A fresh install (or a panel reinstall) has no node_modules yet. Say that in
+// one line instead of letting the first require() throw a 40-line stack.
+(function checkDependencies() {
+  try {
+    require.resolve('@whiskeysockets/baileys');
+  } catch {
+    console.error('❌ Dependencies are missing — run `npm install` in this folder.');
+    console.error('   Make sure the panel\'s Startup Command runs it, e.g. `npm install && node index.js`.');
+    process.exit(1);
+  }
+})();
+
 process.env.PUPPETEER_SKIP_DOWNLOAD = 'true';
 process.env.PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = 'true';
 process.env.PUPPETEER_CACHE_DIR = process.env.PUPPETEER_CACHE_DIR || '/tmp/puppeteer_cache_disabled';

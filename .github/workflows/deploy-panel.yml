@@ -9,14 +9,14 @@ name: Deploy bot to XS Systems panel
 # Nothing runs until the secrets exist — without them this workflow is a green
 # no-op, so forks and pull requests are unaffected.
 #
-#   Repo → Settings → Secrets and variables → Actions → New repository secret
-#   PANEL_SFTP_HOST   e.g. node1.xsystems.hosting     (Settings → SFTP details)
-#   PANEL_SFTP_PORT   2022                            (the port shown there)
-#   PANEL_SFTP_USER   troykunsauka6.xxxx              (not your login e-mail)
-#   PANEL_SFTP_PASS   the password shown in SFTP details
-#   PANEL_URL         https://panel.xsystems.hosting  (optional: auto-restart)
-#   PANEL_SERVER_ID   the id in the panel URL         (optional)
-#   PANEL_API_KEY     Account → API Credentials       (optional, client key)
+#   Repo → Settings → Secrets and variables → Actions
+#   secrets:  PANEL_SFTP_HOST  PANEL_SFTP_PORT  PANEL_SFTP_USER  PANEL_SFTP_PASS
+#             PANEL_API_KEY   (optional, panel → Account → API Credentials)
+#   vars:     PANEL_URL  PANEL_SERVER_ID  (optional — enables the auto-restart)
+#
+# Host/port/user/number come straight from the panel's "SFTP Details" box; the
+# password is the one you log into the panel with — it is only ever used here,
+# inside the runner, and never written to a file or the log.
 
 on:
   push:
@@ -44,12 +44,16 @@ jobs:
 
       - name: Are the panel secrets configured?
         id: cfg
+        env:
+          H: ${{ secrets.PANEL_SFTP_HOST }}
+          U: ${{ secrets.PANEL_SFTP_USER }}
+          P: ${{ secrets.PANEL_SFTP_PASS }}
         run: |
-          if [ -n "${{ secrets.PANEL_SFTP_HOST }}" ] && [ -n "${{ secrets.PANEL_SFTP_USER }}" ]; then
+          if [ -n "$H" ] && [ -n "$U" ] && [ -n "$P" ]; then
             echo "ready=true" >> "$GITHUB_OUTPUT"
           else
             echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::PANEL_SFTP_HOST / PANEL_SFTP_USER are not set — skipping the panel deploy."
+            echo "::notice::PANEL_SFTP_HOST / PANEL_SFTP_USER / PANEL_SFTP_PASS are not all set — skipping the panel deploy."
           fi
 
       - name: Install lftp
@@ -63,7 +67,7 @@ jobs:
         if: steps.cfg.outputs.ready == 'true'
         env:
           SFTP_HOST: ${{ secrets.PANEL_SFTP_HOST }}
-          SFTP_PORT: ${{ secrets.PANEL_SFTP_PORT }}
+          SFTP_PORT: ${{ secrets.PANEL_SFTP_PORT || '2022' }}
           SFTP_USER: ${{ secrets.PANEL_SFTP_USER }}
           SFTP_PASS: ${{ secrets.PANEL_SFTP_PASS }}
           INCLUDE_GIT: ${{ inputs.bootstrap == true && '1' || '0' }}
@@ -100,8 +104,8 @@ jobs:
       - name: Restart the server so the new code runs
         if: steps.cfg.outputs.ready == 'true'
         env:
-          PANEL_URL: ${{ secrets.PANEL_URL }}
-          PANEL_SERVER_ID: ${{ secrets.PANEL_SERVER_ID }}
+          PANEL_URL: ${{ vars.PANEL_URL || secrets.PANEL_URL }}
+          PANEL_SERVER_ID: ${{ vars.PANEL_SERVER_ID || secrets.PANEL_SERVER_ID }}
           PANEL_API_KEY: ${{ secrets.PANEL_API_KEY }}
         run: |
           if [ -z "$PANEL_URL" ] || [ -z "$PANEL_SERVER_ID" ] || [ -z "$PANEL_API_KEY" ]; then
