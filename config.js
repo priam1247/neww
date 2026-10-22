@@ -138,7 +138,9 @@ module.exports = {
   //   DASHBOARD_URL          dashboard origin, enables whitelist pull sync
   admin: {
     token: env.ADMIN_DASHBOARD_TOKEN || '',
-    port: Number(env.ADMIN_API_PORT || 3000),
+    // Pterodactyl hands the container a port (SERVER_PORT / PORT); on other
+    // hosts ADMIN_API_PORT is the one to set. 3000 is only a last resort.
+    port: Number(env.ADMIN_API_PORT || env.SERVER_PORT || env.PORT || 3000),
     dashboardUrl: (env.DASHBOARD_URL || env.ZAFAR_AUTH_API_URL || '').replace(/\/+$/, ''),
     syncMinutes: Number(env.DASHBOARD_SYNC_MINUTES || 5),
   },
