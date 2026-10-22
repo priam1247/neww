@@ -103,43 +103,30 @@ jobs:
 
       - name: Restart the server so the new code runs
         if: steps.cfg.outputs.ready == 'true'
-        # `run:` steps execute with `bash -e`, so ONE failed command (a DNS blip
-        # inside the runner, a 403 from the panel) aborts the step with curl's
-        # own exit code — that is what turned the last run red after a
-        # perfectly good upload. Nothing here may fail the job.
-        shell: bash
         env:
-          PANEL_URL: ${{ vars.PANEL_URL || secrets.PANEL_URL || 'https://panel.xsystems.hosting.com' }}
+          PANEL_URL: ${{ vars.PANEL_URL || secrets.PANEL_URL }}
           PANEL_SERVER_ID: ${{ vars.PANEL_SERVER_ID || secrets.PANEL_SERVER_ID }}
           PANEL_API_KEY: ${{ secrets.PANEL_API_KEY }}
         run: |
-          set +e
-          if [ -z "$PANEL_SERVER_ID" ] || [ -z "$PANEL_API_KEY" ]; then
-            echo "PANEL_SERVER_ID / PANEL_API_KEY not set — press Restart in the panel."
-            echo "::notice::Restart skipped: files were uploaded, restart the server from the panel."
+          set -uo pipefail
+          if [ -z "$PANEL_URL" ] || [ -z "$PANEL_SERVER_ID" ] || [ -z "$PANEL_API_KEY" ]; then
+            echo "::notice::PANEL_URL / PANEL_SERVER_ID / PANEL_API_KEY not set — press Restart in the panel."
             exit 0
           fi
-
-          # tolerate a trailing slash or a copied …/server/<id> URL
+          # tolerate a trailing slash or a copied /server/<id> URL
           BASE=${PANEL_URL%/}
           BASE=${BASE%%/server/*}
-          echo "panel:  $BASE"
-          echo "server: $PANEL_SERVER_ID"
-
-          code=$(curl -sS --max-time 25 -o /tmp/out -w '%{http_code}' -X POST \
+          code=$(curl -s -o /tmp/out -w '%{http_code}' -X POST \
             "$BASE/api/client/servers/$PANEL_SERVER_ID/power" \
             -H "Authorization: Bearer $PANEL_API_KEY" \
             -H 'Accept: application/json' \
             -H 'Content-Type: application/json' \
-            -d '{"signal":"restart"}' 2>/tmp/curl_err) || code="curl:$?"
-          echo "panel responded: $code"
-          [ -s /tmp/out ] && cat /tmp/out
-          [ -s /tmp/curl_err ] && cat /tmp/curl_err
-
-          if [ "$code" = "204" ] || [ "$code" = "200" ]; then
-            echo "✅ restart requested"
-          else
-            echo "::warning::The panel did not accept the restart ($code). The files ARE uploaded — press Restart in the panel."
-            echo "::notice::Common causes: the API key is not a *client* key (Account → API Credentials), it was revoked, or the key lacks the 'control.server' scope."
+            -d '{"signal":"restart"}')
+          echo "panel responded $code"
+          cat /tmp/out 2>/dev/null || true
+          # The files are already uploaded by now: a refused restart must not
+          # mark the deploy as failed, it just means "press Restart yourself".
+          if [ "$code" != "204" ]; then
+            echo "::warning::The panel refused the restart (HTTP $code). Files were uploaded — press Restart in the panel."
           fi
           exit 0
