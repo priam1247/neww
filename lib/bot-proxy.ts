@@ -1,27 +1,19 @@
-import crypto from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
+import { getAdminEmail } from './auth-engine';
 
-const DEFAULT_ADMIN_EMAIL =
-  process.env.NEXT_PUBLIC_ADMIN_EMAIL || 'troykunsauka6@gmail.com';
-
-export function getAdminEmail(): string {
-  return DEFAULT_ADMIN_EMAIL;
+export function normalizePhoneNumber(input: unknown): string {
+  return String(input ?? '').replace(/[^0-9]/g, '');
 }
 
 /**
- * Safely parse and normalize an upstream Bot API URL (either from UI override
- * header `x-bot-api-url` or from server `process.env.BOT_API_URL`).
+ * Safely parse and normalize an upstream Bot API URL (either from Admin UI
+ * header `x-bot-api-url` or server `process.env.BOT_API_URL`).
  */
 export function resolveBotBaseUrl(req: NextRequest): {
   baseUrl: string | null;
   hostLabel: string | null;
   error?: string;
 } {
-  const forcedSandbox = req.headers.get('x-force-sandbox') === '1';
-  if (forcedSandbox) {
-    return { baseUrl: null, hostLabel: null };
-  }
-
   const headerOverride = req.headers.get('x-bot-api-url')?.trim() || '';
   const envUrl = process.env.BOT_API_URL?.trim() || '';
   const raw = headerOverride || envUrl;
@@ -39,7 +31,6 @@ export function resolveBotBaseUrl(req: NextRequest): {
         error: 'Bot Server URL must start with http:// or https://',
       };
     }
-    // Strip trailing `/admin` or trailing slashes so `/admin/api/...` joins cleanly
     const cleanPath = parsed.pathname
       .replace(/\/admin\/api\/?$/i, '')
       .replace(/\/admin\/?$/i, '')
@@ -55,39 +46,9 @@ export function resolveBotBaseUrl(req: NextRequest): {
   }
 }
 
-export function extractBearerToken(req: NextRequest): string {
-  const auth = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '').trim();
-  const custom = req.headers.get('x-admin-token')?.trim();
-  return auth || custom || '';
-}
-
-function safeTokenMatch(provided: string, expected: string): boolean {
-  const a = Buffer.from(provided);
-  const b = Buffer.from(expected);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
-
 /**
- * Verify dashboard token when server-side `ADMIN_DASHBOARD_TOKEN` is set.
- * Returns null when authorized, or a 401 NextResponse when rejected.
- */
-export function verifyServerTokenIfConfigured(req: NextRequest): NextResponse | null {
-  const expected = process.env.ADMIN_DASHBOARD_TOKEN?.trim();
-  if (!expected) return null;
-
-  const provided = extractBearerToken(req);
-  if (!provided || !safeTokenMatch(provided, expected)) {
-    return NextResponse.json(
-      { error: `Valid admin dashboard token required for ${DEFAULT_ADMIN_EMAIL}.` },
-      { status: 401 },
-    );
-  }
-  return null;
-}
-
-/**
- * Forward a request from Vercel's server runtime to `${baseUrl}/admin/api${subpath}`
- * on ZaFar Bot's `admin-server.js`. Avoids browser Mixed Content & CORS issues completely.
+ * Forward an authenticated operator request from Next.js server runtime to
+ * `${baseUrl}/admin/api${subpath}` on ZaFar Bot's `admin-server.js`.
  */
 export async function forwardToBotServer(
   req: NextRequest,
@@ -96,15 +57,14 @@ export async function forwardToBotServer(
   subpath: string,
   options: { method: string; body?: unknown },
 ): Promise<NextResponse> {
-  const clientToken = extractBearerToken(req);
-  const serverToken = process.env.ADMIN_DASHBOARD_TOKEN?.trim() || '';
-  const bearer = clientToken || serverToken;
+  const clientBotToken = req.headers.get('x-admin-token')?.trim() || '';
+  const serverBotToken = process.env.ADMIN_DASHBOARD_TOKEN?.trim() || '';
+  const bearer = clientBotToken || serverBotToken;
 
   if (!bearer) {
     return NextResponse.json(
       {
-        error:
-          'Enter your Admin Dashboard Token (matching ADMIN_DASHBOARD_TOKEN on the bot server).',
+        error: `Set your Bot Server Token (ADMIN_DASHBOARD_TOKEN for ${getAdminEmail()}) in Bot Connection settings.`,
       },
       { status: 401 },
     );
@@ -132,7 +92,7 @@ export async function forwardToBotServer(
         {
           error:
             data?.error ||
-            `Bot server responded with HTTP ${upstreamRes.status}. Check your token and bot URL.`,
+            `Bot server responded with HTTP ${upstreamRes.status}. Verify your ADMIN_DASHBOARD_TOKEN and Bot URL.`,
         },
         { status: upstreamRes.status },
       );
@@ -141,8 +101,8 @@ export async function forwardToBotServer(
     return NextResponse.json(
       {
         ...data,
-        mode: 'live',
-        upstreamConfigured: true,
+        botServerLinked: true,
+        storageEngine: 'bot-live',
         upstreamHost: hostLabel,
         latencyMs,
       },
@@ -152,7 +112,7 @@ export async function forwardToBotServer(
     const message = err instanceof Error ? err.message : 'Connection failed';
     return NextResponse.json(
       {
-        error: `Could not reach bot server at ${hostLabel || baseUrl} (${message}). Ensure admin-server.js is running and its port is reachable, or switch to Sandbox Preview.`,
+        error: `Could not reach live bot server at ${hostLabel || baseUrl} (${message}).`,
       },
       { status: 502 },
     );
