@@ -322,16 +322,23 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     catch (e) { caught = e; }
     assert.ok(caught, 'expected a failure');
     assert.strictEqual(YT.classify(caught).code, 'BOT_CHECK');
-    assert.ok(/cookies/i.test(YT.friendlyError(caught)), 'hint does not mention cookies');
-    assert.ok(!/not available in this server's country/i.test(YT.friendlyError(caught)), 'message blames the region');
+    // Regular users get a plain anti-bot explanation without owner-only commands;
+    // owners get the .cookies / .ytdl admin hints.
+    assert.ok(!/\.cookies|\.ytdl/i.test(YT.friendlyError(caught)), 'admin hint leaked to regular user');
+    assert.ok(/anti-bot|automated access/i.test(YT.friendlyError(caught)), 'missing plain anti-bot message');
+    assert.ok(/cookies/i.test(YT.friendlyError(caught, { isOwner: true })), 'owner hint missing cookies');
+    assert.ok(!/not available in the server's region/i.test(YT.friendlyError(caught)), 'message blames the region');
   });
 
-  await test('geo-block IS reported as a region block', async () => {
+  await test('geo-block IS reported as a plain region block without admin hints for users', async () => {
     process.env.FAKE_YTDLP = 'geo';
     let caught = null;
     try { await YT.downloadAudio('https://www.youtube.com/watch?v=dQw4w9WgXcQ', { maxMB: 100, outBase: path.join(sandbox, 'a3'), deadlineMs: 20000 }); }
     catch (e) { caught = e; }
     assert.strictEqual(YT.classify(caught).code, 'GEO_BLOCK');
+    assert.ok(/not available in the server's region/i.test(YT.friendlyError(caught)));
+    assert.ok(!/\.ytdl/i.test(YT.friendlyError(caught)), 'leaked .ytdl proxy hint to regular user');
+    assert.ok(/\.ytdl proxy/i.test(YT.friendlyError(caught, { isOwner: true })), 'owner geo-block hint missing');
   });
 
   await test('a dead network is reported as NETWORK', async () => {
@@ -560,11 +567,16 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     providersMod.resolveMedia = async () => { throw new Error('all providers failed'); };
 
     const sock = mockSock();
-    await songCmd.execute(sock, mockMsg('.song https://youtu.be/dQw4w9WgXcQ'), ['https://youtu.be/dQw4w9WgXcQ'], makeExtra(sock));
+    await songCmd.execute(sock, mockMsg('.song https://youtu.be/dQw4w9WgXcQ'), ['https://youtu.be/dQw4w9WgXcQ'], { ...makeExtra(sock), isOwner: false });
 
-    const error = sock.sent.map(textOf).find((t) => /cookies/i.test(t));
-    assert.ok(error, `no cookies hint in: ${JSON.stringify(sock.sent.map(textOf))}`);
-    assert.ok(!/not available in this server's country/i.test(error), 'blamed the region instead');
+    const error = sock.sent.map(textOf).find((t) => /anti-bot|automated access/i.test(t));
+    assert.ok(error, `no bot-check explanation in: ${JSON.stringify(sock.sent.map(textOf))}`);
+    assert.ok(!/\.cookies|\.ytdl/i.test(error), `leaked admin hint to regular user: ${error}`);
+    assert.ok(!/not available in the server's region/i.test(error), 'blamed the region instead');
+
+    const ownerSock = mockSock();
+    await songCmd.execute(ownerSock, mockMsg('.song https://youtu.be/dQw4w9WgXcQ'), ['https://youtu.be/dQw4w9WgXcQ'], makeExtra(ownerSock));
+    assert.ok(ownerSock.sent.map(textOf).some((t) => /cookies/i.test(t)), 'owner missing cookies hint');
   });
 
   await test('.ytv sends the video and honours the quality argument', async () => {
@@ -1076,34 +1088,122 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
   });
 
 
-  console.log('\n── 16b. heap plan (watchdog budget for the running host) ──');
+  console.log('\n── 16b. Phase 1 stability guards ──');
 
-  await test('a 4.5 GB box plans 3900–4200 MB of heap', () => {
-    const { computeHeapMB } = require(path.join(REPO, 'utils/heapPlan.js'));
-    for (const totalMB of [4500, 4608, 4700]) {
-      const { heapMB } = computeHeapMB({ totalMB });
-      assert.ok(heapMB >= 3900 && heapMB <= 4200, `${totalMB} MB box planned ${heapMB} MB`);
-    }
+  await test('index.js has no heap re-exec or broken startAdminServer call', () => {
+    const src = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8');
+    assert.ok(!src.includes('respawnWithBiggerHeap'), 'respawnWithBiggerHeap still in index.js');
+    assert.ok(!src.includes('heapPlan'), 'heapPlan still referenced in index.js');
+    assert.ok(!src.includes('startAdminServer'), 'startAdminServer crash still in index.js');
+    assert.ok(/Session files .* were NOT deleted/i.test(src), 'logout notice missing');
   });
 
-  await test('HEAP_MB is honoured inside the band and capped above it', () => {
-    const { computeHeapMB } = require(path.join(REPO, 'utils/heapPlan.js'));
-    assert.strictEqual(computeHeapMB({ totalMB: 4608, askedMB: 3900 }).heapMB, 3900);
-    assert.strictEqual(computeHeapMB({ totalMB: 4608, askedMB: 4200 }).heapMB, 4200);
-    const over = computeHeapMB({ totalMB: 4608, askedMB: 8000 });
-    assert.strictEqual(over.heapMB, 4200, 'an over-ask must be capped, not trusted');
-    assert.strictEqual(over.capped, true);
-    // small boxes must not be told to use 4 GB
-    assert.ok(computeHeapMB({ totalMB: 2048 }).heapMB < 2048, '2 GB box got an impossible heap');
+  await test('reconnector backs off and retries when startBot() throws', async () => {
+    const { createReconnector, computeBackoffMs } = require(path.join(REPO, 'utils/reconnect.js'));
+    assert.strictEqual(computeBackoffMs(0, { baseMs: 3000, maxMs: 60000 }), 3000);
+    assert.strictEqual(computeBackoffMs(1, { baseMs: 3000, maxMs: 60000 }), 6000);
+    assert.strictEqual(computeBackoffMs(2, { baseMs: 3000, maxMs: 60000 }), 12000);
+    assert.strictEqual(computeBackoffMs(9, { baseMs: 3000, maxMs: 60000 }), 60000);
+
+    const pendingTimers = [];
+    let runs = 0;
+    const rc = createReconnector({
+      baseMs: 100,
+      maxMs: 800,
+      setTimer: (fn, delay) => { const t = { fn, delay }; pendingTimers.push(t); return t; },
+      clearTimer: () => {},
+      start: async () => {
+        runs++;
+        if (runs === 1) throw new Error('transient network error');
+      },
+    });
+
+    assert.strictEqual(rc.schedule(), 100);
+    assert.strictEqual(pendingTimers.length, 1);
+    await pendingTimers.shift().fn(); // fails -> must schedule retry automatically!
+    assert.strictEqual(pendingTimers.length, 1, 'failed reconnect left the bot dead instead of retrying');
+    assert.strictEqual(pendingTimers[0].delay, 200);
+    await pendingTimers.shift().fn(); // succeeds
+    assert.strictEqual(runs, 2);
+    rc.reset();
+    assert.strictEqual(rc.attempts, 0);
   });
 
-  await test('the watchdog budget follows the real heap limit, not RAM×0.9', () => {
-    const { detectLimitMB } = require(path.join(REPO, 'utils/memoryWatchdog.js'));
-    const limit = detectLimitMB();
-    const heapMB = require('v8').getHeapStatistics().heap_size_limit / (1024 * 1024);
-    // within a few MB of the heap limit the process is actually running under
-    assert.ok(Math.abs(limit - heapMB) <= 2 || limit < heapMB,
-      `watchdog budget ${limit} MB does not match heap limit ${Math.round(heapMB)} MB`);
+  await test('atomic JSON store keeps .bak and whitelist never treats corruption as "no users"', () => {
+    const { writeJsonAtomic, readJsonSafe } = require(path.join(REPO, 'utils/jsonStore.js'));
+    const ac = require(path.join(REPO, 'utils/accessControl.js'));
+    const wlFile = path.join(sandbox, 'wl-test.json');
+
+    ac.writeWL({ users: [{ number: '265991112222', addedAt: 1 }] }, { filePath: wlFile });
+    assert.ok(fs.existsSync(`${wlFile}.bak`), '.bak backup was not created');
+
+    // Corrupt primary -> must recover from .bak, NOT return empty users
+    fs.writeFileSync(wlFile, '{corrupt-half-write', 'utf8');
+    const recovered = ac.readWL({ force: true, filePath: wlFile });
+    assert.strictEqual(recovered.users.length, 1);
+    assert.strictEqual(recovered.users[0].number, '265991112222');
+
+    // Corrupt BOTH primary and .bak -> must throw WHITELIST_CORRUPT, never { users: [] }
+    const unrec = path.join(sandbox, 'wl-dead.json');
+    fs.writeFileSync(unrec, '{broken', 'utf8');
+    fs.writeFileSync(`${unrec}.bak`, '{also-broken', 'utf8');
+    assert.throws(() => ac.readWL({ force: true, filePath: unrec }), /WHITELIST_CORRUPT|refusing to treat/);
+
+    // Generic JSON helper test
+    const stateFile = path.join(sandbox, 'state.json');
+    writeJsonAtomic(stateFile, { on: false });
+    fs.writeFileSync(stateFile, '', 'utf8');
+    const res = readJsonSafe(stateFile, { defaultValue: { on: true } });
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.recovered, true);
+    assert.strictEqual(res.data.on, false);
+  });
+
+  await test('.on and .off follow the invoked command name (including disappearing messages)', async () => {
+    const handler = require(path.join(REPO, 'handler.js'));
+    const db = require(path.join(REPO, 'database.js'));
+    const sent = [];
+    const sock = {
+      user: { id: '265894016453:1@s.whatsapp.net' },
+      sendMessage: async (_jid, content) => { sent.push(content); return { key: { id: 'x' } }; },
+    };
+    // Disappearing message container: msg.message.conversation is undefined!
+    await handler.handleMessage(sock, {
+      key: { remoteJid: '265894016453@s.whatsapp.net', id: 'eph-off', fromMe: true },
+      message: { ephemeralMessage: { message: { extendedTextMessage: { text: '.off' } } } },
+    });
+    assert.strictEqual(db.getBotState(), false, '.off inside ephemeralMessage did not turn bot off');
+
+    await handler.handleMessage(sock, {
+      key: { remoteJid: '265894016453@s.whatsapp.net', id: 'eph-on', fromMe: true },
+      message: { ephemeralMessage: { message: { extendedTextMessage: { text: '.on' } } } },
+    });
+    assert.strictEqual(db.getBotState(), true, '.on inside ephemeralMessage did not turn bot on');
+  });
+
+  await test('editing a command message never re-runs the command', async () => {
+    const handler = require(path.join(REPO, 'handler.js'));
+    const sent = [];
+    const sock = {
+      user: { id: '265894016453:1@s.whatsapp.net' },
+      sendMessage: async (_jid, content) => { sent.push(content); return { key: { id: 'x' } }; },
+    };
+    // Direct editedMessage wrapper
+    await handler.handleMessage(sock, {
+      key: { remoteJid: '265894016453@s.whatsapp.net', id: 'edit-1', fromMe: true },
+      message: { editedMessage: { message: { protocolMessage: { editedMessage: { conversation: '.ping' } } } } },
+    });
+    // Ephemeral -> editedMessage wrapper
+    await handler.handleMessage(sock, {
+      key: { remoteJid: '265894016453@s.whatsapp.net', id: 'edit-2', fromMe: true },
+      message: { ephemeralMessage: { message: { editedMessage: { message: { conversation: '.ping' } } } } },
+    });
+    // protocolMessage type 14 (MESSAGE_EDIT)
+    await handler.handleMessage(sock, {
+      key: { remoteJid: '265894016453@s.whatsapp.net', id: 'edit-3', fromMe: true },
+      message: { protocolMessage: { type: 14, editedMessage: { conversation: '.ping' } } },
+    });
+    assert.strictEqual(sent.length, 0, 'an edited message triggered a command reply');
   });
 
   console.log('\n── 17. ffmpeg-free HLS downloader (movies/series core) ──');
@@ -1734,6 +1834,56 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       assert.strictEqual(warnings.length, 1);
     });
 
+    await test('disk guard enforces 9 GB folder budget, flags host-node statfs, and reserves per-job space', () => {
+      const disk = require(path.join(REPO, 'utils', 'diskSpace'));
+      const guard = require(path.join(REPO, 'utils', 'diskGuard'));
+      const fakeRoot = fs.mkdtempSync(path.join(sandbox, 'botroot-'));
+      fs.writeFileSync(path.join(fakeRoot, 'payload.bin'), Buffer.alloc(1024 * 1024, 1)); // 1 MB
+
+      // Host node claims 400 GB free out of 500 GB, while bot quota is 9000 MB
+      const hostNodeStatfs = () => ({ bavail: 400 * 1024, blocks: 500 * 1024, bsize: 1024 * 1024 });
+      const info = disk.inspectDisk(fakeRoot, { rootDir: fakeRoot, budget: 9000, statfsSync: hostNodeStatfs });
+      assert.strictEqual(info.statfsSeesHostNode, true, 'did not detect shared host-node statfs');
+      assert.ok(info.effectiveFreeMB < 9000 && info.effectiveFreeMB > 8990, `unexpected effectiveFreeMB: ${info.effectiveFreeMB}`);
+      assert.match(guard.formatBootComparison(info), /sees host node disk, NOT panel quota/);
+
+      // Concurrent reservation test: two 5 GB movie jobs cannot over-commit a 9 GB budget
+      const r1 = disk.reserveSpace(fakeRoot, 5000, { label: 'movie-1', rootDir: fakeRoot, budget: 9000, statfsSync: hostNodeStatfs });
+      assert.throws(
+        () => disk.reserveSpace(fakeRoot, 5000, { label: 'movie-2', rootDir: fakeRoot, budget: 9000, statfsSync: hostNodeStatfs }),
+        /not enough disk.*reserved by 1 running job/,
+      );
+      r1.release();
+      const r2 = disk.reserveSpace(fakeRoot, 5000, { label: 'movie-2', rootDir: fakeRoot, budget: 9000, statfsSync: hostNodeStatfs });
+      r2.release();
+      disk._clearReservationsForTests();
+    });
+
+    await test('heavy concurrency is capped at 1–2 and boot sweep removes leftover partials', () => {
+      const cfg = require(path.join(REPO, 'config'));
+      const jq = require(path.join(REPO, 'utils', 'jobQueue'));
+      const cleanup = require(path.join(REPO, 'utils', 'cleanup'));
+      assert.ok(cfg.queue.heavy >= 1 && cfg.queue.heavy <= 2, `heavy queue limit ${cfg.queue.heavy} exceeds 1–2`);
+      assert.ok(cfg.movies.queueConcurrency >= 1 && cfg.movies.queueConcurrency <= 2, `movie concurrency ${cfg.movies.queueConcurrency} exceeds 1–2`);
+      assert.ok(jq.stats().heavy.limit <= 2, 'jobQueue heavy limit exceeds 2');
+      assert.strictEqual(cleanup.configuredTempMaxMB(), 2048);
+
+      const bootTemp = fs.mkdtempSync(path.join(sandbox, 'boottemp-'));
+      fs.mkdirSync(path.join(bootTemp, 'movies'), { recursive: true });
+      const partFile = path.join(bootTemp, 'ytv_123.mp4.part');
+      const strandedMovie = path.join(bootTemp, 'movies', 'Dune.1080p.mp4');
+      const keepCache = path.join(bootTemp, 'movies', 'cache.json');
+      fs.writeFileSync(partFile, 'partial');
+      fs.writeFileSync(strandedMovie, 'partial-movie');
+      fs.writeFileSync(keepCache, '{}');
+
+      const swept = cleanup.sweepBootPartials(bootTemp);
+      assert.strictEqual(swept.files, 2);
+      assert.strictEqual(fs.existsSync(partFile), false);
+      assert.strictEqual(fs.existsSync(strandedMovie), false);
+      assert.strictEqual(fs.existsSync(keepCache), true, 'boot sweep deleted cache.json');
+    });
+
     const getFfmpeg = require(path.join(REPO, 'utils', 'ffmpeg'));
     if (getFfmpeg.works()) {
       await test('.movie rejects a downloaded trailer-length file', async () => {
@@ -1829,14 +1979,15 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
         engine.qualityOptions = original;
         selections.clear('q@s.whatsapp.net', 'u@s.whatsapp.net');
       }
-      const list = sent.find((m) => Array.isArray(m.sections));
-      assert.ok(list, 'no quality list message was sent');
-      assert.strictEqual(list.sections[0].rows.length, 2);
-      assert.match(list.sections[0].rows[0].description, /2\.1 GB/);
-      assert.strictEqual(list.sections[0].rows[0].rowId, 'q1080');
+      assert.ok(!sent.some((m) => Array.isArray(m.sections)), 'broken WhatsApp sections list message was sent');
+      assert.ok(sent.some((m) => m.poll && Array.isArray(m.poll.values)), 'quality picker did not send a WhatsApp poll');
+      const body = sent.map((m) => m.text || [m.poll?.name, ...(m.poll?.values || [])].filter(Boolean).join('\n')).join('\n');
+      assert.match(body, /1080p/);
+      assert.match(body, /2\.1 GB/);
+      assert.match(body, /720p/);
     });
 
-    await test('.movie falls back to a numbered list when the client rejects lists', async () => {
+    await test('.movie falls back to a numbered list when the client rejects polls', async () => {
       const original = engine.qualityOptions;
       engine.qualityOptions = async () => ({
         options: [
@@ -1847,7 +1998,7 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       const sent = [];
       const sock = {
         sendMessage: async (_jid, content) => {
-          if (Array.isArray(content.sections)) throw new Error('list messages unsupported');
+          if (content.poll) throw new Error('polls unsupported');
           sent.push(content);
           return { key: { id: 'k' } };
         },
@@ -1863,6 +2014,340 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       const text = sent.map((m) => m.text || '').join('\n');
       assert.match(text, /1\.\*?\s*1080p/);
       assert.match(text, /480p/);
+    });
+
+    await test('Phase 3: encrypted WhatsApp poll votes decrypt & trigger choice, while quoting unrelated messages is ignored', async () => {
+      const crypto = require('crypto');
+      const { proto } = require('@whiskeysockets/baileys');
+      const { hmacSign, aesEncryptGCM } = require('@whiskeysockets/baileys/lib/Utils/crypto');
+
+      let chosen = null;
+      let pollPayload = null;
+      const botJid = '265894016453@s.whatsapp.net';
+      const voterJid = '265997564836@s.whatsapp.net';
+      const sock = {
+        user: { id: '265894016453:12@s.whatsapp.net' },
+        sendMessage: async (_jid, content) => {
+          pollPayload = content.poll;
+          return { key: { id: 'POLL_MSG_1', remoteJid: 'grp@g.us' } };
+        },
+      };
+      const msg = { key: { id: 'REQ_1', remoteJid: 'grp@g.us', participant: voterJid } };
+      const extra = { from: 'grp@g.us', sender: voterJid };
+
+      await selections.sendPollOrText(sock, msg, extra, {
+        pollName: 'Choose quality',
+        optionLabels: ['1080p · ~2.0 GB', '720p · ~900 MB'],
+        fallbackText: 'fallback',
+        items: [{ quality: 1080 }, { quality: 720 }],
+        run: async (_s, _m, _e, item) => { chosen = item; },
+      });
+
+      // 1. Quoting a DIFFERENT message in the group with "2" must NOT hijack the picker
+      assert.strictEqual(
+        selections.match('grp@g.us', voterJid, '2', { quotedMessageId: 'FRIEND_MSG_999' }),
+        null,
+        'quoting a friend hijacked the pending picker',
+      );
+      // 2. Build a real WhatsApp AES-GCM encrypted pollUpdateMessage vote for option #2
+      const optHash = crypto.createHash('sha256').update(pollPayload.values[1], 'utf8').digest();
+      const votePlain = proto.Message.PollVoteMessage.encode({ selectedOptions: [optHash] }).finish();
+      const sign = Buffer.concat([
+        Buffer.from('POLL_MSG_1'),
+        Buffer.from(botJid),
+        Buffer.from(voterJid),
+        Buffer.from('Poll Vote'),
+        Buffer.from([1]),
+      ]);
+      const key0 = hmacSign(pollPayload.messageSecret, new Uint8Array(32), 'sha256');
+      const decKey = hmacSign(sign, key0, 'sha256');
+      const aad = Buffer.from(`POLL_MSG_1\u0000${voterJid}`);
+      const iv = crypto.randomBytes(12);
+      const encPayload = aesEncryptGCM(votePlain, decKey, iv, aad);
+
+      // Stranger voting on someone else's poll is ignored
+      assert.strictEqual(selections.resolvePollVote(sock, {
+        key: { id: 'V_STRANGER', remoteJid: 'grp@g.us', participant: '265111222333@s.whatsapp.net' },
+        message: {
+          pollUpdateMessage: {
+            pollCreationMessageKey: { id: 'POLL_MSG_1', remoteJid: 'grp@g.us' },
+            vote: { encPayload, encIv: iv },
+          },
+        },
+      }), null, 'stranger was allowed to vote on another user poll');
+
+      // Real requester's vote decrypts & resolves option #2, and clears typed fallback
+      const hit = selections.resolvePollVote(sock, {
+        key: { id: 'V_OWNER', remoteJid: 'grp@g.us', participant: voterJid },
+        message: {
+          pollUpdateMessage: {
+            pollCreationMessageKey: { id: 'POLL_MSG_1', remoteJid: 'grp@g.us' },
+            vote: { encPayload, encIv: iv },
+          },
+        },
+      });
+      assert.ok(hit && hit.item.quality === 720, 'encrypted poll vote did not resolve to 720p');
+      await hit.entry.run(sock, msg, extra, hit.item);
+      assert.deepStrictEqual(chosen, { quality: 720 });
+      assert.strictEqual(selections.peek('grp@g.us', voterJid), null, 'poll vote left typed fallback alive');
+
+      // 3. Send failure clears stale choices instead of leaving ghosts
+      selections.offer({ chatId: 'grp@g.us', sender: voterJid, items: [{ a: 1 }], run: () => {} });
+      await assert.rejects(() => selections.sendTextPrompt(
+        { sendMessage: async () => { throw new Error('socket closed'); } },
+        msg,
+        extra,
+        { text: 'hi', items: [{ a: 2 }], run: () => {} },
+      ));
+      assert.strictEqual(selections.peek('grp@g.us', voterJid), null, 'stale choice survived send failure');
+    });
+
+    await test('Phase 3: .series parses "Full House", "9-1-1", and "the boys 2" accurately', () => {
+      const series = require(path.join(REPO, 'commands', 'media', 'series'));
+
+      const fhBare = series._parseArgs(['Full', 'House']);
+      assert.strictEqual(fhBare.title, 'Full House');
+      assert.strictEqual(fhBare.pack, false);
+      assert.strictEqual(fhBare.hasTarget, false);
+
+      const fhEp = series._parseArgs(['Full', 'House', 's01e03', '720']);
+      assert.strictEqual(fhEp.title, 'Full House');
+      assert.strictEqual(fhEp.season, 1);
+      assert.strictEqual(fhEp.from, 3);
+      assert.strictEqual(fhEp.pack, false);
+      assert.strictEqual(fhEp.hasTarget, true);
+      assert.strictEqual(fhEp.quality, 720);
+
+      const n11Bare = series._parseArgs(['9-1-1']);
+      assert.strictEqual(n11Bare.title, '9-1-1');
+      assert.strictEqual(n11Bare.hasTarget, false);
+
+      const n11Range = series._parseArgs(['9-1-1', 's02', '1-5']);
+      assert.strictEqual(n11Range.title, '9-1-1');
+      assert.strictEqual(n11Range.season, 2);
+      assert.strictEqual(n11Range.from, 1);
+      assert.strictEqual(n11Range.to, 5);
+      assert.strictEqual(n11Range.hasTarget, true);
+
+      const boys2 = series._parseArgs(['the', 'boys', '2']);
+      assert.strictEqual(boys2.title, 'the boys');
+      assert.strictEqual(boys2.season, 2);
+      assert.strictEqual(boys2.bareNumber, 2);
+      assert.strictEqual(boys2.hasTarget, true);
+    });
+
+    await test('Phase 3: error sanitizer, per-user cooldown, .paper pagination, .menu/.status/.instagram/.fb/.viewonce, Gifted warning', async () => {
+      const { safeErrorMessage } = require(path.join(REPO, 'utils', 'userErrors'));
+      const handler = require(path.join(REPO, 'handler'));
+      const ac = require(path.join(REPO, 'utils', 'accessControl'));
+      const menu = require(path.join(REPO, 'commands', 'general', 'menu'));
+      const [paperCmd] = require(path.join(REPO, 'commands', 'general', 'paper'));
+      const { loadCommands } = require(path.join(REPO, 'utils', 'commandLoader'));
+      const APIs = require(path.join(REPO, 'utils', 'api'));
+
+      // 1. Raw internal error strings never leak to WhatsApp chat
+      const leaked = safeErrorMessage(new Error('ENOENT: no such file /home/user/neww/secret.json'));
+      assert.ok(!/ENOENT|\/home\/user|secret\.json/.test(leaked), `leaked path: ${leaked}`);
+
+      // 2. Per-user cooldown throttles rapid commands from regular allowed users
+      const wl = ac.readWL();
+      const testUser = '265888111222@s.whatsapp.net';
+      ac.writeWL({ users: [...wl.users, { number: '265888111222', enabled: true }] });
+      handler.resetCooldowns();
+      const sentMsgs = [];
+      const cdSock = {
+        user: { id: '265894016453:1@s.whatsapp.net' },
+        sendMessage: async (_jid, content) => { sentMsgs.push(content); return { key: { id: 'p' } }; },
+      };
+      try {
+        await handler.handleMessage(cdSock, {
+          key: { id: 'cd-1', remoteJid: testUser },
+          message: { conversation: '.ping' },
+        });
+        await handler.handleMessage(cdSock, {
+          key: { id: 'cd-2', remoteJid: testUser },
+          message: { conversation: '.ping' },
+        });
+      } finally {
+        ac.writeWL(wl);
+        handler.resetCooldowns();
+      }
+      const pongs = sentMsgs.filter((m) => /Pinging|Pong/.test(m.text || ''));
+      const waitReacts = sentMsgs.filter((m) => m.react?.text === '⏳');
+      assert.ok(pongs.length >= 1 && waitReacts.length === 1, 'second rapid command was not rate-limited by cooldown');
+
+      // 3. .paper filters false-positive month codes ("APRIL 2023") and paginates .paper browse
+      const parsedApril = paperCmd._parsePaper('APRIL 2023 NURS 2201 END OF SEMESTER.pdf');
+      assert.strictEqual(parsedApril.courseCode, 'NURS');
+      assert.strictEqual(parsedApril.moduleNumber, '2201');
+      assert.ok(paperCmd.MAX_PAPERS_PER_QUERY <= 5, 'papers per query not capped');
+
+      const prevVault = paperCmd._getVaultForTests();
+      const fakeVaultFiles = Array.from({ length: 60 }, (_, idx) => ({
+        id: idx + 1,
+        hash: `h${idx + 1}`,
+        name: `BIOL ${1100 + idx} 2024 END OF SEMESTER.pdf`,
+        size: 1024,
+        created_at: '2025-01-01T00:00:00Z',
+      }));
+      paperCmd._setVaultFilesForTests(fakeVaultFiles);
+      const browseSock = { sendMessage: async () => ({ key: { id: 'b' } }) };
+      let browseOut = '';
+      try {
+        await paperCmd.execute(browseSock, { key: { remoteJid: 'c@s.whatsapp.net' } }, ['browse', 'b'], {
+          from: 'c@s.whatsapp.net',
+          reply: async (t) => { browseOut = t; },
+          status: async () => ({ update: async (t) => { browseOut = t; } }),
+        });
+      } finally {
+        if (prevVault?.files) paperCmd._setVaultFilesForTests(prevVault.files);
+        else paperCmd._setVaultFilesForTests(null);
+      }
+      assert.ok(browseOut.length > 0 && browseOut.length < 4500, `.paper browse b too huge (${browseOut.length} chars)`);
+      assert.match(browseOut, /page 1\/3/i);
+
+      // 4. .menu hides admin + .health from non-owners, fixes .on/.off description, honours prefix & botName
+      const userCard = menu._buildCard(menu._buildGroups('!', { isOwner: false }), 'alice', { prefix: '!', botName: 'CustomBot' });
+      assert.ok(userCard.includes('CustomBot') && userCard.includes('!movie') && userCard.includes('prefix !'));
+      assert.ok(!userCard.includes('ADMIN') && !userCard.includes('.health') && !userCard.includes('!health') && !userCard.includes('refreshpapers'));
+
+      const ownerCard = menu._buildCard(menu._buildGroups('!', { isOwner: true }), 'boss', { prefix: '!', botName: 'CustomBot' });
+      assert.ok(ownerCard.includes('ADMIN') && ownerCard.includes('!status') && ownerCard.includes('enable/disable the bot globally'));
+      assert.ok(!ownerCard.includes('!health') && !ownerCard.includes('.health'));
+
+      // 5. .status is primary with .update alias; .instagram & .fb come from shortcuts; .viewonce is open to allowed users
+      const cmds = loadCommands();
+      assert.strictEqual(cmds.get('status')?.name, 'status');
+      assert.strictEqual(cmds.get('update')?.name, 'status');
+      assert.ok(cmds.get('instagram') && cmds.get('ig') && cmds.get('fb') && cmds.get('facebook'));
+      assert.ok(!cmds.get('viewonce')?.ownerOnly, '.viewonce must remain open to allowed users');
+
+      // 6. Gifted API warns visibly when key is missing/revoked without printing the key
+      const cfg = require(path.join(REPO, 'config'));
+      const savedKey = cfg.giftedApi.apiKey;
+      const warns = [];
+      const origWarn = console.warn;
+      console.warn = (...a) => warns.push(a.join(' '));
+      try {
+        APIs._resetKeyWarnForTests();
+        cfg.giftedApi.apiKey = '';
+        await assert.rejects(() => APIs.getGiftedAudioByUrl('https://youtu.be/dQw4w9WgXcQ'));
+      } finally {
+        cfg.giftedApi.apiKey = savedKey;
+        console.warn = origWarn;
+      }
+      assert.ok(warns.some((w) => /Gifted API fallback failed.*GIFTED_API_KEY/.test(w)), 'missing Gifted key warning');
+    });
+
+    await test('Phase 4: dead files/packages/listeners removed while webtorrent is preserved', () => {
+      for (const removed of [
+        'admin-server.js',
+        'utils/heapPlan.js',
+        'utils/memoryWatchdog.js',
+        'commands/media/instagram.js',
+        'commands/media/facebook.js',
+        'engine/core/locker.js',
+      ]) {
+        assert.strictEqual(fs.existsSync(path.join(REPO, removed)), false, `${removed} should be deleted`);
+      }
+      const pkg = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+      assert.ok(!pkg.dependencies?.['ruhend-scraper'], 'ruhend-scraper still in dependencies');
+      assert.ok(!pkg.devDependencies?.nodemon, 'nodemon still in devDependencies');
+      assert.ok(!pkg.scripts?.['install:no-puppeteer'] && !pkg.scripts?.check && !pkg.scripts?.dev, 'unused scripts remain');
+      assert.ok(pkg.optionalDependencies?.webtorrent, 'webtorrent must remain in optionalDependencies');
+
+      const idxSrc = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8');
+      assert.ok(!idxSrc.includes('cleanupPuppeteerCache'), 'Puppeteer cache cleanup still in index.js');
+      assert.ok(!idxSrc.includes('store.bind'), 'in-memory store still in index.js');
+      assert.ok(!idxSrc.includes('message-receipt.update'), 'empty receipt listener still in index.js');
+      assert.ok(!idxSrc.includes("sock.ev.on('messages.update'"), 'empty messages.update listener still in index.js');
+    });
+
+    await test('Phase 5: adminApi CORS allowlist, dashboard JWT guard, local D1 auth, rate-limit, fast offline probe', async () => {
+      const { startAdminApi } = require(path.join(REPO, 'utils/adminApi.js'));
+      const port = 3390 + Math.floor(Math.random() * 500);
+      const api = startAdminApi({
+        port,
+        token: 'cors-test-token',
+        allowedOrigins: ['https://portal.example.com'],
+        hooks: { status: async () => ({ connected: true, botNumber: '265991234567' }) },
+      });
+      try {
+        await new Promise((r) => setTimeout(r, 80));
+        // Server-to-server: no wildcard CORS
+        const s2s = await fetch(`http://127.0.0.1:${port}/admin/api/status`, {
+          headers: { Authorization: 'Bearer cors-test-token' },
+        });
+        assert.strictEqual(s2s.status, 200);
+        assert.strictEqual(s2s.headers.get('access-control-allow-origin'), null);
+
+        // Disallowed browser origin preflight -> 403
+        const badPreflight = await fetch(`http://127.0.0.1:${port}/admin/api/status`, {
+          method: 'OPTIONS',
+          headers: { Origin: 'https://evil.example.org' },
+        });
+        assert.strictEqual(badPreflight.status, 403);
+
+        // Allowed browser origin -> echoed origin + Vary: Origin
+        const okOrigin = await fetch(`http://127.0.0.1:${port}/admin/api/status`, {
+          headers: {
+            Authorization: 'Bearer cors-test-token',
+            Origin: 'https://portal.example.com',
+          },
+        });
+        assert.strictEqual(okOrigin.status, 200);
+        assert.strictEqual(okOrigin.headers.get('access-control-allow-origin'), 'https://portal.example.com');
+        assert.match(String(okOrigin.headers.get('vary')), /Origin/i);
+      } finally {
+        await api.stop();
+      }
+
+      const jwtSrc = fs.readFileSync(path.join(REPO, 'dashboard/lib/jwt.ts'), 'utf8');
+      assert.match(jwtSrc, /JWT_SECRET_KEY environment variable is required in production/);
+      assert.ok(fs.existsSync(path.join(REPO, 'dashboard/instrumentation.ts')));
+      assert.ok(fs.existsSync(path.join(REPO, 'dashboard/scripts/check-prod-env.mjs')));
+
+      const authSrc = fs.readFileSync(path.join(REPO, 'dashboard/lib/auth-engine.ts'), 'utf8');
+      assert.ok(!authSrc.includes('bloody-brigitta-ahzafar'), 'hardcoded Koyeb URL still in auth-engine.ts');
+
+      const loginSrc = fs.readFileSync(path.join(REPO, 'dashboard/app/api/auth/login/route.ts'), 'utf8');
+      assert.match(loginSrc, /checkRateLimit/);
+      assert.match(loginSrc, /status:\s*429/);
+
+      const proxySrc = fs.readFileSync(path.join(REPO, 'dashboard/lib/bot-proxy.ts'), 'utf8');
+      assert.match(proxySrc, /STATUS_TIMEOUT_MS\s*=\s*3_000/);
+    });
+
+    await test('Phase 6 & Secrets: CI selftest gate, Procfile alignment, log redaction, and clean config defaults', async () => {
+      const pkg = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+      const procfile = fs.readFileSync(path.join(REPO, 'Procfile'), 'utf8').trim();
+      assert.strictEqual(procfile, `web: ${pkg.scripts.start}`, 'Procfile and package.json start script drifted');
+
+      const wf = fs.readFileSync(path.join(REPO, '.github/workflows/deploy-panel.yml'), 'utf8');
+      assert.match(wf, /npm ci/);
+      assert.match(wf, /npm run selftest/);
+      assert.match(wf, /needs:\s*selftest/);
+      assert.match(wf, /database\/\*\.json/);
+      assert.ok(!wf.includes('"http://$BASE_HOST"'), 'deploy workflow must not try cleartext HTTP with PANEL_API_KEY');
+
+      const { redactSecrets } = require(path.join(REPO, 'utils/safeLog.js'));
+      const dirty =
+        'Authorization: Bearer superSecretToken12345 ptlc_abcdef1234567890 token=mySecret99 ' +
+        '58989|qn4Jom8CnuscD7WDvp7FHLH3v1B7dzNOYgCe0l3i372d67fe http://user:myPass@proxy.local:8080';
+      const clean = redactSecrets(dirty);
+      assert.ok(!clean.includes('superSecretToken12345'), 'Bearer token leaked');
+      assert.ok(!clean.includes('abcdef1234567890'), 'ptlc_ key leaked');
+      assert.ok(!clean.includes('mySecret99'), 'query token leaked');
+      assert.ok(!clean.includes('qn4Jom8Cnusc'), 'Sanctum token leaked');
+      assert.ok(!clean.includes('myPass'), 'proxy password leaked');
+
+      const cfgSrc = fs.readFileSync(path.join(REPO, 'config.js'), 'utf8');
+      const engCfgSrc = fs.readFileSync(path.join(REPO, 'engine/config.js'), 'utf8');
+      for (const leaked of ['_0u5aff45', '98bb6b66ece431fbea8a0ee9c18ac712', 'qn4Jom8Cnusc']) {
+        assert.ok(!cfgSrc.includes(leaked), `hardcoded key still in config.js: ${leaked}`);
+        assert.ok(!engCfgSrc.includes(leaked), `hardcoded key still in engine/config.js: ${leaked}`);
+      }
+      assert.strictEqual(require(path.join(REPO, 'config.js')).pairNumber, '');
     });
 
     await test('nothing is cached: a delivered movie file is deleted', async () => {

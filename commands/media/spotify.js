@@ -75,9 +75,10 @@ module.exports = {
     } catch (e) {
       console.error('[spotify] error:', e.message);
       await react('❌');
+      const isOwner = Boolean(extra?.isOwner);
       const hint = e.code === 'SPOTIFY_META'
-        ? `❌ Could not read that Spotify link (${e.message}).\nMake sure it is a public track link, or use \`.song <artist - title>\`.`
-        : YT.friendlyError(e);
+        ? `❌ Could not read that Spotify link.\nMake sure it is a public track link, or use \`${config.prefix}song <artist - title>\`.`
+        : YT.friendlyError(e, { isOwner });
       return update(hint);
     }
   },

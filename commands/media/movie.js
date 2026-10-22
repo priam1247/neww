@@ -16,6 +16,7 @@ const selections = require('../../utils/selections');
 const host = require('../../utils/movieHost');
 const { getTempDir } = require('../../utils/tempManager');
 const diskSpace = require('../../utils/diskSpace');
+const { safeErrorMessage } = require('../../utils/userErrors');
 const { probeMedia } = require('../../utils/mediaTransfer');
 const logger = require('../../utils/logger');
 const log = logger('movie');
@@ -95,9 +96,12 @@ async function assertFullLength(file, runtimeMin, kind = 'movie') {
   return duration;
 }
 
-/** First two lines of an error — never a wall of text. */
-const shortError = (e) =>
-  `❌ ${String(e && e.message ? e.message : e).split('\n').filter(Boolean).slice(0, 2).join('\n')}`;
+/** Safe error summary for chat — never forwards raw internal error text. */
+const shortError = (e, extra) =>
+  safeErrorMessage(e, {
+    isOwner: Boolean(extra?.isOwner),
+    fallback: '❌ Could not search movie sources right now. Please try again shortly.',
+  });
 
 /**
  * Resolve + download, retrying with the failed provider excluded.
@@ -124,15 +128,20 @@ async function fetchSource(meta, quality, attempts = 3) {
 
     const dest = await engine.targetFile(meta.title, meta.year, quality, null, null);
     let downloadedFile = dest;
-    diskSpace.requireMovieSpace(getTempDir(), resolved.sizeMB, MOVIES());
+    const reservation = diskSpace.reserveMovieSpace(getTempDir(), resolved.sizeMB, MOVIES(), {
+      label: `movie:${meta.title}`,
+      tagDir: path.dirname(dest),
+      tagPrefix: path.basename(dest, path.extname(dest)),
+    });
     try {
       const saved = await engine.download(resolved, dest);
       // HLS sources may land as .ts (no ffmpeg on the host) — use the real path
       const file = downloadedFile = (saved && saved.file) || dest;
       const full = resolved.meta || meta;
       await assertFullLength(file, full.runtime, 'movie');
-      return { res: resolved, file };
+      return { res: resolved, file, reservation };
     } catch (e) {
+      reservation.release();
       lastErr = e;
       log.warn(`${meta.title} ${quality}p · ${resolved.provider} download failed · ${e.message}`);
       exclude.push(resolved.provider);
@@ -146,24 +155,23 @@ async function fetchSource(meta, quality, attempts = 3) {
 }
 
 /**
- * Render EVERY match in one message and offer a numbered pick.
- * A vague title ("spiderman") returns a dozen films — showing all of them beats
- * silently downloading the first hit, and beats several messages.
+ * Offer title choices via a WhatsApp Poll (up to 12 matches), falling back
+ * automatically to a numbered list when >12 matches or when polls fail.
  */
 async function offerChoices(sock, msg, extra, matches, job, kind) {
-  const lines = matches.map((m, i) => {
+  const optionLabels = matches.map((m) => {
     const year = m.year ? ` (${m.year})` : '';
     const rating = Number(m.rating) ? ` ⭐${m.rating}` : '';
-    return `*${i + 1}.* ${m.title}${year}${rating}`;
+    return `${m.title}${year}${rating}`;
   });
-  const text = `🎬 *${matches.length} ${kind === 'series' ? 'series' : 'movies'}* for *${job.title}*`
-    + `\n\n${lines.join('\n')}\n\n_reply with a number_`;
+  const lines = optionLabels.map((lbl, i) => `*${i + 1}.* ${lbl}`);
+  const header = `🎬 *${matches.length} ${kind === 'series' ? 'series' : 'movies'}* for *${job.title}*`;
+  const fallbackText = `${header}\n\n${lines.join('\n')}\n\n_reply with a number_`;
 
-  await sock.sendMessage(extra.from, { text }, { quoted: msg });
-
-  selections.offer({
-    chatId: extra.from,
-    sender: extra.sender || msg.key.participant || extra.from,
+  await selections.sendPollOrText(sock, msg, extra, {
+    pollName: `${header}\nTap a title (or reply with its number):`,
+    optionLabels,
+    fallbackText,
     items: matches,
     label: kind,
     ttlMs: 5 * 60 * 1000,
@@ -176,13 +184,12 @@ const fmtSize = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.r
 /**
  * Ask which quality to fetch, with the real size of each source.
  *
- * Sends a WhatsApp list (tap a row); when that message type is not accepted by
- * the connected client it falls back to the same options as a numbered text.
- * Both paths land in utils/selections, so a tap and a typed number are the same.
+ * Sends a WhatsApp Poll (tap an option) and also registers a typed-number
+ * fallback in `utils/selections` — if the client rejects polls it falls back
+ * to a numbered text card automatically.
  */
 async function askQuality(sock, msg, extra, meta, job) {
   const react = (emoji) => sock.sendMessage(extra.from, { react: { text: emoji, key: msg.key } }).catch(() => {});
-  const say = (text) => sock.sendMessage(extra.from, { text }, { quoted: msg });
 
   if (job.explicitQuality) return deliver(sock, msg, extra, meta, job);
 
@@ -204,10 +211,13 @@ async function askQuality(sock, msg, extra, meta, job) {
   const items = options.map((o) => ({ ...o, meta }));
   const title = `${meta.title}${meta.year ? ` (${meta.year})` : ''}`;
   const header = `🎬 *${title}*\nChoose the quality:`;
+  const optionLabels = options.map((o) => `${o.quality}p${o.sizeMB ? ` · ~${fmtSize(o.sizeMB)}` : ''}`);
+  const lines = optionLabels.map((lbl, i) => `*${i + 1}.* ${lbl}`);
 
-  selections.offer({
-    chatId: extra.from,
-    sender: extra.sender || msg.key.participant || extra.from,
+  await selections.sendPollOrText(sock, msg, extra, {
+    pollName: header,
+    optionLabels,
+    fallbackText: `${header}\n\n${lines.join('\n')}\n\n_reply with a number_`,
     items,
     ids,
     label: 'quality',
@@ -217,28 +227,6 @@ async function askQuality(sock, msg, extra, meta, job) {
       return deliver(sock2, msg2, extra2, meta, job);
     },
   });
-
-  const rows = options.map((o, i) => ({
-    title: `${o.quality}p`,
-    description: `${o.sizeMB ? `~${fmtSize(o.sizeMB)}` : 'size unknown'} · ${o.candidates} source${o.candidates > 1 ? 's' : ''}`,
-    rowId: ids[i],
-  }));
-
-  try {
-    await sock.sendMessage(extra.from, {
-      text: header,
-      footer: 'Tap a quality, or reply with its number',
-      title: 'Quality',
-      buttonText: 'Choose quality',
-      sections: [{ title, rows }],
-    }, { quoted: msg });
-    return;
-  } catch (e) {
-    log.debug(`list message rejected (${e.message}) — using a numbered list`);
-  }
-
-  const lines = options.map((o, i) => `*${i + 1}.* ${o.quality}p${o.sizeMB ? ` · ~${fmtSize(o.sizeMB)}` : ''}`);
-  await say(`${header}\n\n${lines.join('\n')}\n\n_reply with a number_`);
 }
 
 /**
@@ -273,10 +261,12 @@ async function deliver(sock, msg, extra, meta, job) {
   const say = (text) => sock.sendMessage(chatId, { text }, { quoted: msg });
 
   await react('⏳');
+  let activeReservation = null;
+  let activeFile = null;
 
   try {
-    // resolve + download inside ONE queue slot: concurrency stays 1, so a
-    // second movie waits instead of competing for bandwidth/disk
+    // resolve + download inside ONE queue slot: concurrency stays bounded, so a
+    // second movie cannot over-commit bandwidth or disk
     log.info(`${meta.title}${meta.year ? ` (${meta.year})` : ''} · ${quality}p · start`);
     const t0 = Date.now();
     const jobResult = await engine.enqueue(
@@ -286,7 +276,9 @@ async function deliver(sock, msg, extra, meta, job) {
       { timeoutMs: MOVIES().jobTimeoutMs }
     );
 
-    const { res, file } = jobResult;
+    const { res, file, reservation } = jobResult;
+    activeReservation = reservation || null;
+    activeFile = file || null;
 
     if (MOVIES().dryRun) {
       await react('🔗');
@@ -311,6 +303,7 @@ async function deliver(sock, msg, extra, meta, job) {
     await trySubtitles(sock, chatId, msg, meta);
     // The chat has the file now — delete it, nothing is cached.
     await host.release(file).catch(() => false);
+    activeFile = null;
     await react('✅');
   } catch (e) {
     // full message: the logger collapses the bullets onto one line, so the
@@ -328,8 +321,13 @@ async function deliver(sock, msg, extra, meta, job) {
     if (e.code === 'SHORT' || /trailer\/fake/.test(String(e.message))) {
       return say(`❌ Only a trailer/fake clip of ${matched} is out there right now — no full-length copy yet.`);
     }
-    if (e.code === 'NOT_ENOUGH_DISK') return say(`❌ ${e.message}`);
+    if (e.code === 'NOT_ENOUGH_DISK') {
+      return say(safeErrorMessage(e, { isOwner: Boolean(extra?.isOwner) }));
+    }
     await say(`❌ No source for ${matched}.${hint}`);
+  } finally {
+    if (activeFile) await host.release(activeFile).catch(() => false);
+    activeReservation?.release?.();
   }
 }
 
@@ -363,7 +361,7 @@ module.exports = {
       return offerChoices(sock, msg, extra, matches, job, 'movie');
     } catch (e) {
       log.error(`${job.title || 'search'} · ${e.code || 'FAIL'} · ${String(e.message).split('\n')[0]}`);
-      return extra.reply(shortError(e));
+      return extra.reply(shortError(e, extra));
     }
   },
 

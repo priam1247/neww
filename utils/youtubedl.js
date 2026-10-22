@@ -444,6 +444,8 @@ function cookieFile() {
 
 // ─── PROXY ────────────────────────────────────────────────────────────────────
 
+const { maskUrlCredentials } = require('./safeLog');
+
 const proxyUrl = () => {
   const cfg = config.ytdlp || {};
   // Runtime setting (.ytdl proxy) wins over config/environment.
@@ -719,35 +721,57 @@ const isRetryable = (code) => RETRY_CODES.has(code);
 
 // ─── USER-FACING MESSAGES ─────────────────────────────────────────────────────
 
-const HINTS = {
+const USER_HINTS = {
   NO_AUDIO: '❌ The download carries no audio track — refusing to send a silent video. Try another link or quality.',
-  NO_YTDLP: '❌ *yt-dlp* is not installed and could not be auto-installed on this host.\nFix: `pip install -U yt-dlp`, or run `.ytdl repair`.',
-  BOT_CHECK: '❌ YouTube asked this server to prove it is *not a bot* — this is the normal wall for VPS/hosting IPs, **not** a region block.\nFix: `.cookies set` (add a YouTube cookies.txt) — that cures it in ~95% of cases. Or set a proxy: `.ytdl proxy <url>`.',
-  AGE_RESTRICTED: '❌ This video is age-restricted, so YouTube wants a signed-in session.\nFix: add cookies with `.cookies set` and try again.',
-  GEO_BLOCK: '❌ YouTube really does geo-block this video for the server\'s country (the only failure that is *truly* regional).\nFix: try another video, or set a proxy in that country: `.ytdl proxy <url>`.',
+  NO_YTDLP: '❌ The media downloader is temporarily unavailable on this server. Please try again later.',
+  BOT_CHECK: '❌ YouTube temporarily blocked automated access for this video (anti-bot check, not a region block). Please try again shortly or try another link.',
+  AGE_RESTRICTED: '❌ This video is age-restricted on YouTube and cannot be downloaded right now.',
+  GEO_BLOCK: '❌ This video is not available in the server\'s region.',
   PRIVATE: '❌ This video is private — only its owner can download it.',
   MEMBERS_ONLY: '❌ This video is members-only (paid channel membership).',
   LIVE_EVENT: '❌ This is a live stream or a not-yet-started premiere. Only normal videos can be downloaded.',
   DRM: '❌ This video is DRM-protected — no downloader can fetch it.',
-  PO_TOKEN: '❌ YouTube wants a "PO token" for this video (an anti-bot requirement).\nFix: update yt-dlp (`.ytdl update`) and add cookies (`.cookies set`).',
+  PO_TOKEN: '❌ YouTube blocked automated access to this stream right now. Please try another link.',
   UNAVAILABLE: '❌ This video is unavailable — deleted, removed by the uploader, or a dead link.',
   TOO_LONG: '❌ That media is longer than the limit this bot allows.',
-  TOO_BIG: '❌ That file is bigger than the size limit set for this bot — try a lower quality (e.g. `.ytv <link> 360`).',
-  FFMPEG_MISSING: '❌ *ffmpeg* is missing on this host, so the audio/video cannot be converted.\nFix: `apt install ffmpeg` (Termux: `pkg install ffmpeg`), or run `npm install` to install the packaged fallback.',
-  UNSUPPORTED_URL: '❌ That link is not a media page the downloader understands (or the site is not supported).\nSupported: YouTube, TikTok, Instagram, Facebook, X/Twitter, Reddit, SoundCloud and ~1000 more — paste the link to the *post/video*, not to a profile or a search page.',
-  NO_FORMATS: '❌ YouTube returned no downloadable stream for that video. Try a different quality (e.g. 360p) or another video.',
-  IMPERSONATE: '❌ This yt-dlp build cannot impersonate a browser on this host.',
-  BAD_ARGS: '❌ The yt-dlp build on this host does not support one of the options the bot used.\nFix: `.ytdl update` (or `.ytdl repair`) to install a current build.',
-  RATE_LIMIT: '❌ YouTube is rate-limiting this server (HTTP 429). Wait a few minutes and try again.',
-  NETWORK: '❌ The host could not reach YouTube (network/DNS/TLS/timeout).\nThis is a problem with the *server\'s internet*, not the video — check the host\'s connection, or set a proxy: `.ytdl proxy <url>`.',
-  UNKNOWN: '❌ Download failed. Run `.ytdl` to see what the host reported, then try again.',
+  TOO_BIG: '❌ That file is bigger than the size limit set for this bot — try a lower quality.',
+  FFMPEG_MISSING: '❌ Media conversion is temporarily unavailable on this server.',
+  UNSUPPORTED_URL: '❌ That link is not a media page the downloader understands (or the site is not supported).\nSupported: YouTube, TikTok, Instagram, Facebook, X/Twitter, Reddit, SoundCloud and ~1000 more — paste the link to the *post/video*, not to a profile or search page.',
+  NO_FORMATS: '❌ No downloadable stream was returned for that video. Try a different quality (e.g. 360p) or another video.',
+  IMPERSONATE: '❌ That site rejected automated requests from this server.',
+  BAD_ARGS: '❌ The media downloader on this server needs an update. Please try again later.',
+  RATE_LIMIT: '❌ YouTube is rate-limiting requests right now (HTTP 429). Wait a few minutes and try again.',
+  NETWORK: '❌ Could not reach the media site right now (network timeout). Please try again in a moment.',
+  UNKNOWN: '❌ Download failed. Please check the link and try again.',
 };
 
-/** Accurate, actionable message for any error thrown by this module. */
-function friendlyError(err) {
+const OWNER_HINTS = {
+  NO_YTDLP: 'Admin fix: run `.ytdl repair` or `pip install -U yt-dlp`.',
+  BOT_CHECK: 'Admin fix: `.cookies set` (YouTube cookies.txt) or `.ytdl proxy <url>`.',
+  AGE_RESTRICTED: 'Admin fix: add cookies with `.cookies set`.',
+  GEO_BLOCK: 'Admin fix: `.ytdl proxy <url>`.',
+  PO_TOKEN: 'Admin fix: `.ytdl update` and `.cookies set`.',
+  FFMPEG_MISSING: 'Admin fix: install `ffmpeg` on the host.',
+  BAD_ARGS: 'Admin fix: `.ytdl update` or `.ytdl repair`.',
+  NETWORK: 'Admin fix: check server internet or `.ytdl proxy <url>`.',
+  UNKNOWN: 'Admin fix: run `.ytdl` to inspect the last failure.',
+};
+
+/**
+ * Accurate, safe message for any error thrown by this module.
+ * Admin-only hints (`.cookies set`, `.ytdl proxy`) are ONLY shown when
+ * `opts.isOwner === true`; regular users get plain non-technical messages and
+ * never see raw yt-dlp stderr lines.
+ *
+ * @param {any} err
+ * @param {{ isOwner?: boolean }} [opts]
+ */
+function friendlyError(err, { isOwner = false } = {}) {
   const info = classify(err);
-  const extra = info && info.detail ? `\n_${String(info.detail).slice(0, 160)}_` : '';
-  return (HINTS[info.code] || HINTS.UNKNOWN) + extra;
+  const base = USER_HINTS[info.code] || USER_HINTS.UNKNOWN;
+  if (!isOwner) return base;
+  const ownerTip = OWNER_HINTS[info.code] ? `\n${OWNER_HINTS[info.code]}` : '';
+  return base + ownerTip;
 }
 
 /** One-line summary of every engine that was tried (for the final error). */
@@ -1345,7 +1369,7 @@ async function diagnostics() {
     cookieSource: ci.source,
     cookieCount: ci.count,
     cookieAgeMs: ci.mtime ? Date.now() - ci.mtime : null,
-    proxy: proxyUrl() || null,
+    proxy: maskUrlCredentials(proxyUrl()) || null,
     capabilities: {
       version: caps.version,
       impersonate: caps.impersonate && !caps.impersonateBroken,

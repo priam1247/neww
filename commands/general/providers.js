@@ -68,7 +68,8 @@ const providersCommand = {
 
       return extra.reply(text);
     } catch (e) {
-      return extra.reply(`❌ ${String(e.message || '').split('\n')[0]}`);
+      console.error('[providers] error:', e.message);
+      return extra.reply('❌ Could not read provider status right now.');
     }
   },
 };
@@ -92,7 +93,9 @@ const statusCommand = {
       const minutes = Math.floor((stats.uptimeMs || 0) / 60000);
       // what the panel disk is actually holding, and whether files outlive a send
       const { tempUsage } = require('../../utils/cleanup');
+      const { inspectDisk } = require('../../utils/diskSpace');
       const tempMB = tempUsage() / 1048576;
+      const d = inspectDisk();
       const retention = 'delete after send (no cache)';
 
       const text = [
@@ -108,6 +111,7 @@ const statusCommand = {
         `verify      ${g('verify.ok')} ok / ${g('verify.fail')} reject`,
         `cache hits  disk ${g('cache.disk')} · link ${g('cache.link')} · meta ${g('cache.meta')}`,
         `cache files ${cache.files} (${(cache.bytes / 1073741824).toFixed(2)} GB) · active ${cache.active}`,
+        `bot folder  ${d.folderUsedMB.toFixed(1)} / ${d.budgetMB} MB (${d.reservedMB.toFixed(0)} MB reserved)`,
         `temp disk   ${tempMB.toFixed(1)} MB · ${retention}`,
         `downloads   ${(g('download.bytes') / 1073741824).toFixed(2)} GB`,
         '```',
@@ -115,7 +119,8 @@ const statusCommand = {
 
       return extra.reply(text);
     } catch (e) {
-      return extra.reply(`❌ ${String(e.message || '').split('\n')[0]}`);
+      console.error('[moviestatus] error:', e.message);
+      return extra.reply('❌ Could not read movie engine counters right now.');
     }
   },
 };

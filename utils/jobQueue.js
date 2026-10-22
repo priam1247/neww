@@ -23,7 +23,7 @@ const limitFor = (name, fallback) => Math.max(1, Math.floor(Number(config.queue?
 
 const lanes = {
   light: { fallback: 20, running: 0, waiters: [] },
-  heavy: { fallback: 4, running: 0, waiters: [] },
+  heavy: { fallback: 2, running: 0, waiters: [] },
 };
 
 const minFreeBytes = () => Math.max(0, Number(config.queue?.minFreeMB) || 0) * 1024 * 1024;

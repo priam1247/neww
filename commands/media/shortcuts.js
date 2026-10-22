@@ -1,19 +1,34 @@
 /**
- * ZaFar Bot — site shortcuts: .tiktok / .x / .pinterest
+ * ZaFar Bot — site shortcuts: .tiktok / .x / .pinterest / .instagram / .fb
  *
- * Thin wrappers around the shared pipeline (utils/mediaPipeline.js). They exist
- * so the common links need no arguments and no thinking:
+ * Thin wrappers around the shared pipeline (`utils/mediaPipeline.js`), which
+ * streams every file directly to disk instead of buffering in RAM and cleans
+ * up temp files immediately after sending:
  *
  *   .tiktok <link> [quality]      .tt
  *   .x <link> [quality]           .twitter .xtwitter
  *   .pinterest <link>             .pin     (sends the image when it is an image)
- *
- * Each one validates its own domain first — pasting the wrong link into the
- * wrong shortcut produces a clear answer instead of a mysterious error.
+ *   .instagram <link>             .ig .insta .igdl .reels
+ *   .fb <link> [quality]          .fbdl .facebookdl .facebook
  */
 
+const config = require('../../config');
 const YT = require('../../utils/youtubedl');
 const { downloadAndSend, parseOptions } = require('../../utils/mediaPipeline');
+
+function quotedTextOf(msg) {
+  const ctx = msg?.message?.extendedTextMessage?.contextInfo
+    || msg?.message?.ephemeralMessage?.message?.extendedTextMessage?.contextInfo;
+  const q = ctx?.quotedMessage;
+  if (!q) return '';
+  return (
+    q.conversation ||
+    q.extendedTextMessage?.text ||
+    q.imageMessage?.caption ||
+    q.videoMessage?.caption ||
+    ''
+  );
+}
 
 const makeCommand = ({ name, aliases, description, usage, domains, hostLabel, label, defaultKind = 'video' }) => ({
   name,
@@ -25,24 +40,30 @@ const makeCommand = ({ name, aliases, description, usage, domains, hostLabel, la
   async execute(sock, msg, args, extra) {
     const chatId = extra?.from || msg.key.remoteJid;
     const say = (text) => sock.sendMessage(chatId, { text }, { quoted: msg });
+    const P = config.prefix || '.';
 
     const { kind, height, rest } = parseOptions(args, { kind: defaultKind });
-    const url = YT.extractUrl(rest.join(' ').trim());
+    const url = YT.extractUrl(rest.join(' ').trim()) || YT.extractUrl(quotedTextOf(msg));
 
-    if (!url) return say(`Usage: ${usage}\nExample: .${name} https://...`);
+    if (!url) {
+      return say(`Usage: ${P}${usage.replace(/^\./, '')}\nExample: ${P}${name} https://...`);
+    }
 
     const known = domains.some((d) => url.toLowerCase().includes(d));
     if (!known) {
-      // Not this site — hand it to the universal command instead of failing.
       await say(`ℹ️ That is not a ${hostLabel} link — using the general downloader.`);
     }
+
+    const imageUrl = /\.(?:avif|gif|jpe?g|png|webp)(?:[?#]|$)/i.test(url);
+    const lane = kind === 'audio' || kind === 'image' || imageUrl ? 'light' : 'heavy';
 
     return downloadAndSend(sock, msg, extra, {
       url,
       kind,
       height,
+      lane,
       attempts: [{ engine: `${label} chain`, code: known ? 'OK' : 'HOST_MISMATCH' }],
-    }); // the pipeline replies with the real reason itself
+    });
   },
 });
 
@@ -73,5 +94,23 @@ module.exports = [
     usage: '.pinterest <Pinterest link>',
     domains: ['pinterest.', 'pin.it'],
     hostLabel: 'Pinterest',
+  }),
+  makeCommand({
+    name: 'instagram',
+    aliases: ['ig', 'insta', 'igdl', 'reels'],
+    label: 'instagram',
+    description: 'Download Instagram reels, videos, or photos',
+    usage: '.instagram <Instagram link>',
+    domains: ['instagram.com', 'instagr.am', 'ddinstagram.com'],
+    hostLabel: 'Instagram',
+  }),
+  makeCommand({
+    name: 'fb',
+    aliases: ['fbdl', 'facebookdl', 'facebook'],
+    label: 'facebook',
+    description: 'Download a Facebook video or reel',
+    usage: '.fb <Facebook video link>',
+    domains: ['facebook.com', 'fb.watch', 'fb.com', 'm.facebook.com'],
+    hostLabel: 'Facebook',
   }),
 ];

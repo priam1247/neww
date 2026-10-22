@@ -4,20 +4,33 @@ import {
   getAuthenticatedSession,
   updateUserDisplayName,
 } from '@/lib/auth-engine';
-import { attachSessionCookie } from '@/lib/jwt';
+import { attachSessionCookie, JwtConfigError } from '@/lib/jwt';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
-  const session = await getAuthenticatedSession(req);
-  if (!session) {
-    return NextResponse.json({ authenticated: false, user: null }, { status: 401 });
+  try {
+    const session = await getAuthenticatedSession(req);
+    if (!session) {
+      return NextResponse.json(
+        { authenticated: false, user: null },
+        { status: 401 },
+      );
+    }
+    return NextResponse.json({
+      authenticated: true,
+      user: session.user,
+      quota: session.quota,
+    });
+  } catch (err) {
+    if (err instanceof JwtConfigError) {
+      return NextResponse.json({ error: err.message }, { status: 503 });
+    }
+    return NextResponse.json(
+      { authenticated: false, user: null },
+      { status: 401 },
+    );
   }
-  return NextResponse.json({
-    authenticated: true,
-    user: session.user,
-    quota: session.quota,
-  });
 }
 
 export async function PATCH(req: NextRequest) {
@@ -34,6 +47,9 @@ export async function PATCH(req: NextRequest) {
     const res = NextResponse.json({ ok: true, user, token: sessionToken });
     return attachSessionCookie(res, sessionToken);
   } catch (err) {
+    if (err instanceof JwtConfigError) {
+      return NextResponse.json({ error: err.message }, { status: 503 });
+    }
     if (err instanceof AuthServiceError) {
       return NextResponse.json({ error: err.message }, { status: err.status });
     }

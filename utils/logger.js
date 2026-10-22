@@ -13,6 +13,8 @@
 
 'use strict';
 
+const { redactSecrets } = require('./safeLog');
+
 const LEVELS = { debug: 20, info: 30, warn: 40, error: 50 };
 const LEVEL = LEVELS[String(process.env.LOG_LEVEL || 'info').toLowerCase()] || LEVELS.info;
 
@@ -33,8 +35,8 @@ const render = (v) => {
   return String(v);
 };
 
-/** Trim to one line: panel logs are useless when a message wraps 40 rows. */
-const oneLine = (s) => String(s).replace(/\s*\n\s*/g, ' ⏎ ').slice(0, 500);
+/** Trim to one line and redact credentials so panel logs never leak secrets. */
+const oneLine = (s) => redactSecrets(String(s)).replace(/\s*\n\s*/g, ' ⏎ ').slice(0, 500);
 
 function emit(level, tag, parts) {
   if (LEVELS[level] < LEVEL) return;

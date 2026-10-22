@@ -1,9 +1,9 @@
 /**
  * API Integration Utilities
  *
- * Remote downloader fallbacks for .song / .ytv / .fb. These are only used when
- * yt-dlp cannot do the job — every failure reason is collected so the bot can
- * tell the user *why* the backup source failed too.
+ * Remote downloader fallbacks for .song / .ytv. Only used when yt-dlp cannot
+ * do the job — every failure reason is collected, and an invalid/revoked
+ * Gifted API key logs a clear warning (never printing the secret itself).
  */
 
 const axios = require('axios');
@@ -18,15 +18,58 @@ const client = axios.create({
 
 const isHttpUrl = (u) => typeof u === 'string' && /^https?:\/\//i.test(u);
 
+const KEY_WARN_COOLDOWN_MS = 10 * 60 * 1000;
+let _lastKeyWarnAt = 0;
+
+function warnBadGiftedKey(reason) {
+  const now = Date.now();
+  if (now - _lastKeyWarnAt < KEY_WARN_COOLDOWN_MS) return;
+  _lastKeyWarnAt = now;
+  console.warn(
+    `[gifted-api] ⚠️ Gifted API fallback failed (${reason}) — GIFTED_API_KEY appears missing, expired, or revoked. ` +
+    `Update GIFTED_API_KEY in .env (never logged).`,
+  );
+}
+
+const AUTH_ERROR_RE = /\b(invalid|revoked|expired|unauthorized|forbidden|apikey|api\s*key|limit\s*exceeded|disabled)\b/i;
+
 /** Call one Gifted endpoint and normalise its answer. */
 async function gifted(endpoint, params, { timeout = 20000 } = {}) {
   const { baseUrl, apiKey } = config.giftedApi || {};
-  const res = await client.get(`${baseUrl}/api/download/${endpoint}`, {
-    params: { apikey: apiKey, ...params },
-    timeout,
-    maxContentLength: 1024 * 1024,
-  });
+  const trimmedKey = String(apiKey || '').trim();
+  if (!trimmedKey) {
+    warnBadGiftedKey('GIFTED_API_KEY not configured');
+    const err = new Error('Gifted API key not configured');
+    err.code = 'GIFTED_KEY_INVALID';
+    throw err;
+  }
+
+  let res;
+  try {
+    res = await client.get(`${baseUrl}/api/download/${endpoint}`, {
+      params: { apikey: trimmedKey, ...params },
+      timeout,
+      maxContentLength: 1024 * 1024,
+    });
+  } catch (e) {
+    const status = e.response?.status;
+    const bodyMsg = String(e.response?.data?.message || e.response?.data?.error || '');
+    if (status === 401 || status === 403 || AUTH_ERROR_RE.test(bodyMsg)) {
+      warnBadGiftedKey(status ? `HTTP ${status}` : 'rejected key');
+      e.code = 'GIFTED_KEY_INVALID';
+    }
+    throw e;
+  }
+
   const data = res.data || {};
+  const msg = String(data.message || data.error || '');
+  if (data.success === false && AUTH_ERROR_RE.test(msg)) {
+    warnBadGiftedKey('API rejected key');
+    const err = new Error('Gifted API key rejected');
+    err.code = 'GIFTED_KEY_INVALID';
+    throw err;
+  }
+
   const result = data.result || {};
   if (!data.success && !Object.keys(result).length) return null;
   const url = result.download_url || result.download || result.url || null;
@@ -36,10 +79,6 @@ async function gifted(endpoint, params, { timeout = 20000 } = {}) {
 
 /**
  * Walk an endpoint ladder until one answers, remembering why each one failed.
- * @param {string[]} endpoints
- * @param {(ep:string)=>object} buildParams
- * @param {string} label used in the thrown error message
- * @param {{timeout?:number}} opts
  */
 async function tryEndpoints(endpoints, buildParams, label, { timeout = 20000 } = {}) {
   const attempts = [];
@@ -51,8 +90,8 @@ async function tryEndpoints(endpoints, buildParams, label, { timeout = 20000 } =
     } catch (e) {
       const status = e.response?.status;
       attempts.push(`${ep}: ${status ? `HTTP ${status}` : e.message}`);
-      // A bad/blocked key will fail everywhere — stop early.
-      if (status === 401 || status === 403) break;
+      // A bad/revoked key will fail everywhere — stop immediately.
+      if (status === 401 || status === 403 || e.code === 'GIFTED_KEY_INVALID') break;
     }
   }
   const err = new Error(`${label}: all endpoints failed`);
@@ -62,7 +101,6 @@ async function tryEndpoints(endpoints, buildParams, label, { timeout = 20000 } =
 }
 
 const APIs = {
-  // ─── Audio (.song fallback) ────────────────────────────────────────────────
   getGiftedAudioByUrl: (youtubeUrl, opts = {}) => tryEndpoints(
     ['ytmp3v2', 'ytaudio', 'yta', 'ytmp3', 'savetubemp3', 'savemp3'],
     () => ({ url: youtubeUrl }),
@@ -70,7 +108,6 @@ const APIs = {
     opts,
   ),
 
-  // ─── Video (.ytv fallback) ─────────────────────────────────────────────────
   getGiftedVideoByUrl: (youtubeUrl, quality = 720, opts = {}) => tryEndpoints(
     ['ytmp4v2', 'ytmp4', 'ytvideo', 'ytv', 'savetubemp4', 'savemp4'],
     () => ({ url: youtubeUrl, quality }),
@@ -78,16 +115,8 @@ const APIs = {
     opts,
   ),
 
-  // ─── Facebook (.fb primary helper) ─────────────────────────────────────────
-  getGiftedFacebookByUrl: async (fbUrl) => {
-    const hit = await gifted('facebook', { url: fbUrl });
-    if (!hit || !(hit.raw.hd_video || hit.raw.sd_video)) {
-      throw new Error('Gifted: no Facebook video found');
-    }
-    return hit.raw;
-  },
-
   tryEndpoints,
+  _resetKeyWarnForTests: () => { _lastKeyWarnAt = 0; },
 };
 
 module.exports = APIs;

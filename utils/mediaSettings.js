@@ -15,6 +15,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { writeJsonAtomic, readJsonSafe } = require('./jsonStore');
 
 const DB_DIR = path.join(__dirname, '..', 'database');
 const FILE = path.join(DB_DIR, 'media_settings.json');
@@ -30,19 +31,17 @@ const DEFAULTS = {
 };
 
 let _cache = null;
+const isPlainObject = (v) => Boolean(v && typeof v === 'object' && !Array.isArray(v));
 
 const filePath = () => FILE;
 
 function read() {
   if (_cache) return _cache;
-  let data = {};
-  try {
-    if (fs.existsSync(FILE)) data = JSON.parse(fs.readFileSync(FILE, 'utf8')) || {};
-  } catch (e) {
-    console.warn('[mediaSettings] unreadable settings file, using defaults:', e.message);
-    data = {};
+  const res = readJsonSafe(FILE, { defaultValue: {}, validate: isPlainObject });
+  if (!res.ok) {
+    console.warn('[mediaSettings] unreadable settings file, using defaults:', res.error?.message);
   }
-  _cache = { ...DEFAULTS, ...data };
+  _cache = { ...DEFAULTS, ...(res.ok ? res.data : {}) };
   return _cache;
 }
 
@@ -50,7 +49,7 @@ function write(next) {
   _cache = { ...DEFAULTS, ...(next || {}) };
   try {
     if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
-    fs.writeFileSync(FILE, JSON.stringify(_cache, null, 2));
+    writeJsonAtomic(FILE, _cache);
   } catch (e) {
     console.error('[mediaSettings] could not save settings:', e.message);
   }

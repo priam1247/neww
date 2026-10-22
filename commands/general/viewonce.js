@@ -151,9 +151,7 @@ module.exports = {
       await sock.sendMessage(
         msg.key.remoteJid,
         {
-          text:
-            '❌ Error processing view-once message: ' +
-            (error.message || 'Unknown error')
+          text: '❌ Could not unlock that view-once message. Ask the sender to resend it and try again.'
         },
         { quoted: msg }
       );

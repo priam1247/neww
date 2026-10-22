@@ -131,7 +131,7 @@ module.exports = {
         } catch (e) {
           const info = YT.classify(e);
           await react('❌');
-          return status.update(`❌ Probe failed → *${info.code}*\n${YT.friendlyError(e)}`);
+          return status.update(`❌ Probe failed → *${info.code}*\n${YT.friendlyError(e, { isOwner: true })}`);
         }
       }
 

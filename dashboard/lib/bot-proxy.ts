@@ -1,5 +1,9 @@
 import { getBotConnectionConfig } from './storage';
 
+const STATUS_TIMEOUT_MS = 3_000;
+const SYNC_TIMEOUT_MS = 2_500;
+const PAIR_TIMEOUT_MS = 10_000;
+
 export function normalizePhoneNumber(input: unknown): string {
   return String(input ?? '').replace(/[^0-9]/g, '');
 }
@@ -7,6 +11,7 @@ export function normalizePhoneNumber(input: unknown): string {
 export function parseAndValidateBotUrl(rawUrl: string): {
   baseUrl: string | null;
   hostLabel: string | null;
+  isInsecureHttp?: boolean;
   error?: string;
 } {
   const raw = rawUrl.trim();
@@ -25,16 +30,19 @@ export function parseAndValidateBotUrl(rawUrl: string): {
       .replace(/\/admin\/api\/?$/i, '')
       .replace(/\/admin\/?$/i, '')
       .replace(/\/+$/, '');
+    const isLocalhost =
+      parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
     return {
       baseUrl: `${parsed.origin}${cleanPath}`,
       hostLabel: parsed.host,
+      isInsecureHttp: parsed.protocol === 'http:' && !isLocalhost,
     };
   } catch {
     return {
       baseUrl: null,
       hostLabel: null,
       error:
-        'Invalid Bot Server URL format (expected e.g. https://your-bot.koyeb.app or http://203.0.113.10:3000)',
+        'Invalid Bot Server URL format (expected e.g. https://bot-tunnel.trycloudflare.com or http://203.0.113.10:3000)',
     };
   }
 }
@@ -42,6 +50,7 @@ export function parseAndValidateBotUrl(rawUrl: string): {
 export async function getResolvedBotTarget(): Promise<{
   baseUrl: string | null;
   hostLabel: string | null;
+  isInsecureHttp: boolean;
   token: string;
   botEnabledForMembers: boolean;
   rawUrl: string;
@@ -51,10 +60,22 @@ export async function getResolvedBotTarget(): Promise<{
   return {
     baseUrl: parsed.baseUrl,
     hostLabel: parsed.hostLabel,
+    isInsecureHttp: Boolean(parsed.isInsecureHttp),
     token: cfg.botAdminToken,
     botEnabledForMembers: cfg.botEnabledForMembers,
     rawUrl: cfg.botApiUrl,
   };
+}
+
+function humanizeBotFetchError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : 'Unable to reach bot server';
+  if (/aborted|timeout/i.test(raw)) {
+    return 'Bot server offline or unreachable (timed out after 3s).';
+  }
+  if (/ECONNREFUSED|fetch failed/i.test(raw)) {
+    return 'Bot server offline or port closed.';
+  }
+  return raw;
 }
 
 export async function fetchLiveBotStatus(customTarget?: {
@@ -89,17 +110,21 @@ export async function fetchLiveBotStatus(customTarget?: {
         Authorization: `Bearer ${resolved.token}`,
       },
       cache: 'no-store',
-      signal: AbortSignal.timeout(12_000),
+      signal: AbortSignal.timeout(STATUS_TIMEOUT_MS),
     });
     const latencyMs = Date.now() - startedAt;
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
+      const errorMsg =
+        res.status === 401
+          ? 'ADMIN_DASHBOARD_TOKEN mismatch (bot rejected token with HTTP 401).'
+          : data?.error || `Bot server returned HTTP ${res.status}`;
       return {
         reachable: false,
         connected: false,
         botNumber: null,
         latencyMs,
-        error: data?.error || `Bot server returned HTTP ${res.status}`,
+        error: errorMsg,
       };
     }
     return {
@@ -113,15 +138,15 @@ export async function fetchLiveBotStatus(customTarget?: {
       reachable: false,
       connected: false,
       botNumber: null,
-      error: err instanceof Error ? err.message : 'Unable to reach bot server',
+      error: humanizeBotFetchError(err),
     };
   }
 }
 
 /**
- * Push a number state change to the live bot (`admin-server.js`) whenever
- * a Bot Server URL + Token is configured. Fails softly if bot is offline so
- * D1 records always remain authoritative.
+ * Push a number state change to the live bot (`utils/adminApi.js`) whenever
+ * a Bot Server URL + Token is configured. Fails fast if the bot is offline so
+ * D1 records always remain authoritative without blocking the portal UI.
  */
 export async function syncNumberToLiveBot(
   number: string,
@@ -139,24 +164,10 @@ export async function syncNumberToLiveBot(
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ number, label }),
+      body: JSON.stringify({ number, label, enabled }),
       cache: 'no-store',
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
     });
-
-    if (!enabled) {
-      await fetch(`${baseUrl}/admin/api/users/${encodeURIComponent(number)}`, {
-        method: 'PATCH',
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ enabled: false }),
-        cache: 'no-store',
-        signal: AbortSignal.timeout(10_000),
-      });
-    }
   } catch {
     // D1 state remains saved even when bot container restarts
   }
@@ -174,7 +185,7 @@ export async function removeNumberFromLiveBot(number: string): Promise<void> {
         Authorization: `Bearer ${token}`,
       },
       cache: 'no-store',
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
     });
   } catch {
     // ignore if bot offline
@@ -197,12 +208,11 @@ export async function requestLiveBotPairingCode(
       ok: false,
       status: 400,
       error:
-        'The live WhatsApp Bot Server is not linked yet. Ask the administrator (troykunsauka@gmail.com) to link the Bot Server URL in the Admin Console.',
+        'The live WhatsApp Bot Server is not linked yet. Ask the administrator to link the Bot Server URL in the Admin Console.',
     };
   }
 
   try {
-    // Ensure number is registered and enabled on the running bot container first
     await fetch(`${baseUrl}/admin/api/users`, {
       method: 'POST',
       headers: {
@@ -210,21 +220,9 @@ export async function requestLiveBotPairingCode(
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ number, label }),
+      body: JSON.stringify({ number, label, enabled: true }),
       cache: 'no-store',
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    await fetch(`${baseUrl}/admin/api/users/${encodeURIComponent(number)}`, {
-      method: 'PATCH',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ enabled: true }),
-      cache: 'no-store',
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(STATUS_TIMEOUT_MS),
     });
 
     const res = await fetch(`${baseUrl}/admin/api/pair`, {
@@ -236,7 +234,7 @@ export async function requestLiveBotPairingCode(
       },
       body: JSON.stringify({ number }),
       cache: 'no-store',
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(PAIR_TIMEOUT_MS),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -257,9 +255,7 @@ export async function requestLiveBotPairingCode(
     return {
       ok: false,
       status: 502,
-      error: `Could not reach live WhatsApp bot server (${
-        err instanceof Error ? err.message : 'connection failed'
-      }).`,
+      error: humanizeBotFetchError(err),
     };
   }
 }

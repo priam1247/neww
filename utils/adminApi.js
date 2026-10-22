@@ -33,15 +33,45 @@ function timingSafeEqualStr(a, b) {
   try { return crypto.timingSafeEqual(A, B); } catch { return false; }
 }
 
+function normalizeOrigin(value) {
+  const raw = String(value || '').trim().replace(/\/+$/, '');
+  if (!raw) return '';
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return '';
+  }
+}
+
+function buildAllowedOrigins(explicit = []) {
+  const set = new Set();
+  const add = (val) => {
+    const o = normalizeOrigin(val);
+    if (o) set.add(o);
+  };
+  for (const item of Array.isArray(explicit) ? explicit : [explicit]) add(item);
+  for (const part of String(process.env.ADMIN_CORS_ORIGINS || '').split(',')) add(part);
+  add(process.env.DASHBOARD_URL);
+  return set;
+}
+
+function corsHeadersFor(req, allowedOrigins) {
+  const origin = normalizeOrigin(req?.headers?.origin);
+  if (!origin || !allowedOrigins || !allowedOrigins.has(origin)) return {};
+  return {
+    'Access-Control-Allow-Origin': origin,
+    Vary: 'Origin',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Admin-Token',
+    'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
+  };
+}
+
 function send(res, statusCode, body, extraHeaders = {}) {
   const payload = JSON.stringify(body ?? {});
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(payload),
     'Cache-Control': 'no-store',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Admin-Token',
-    'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
     ...extraHeaders,
   });
   res.end(payload);
@@ -138,7 +168,7 @@ function removeUser(number) {
  * @param {string} opts.token
  * @param {object} opts.hooks  { status(), requestPair(number) }
  */
-function startAdminApi({ port, token, hooks = {} } = {}) {
+function startAdminApi({ port, token, allowedOrigins = [], hooks = {} } = {}) {
   if (!token) {
     log.warn('ADMIN_DASHBOARD_TOKEN is not set — dashboard API stays off');
     return null;
@@ -147,6 +177,8 @@ function startAdminApi({ port, token, hooks = {} } = {}) {
     log.warn('no port configured — dashboard API stays off');
     return null;
   }
+
+  const originAllowlist = buildAllowedOrigins(allowedOrigins);
 
   const status = async () => {
     try {
@@ -161,16 +193,24 @@ function startAdminApi({ port, token, hooks = {} } = {}) {
     let pathname = '/';
     try { pathname = new URL(req.url, 'http://localhost').pathname; } catch { /* keep default */ }
 
+    const cors = corsHeadersFor(req, originAllowlist);
+    const reply = (code, body, extra = {}) => send(res, code, body, { ...cors, ...extra });
+
     // health is the only unauthenticated route (uptime checks / port probes)
     if (req.method === 'GET' && (pathname === '/health' || pathname === '/ping')) {
-      return send(res, 200, { ok: true });
+      return reply(200, { ok: true });
     }
-    if (req.method === 'OPTIONS') return send(res, 204, {});
+    if (req.method === 'OPTIONS') {
+      if (req.headers.origin && !cors['Access-Control-Allow-Origin']) {
+        return reply(403, { error: 'Origin not allowed' });
+      }
+      return reply(204, {});
+    }
 
     const provided = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim()
       || String(req.headers['x-admin-token'] || '').trim();
     if (!provided || !timingSafeEqualStr(provided, token)) {
-      return send(res, 401, { error: 'Unauthorized' });
+      return reply(401, { error: 'Unauthorized' });
     }
 
     // Accept both /admin/api/x and /api/x so BOT_API_URL can be either form.
@@ -179,7 +219,7 @@ function startAdminApi({ port, token, hooks = {} } = {}) {
     try {
       if (req.method === 'GET' && route === '/api/status') {
         const s = await status();
-        return send(res, 200, {
+        return reply(200, {
           ok: true,
           service: 'zafar-bot',
           uptimeSeconds: Math.round(process.uptime()),
@@ -189,15 +229,15 @@ function startAdminApi({ port, token, hooks = {} } = {}) {
       }
 
       if (req.method === 'GET' && (route === '/api/users' || route === '/api/whitelist')) {
-        return send(res, 200, { ok: true, users: listUsers() });
+        return reply(200, { ok: true, users: listUsers() });
       }
 
       if (req.method === 'POST' && route === '/api/users') {
         const body = await readBody(req);
         const result = upsertUser(body.number, body.label, { enabled: body.enabled !== false });
-        if (!result) return send(res, 400, { error: 'A valid phone number (with country code) is required.' });
+        if (!result) return reply(400, { error: 'A valid phone number (with country code) is required.' });
         log.info(`user ${result.user.number} ${result.created ? 'added' : 'updated'}`);
-        return send(res, result.created ? 201 : 200, { ok: true, ...result });
+        return reply(result.created ? 201 : 200, { ok: true, ...result });
       }
 
       const userMatch = route.match(/^\/api\/users\/([^/]+)$/);
@@ -207,28 +247,28 @@ function startAdminApi({ port, token, hooks = {} } = {}) {
         if (req.method === 'PATCH') {
           const body = await readBody(req);
           const updated = setUserEnabled(number, body.enabled !== false);
-          if (!updated) return send(res, 404, { error: 'That number is not registered on this bot.' });
+          if (!updated) return reply(404, { error: 'That number is not registered on this bot.' });
           log.info(`user ${updated.number} ${updated.enabled ? 'enabled' : 'disabled'}`);
-          return send(res, 200, { ok: true, user: updated });
+          return reply(200, { ok: true, user: updated });
         }
 
         if (req.method === 'DELETE') {
           const gone = removeUser(number);
-          if (!gone) return send(res, 404, { error: 'That number is not registered on this bot.' });
+          if (!gone) return reply(404, { error: 'That number is not registered on this bot.' });
           log.info(`user ${toNumber(number)} removed`);
-          return send(res, 200, { ok: true });
+          return reply(200, { ok: true });
         }
       }
 
       if (req.method === 'POST' && route === '/api/pair') {
         const body = await readBody(req);
         const number = toNumber(body.number);
-        if (!number) return send(res, 400, { error: 'A valid phone number (with country code) is required.' });
+        if (!number) return reply(400, { error: 'A valid phone number (with country code) is required.' });
         if (typeof hooks.requestPair !== 'function') {
-          return send(res, 501, { error: 'Pairing is not available on this bot build.' });
+          return reply(501, { error: 'Pairing is not available on this bot build.' });
         }
         const result = await hooks.requestPair(number);
-        return send(res, 200, {
+        return reply(200, {
           ok: true,
           code: String(result.code || ''),
           expiresInSeconds: Number(result.expiresInSeconds) || 60,
@@ -237,11 +277,11 @@ function startAdminApi({ port, token, hooks = {} } = {}) {
         });
       }
 
-      return send(res, 404, { error: `No route for ${req.method} ${pathname}` });
+      return reply(404, { error: `No route for ${req.method} ${pathname}` });
     } catch (e) {
-      const code = e.statusCode || (e.code === 'PAIR_BUSY' ? 409 : 500);
+      const code = e.statusCode || (e.code === 'PAIR_BUSY' ? 409 : e.code === 'WHITELIST_CORRUPT' ? 503 : 500);
       log.warn(`${req.method} ${pathname} → ${code} · ${e.message}`);
-      return send(res, code, { error: e.message || 'Bot error' });
+      return reply(code, { error: e.message || 'Bot error' });
     } finally {
       log.debug(`${req.method} ${pathname} · ${Date.now() - startedAt}ms`);
     }
@@ -256,8 +296,6 @@ function startAdminApi({ port, token, hooks = {} } = {}) {
   server.listen(port, '0.0.0.0', () => {
     log.info(`dashboard API listening on 0.0.0.0:${port} (/admin/api/status)`);
   });
-  // NOTE: no server.unref() — a standalone `node admin-server.js` must keep the
-  // process alive, and inside the bot the WhatsApp socket already does.
 
   return {
     server,

@@ -68,7 +68,8 @@ const debridCommand = {
             : '⚠️ Torrent candidates will be skipped until a premium key validates.')
       );
     } catch (e) {
-      return extra.reply(`❌ Could not check the account: ${String(e.message || '').split('\n')[0]}`);
+      console.error('[debrid] error:', e.message);
+      return extra.reply('❌ Could not check torrent/debrid account status right now.');
     }
   },
 };

@@ -103,10 +103,15 @@ async function downloadAndSend(sock, msg, extra, {
   const outBase = path.join(getTempDir(), stamp);
   const files = [];
   const release = holdTemp(stamp);
+  let diskReservation = null;
 
   try {
     if (!waited) await react('⏳');
-    diskSpace.requireMediaDownloadSpace(getTempDir(), config.media || {});
+    diskReservation = diskSpace.reserveMediaSpace(getTempDir(), config.media || {}, {
+      label: `media:${kind}`,
+      tagDir: getTempDir(),
+      tagPrefix: stamp,
+    });
 
     // Best-effort metadata (the download attempt reports the real problems).
     if (!title) {
@@ -286,9 +291,12 @@ async function downloadAndSend(sock, msg, extra, {
     } else if (info.code === 'NO_AUDIO') {
       await say('❌ That video has no audio track — I did not send it silently. Try another link.');
     } else if (err.code === 'NOT_ENOUGH_DISK') {
-      await say(`❌ ${err.message}`);
+      const { safeErrorMessage } = require('./userErrors');
+      await say(safeErrorMessage(err, { isOwner: Boolean(extra?.isOwner) }));
     } else {
-      const lines = String(YT.friendlyError(err) + YT.attemptsSummary(merged)).split('\n').filter(Boolean);
+      const isOwner = Boolean(extra?.isOwner);
+      const tail = isOwner ? YT.attemptsSummary(merged) : '';
+      const lines = String(YT.friendlyError(err, { isOwner }) + tail).split('\n').filter(Boolean);
       await say(lines.slice(0, 3).join('\n'));
     }
     await react('❌');
@@ -296,6 +304,7 @@ async function downloadAndSend(sock, msg, extra, {
     // (callers would only end up printing the same thing twice).
     return { sent: false, kind, via: 'none', code: info.code, error: err };
   } finally {
+    diskReservation?.release?.();
     release();
     for (const f of files) deleteTempFile(f);
     try {

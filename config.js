@@ -43,6 +43,7 @@ module.exports = {
 
   botName: env.BOT_NAME || 'ZaFar Bot',
   prefix: env.PREFIX || '.',
+  cooldownMs: Math.max(0, Number(env.COMMAND_COOLDOWN_MS ?? 2000)),
   sessionName: env.SESSION_NAME || 'session',
   // Katabump has no environment-variable panel — set the real value here.
   // ZaFarBot! session string from your pairing/auth step.
@@ -50,11 +51,10 @@ module.exports = {
 
   packname: env.PACK_NAME || 'ZaFar Bot',
 
-  // Gifted API (fallback downloader). Register your own key at
-  // api.gifted.co.ke — the shipped one is heavily used and may be disabled.
+  // Gifted API (optional fallback downloader). Set GIFTED_API_KEY in .env.
   giftedApi: {
     baseUrl: env.GIFTED_API_URL || 'https://api.gifted.co.ke',
-    apiKey: env.GIFTED_API_KEY || '_0u5aff45,_0l1876s8qc',
+    apiKey: env.GIFTED_API_KEY || '',
   },
 
   // ─── yt-dlp / YouTube (used by .song and .ytv) ────────────────────────────
@@ -121,18 +121,23 @@ module.exports = {
     maxMinutes: Number(env.VIDEO_MAX_MINUTES || 0),   // 0 = no length limit
   },
   media: {
-    diskMinFreeMB: Number(env.MEDIA_DISK_MIN_FREE_MB ?? 1500),
+    diskMinFreeMB: Number(env.MEDIA_DISK_MIN_FREE_MB ?? 1200),
     diskCopyMultiplier: Number(env.MEDIA_DISK_COPY_MULTIPLIER ?? 1.2),
     diskCopyOverheadMB: Number(env.MEDIA_DISK_COPY_OVERHEAD_MB ?? 300),
   },
+  // ─── Disk guard (bot folder quota vs shared host disk) ───────────────────
+  // Counts the bot's own folder against ~9 GB by default (for a 10 GB plan)
+  // instead of trusting statfs, which often reports the whole host node.
+  disk: {
+    budgetMB: Number(env.DISK_BUDGET_MB ?? 9000),
+    tempMaxMB: Number(env.TEMP_MAX_MB ?? 2048),
+  },
   // ─── Download concurrency ────────────────────────────────────────────────
   // light  = link/YouTube downloads: 20 at a time (QUEUE_LIGHT)
-  // heavy  = movie/episode jobs: 4 at a time (QUEUE_HEAVY)
-  // A memory guard in utils/jobQueue.js still holds a job back when the box is
-  // nearly out of RAM, so 20 never means "20 × 1 GB in memory".
+  // heavy  = movie/episode jobs: 2 at a time (QUEUE_HEAVY, tuned for 10 GB disk)
   queue: {
     light: Math.max(1, Math.floor(Number(env.QUEUE_LIGHT) || 20)),
-    heavy: Math.max(1, Math.floor(Number(env.QUEUE_HEAVY) || 4)),
+    heavy: Math.max(1, Math.floor(Number(env.QUEUE_HEAVY) || 2)),
     minFreeMB: Math.max(0, Number(env.QUEUE_MIN_FREE_MB || 220)),
   },
 
@@ -145,8 +150,8 @@ module.exports = {
 
   // Set PAIR_NUMBER (full WhatsApp number, digits only, country code first,
   // e.g. 265991234567) to log in with a pairing code instead of scanning a
-  // QR — useful when the bot host and your WhatsApp phone are the same device.
-  pairNumber: env.PAIR_NUMBER || '265894016453',
+  // QR — or leave empty to pair interactively from the web dashboard.
+  pairNumber: env.PAIR_NUMBER || '',
 
   // ─── Dashboard control API ───────────────────────────────────────────────
   // The web dashboard (Cloudflare Pages app) links to this bot with a URL and
@@ -159,9 +164,13 @@ module.exports = {
   admin: {
     token: env.ADMIN_DASHBOARD_TOKEN || '',
     // Pterodactyl hands the container a port (SERVER_PORT / PORT); on other
-    // hosts ADMIN_API_PORT is the one to set. 3000 is only a last resort.
-    port: Number(env.ADMIN_API_PORT || env.SERVER_PORT || env.PORT || 3000),
-    dashboardUrl: (env.DASHBOARD_URL || env.ZAFAR_AUTH_API_URL || '').replace(/\/+$/, ''),
+    // hosts ADMIN_API_PORT (or ADMIN_PORT) is the one to set. 3000 is last resort.
+    port: Number(env.ADMIN_API_PORT || env.ADMIN_PORT || env.SERVER_PORT || env.PORT || 3000),
+    dashboardUrl: (env.DASHBOARD_URL || '').replace(/\/+$/, ''),
+    corsOrigins: String(env.ADMIN_CORS_ORIGINS || '')
+      .split(',')
+      .map((s) => s.trim().replace(/\/+$/, ''))
+      .filter(Boolean),
     syncMinutes: Number(env.DASHBOARD_SYNC_MINUTES || 5),
   },
 
@@ -172,7 +181,7 @@ module.exports = {
     // ── metadata sources ──────────────────────────────────────────────────
     // TMDB is the primary source (free key). Everything below it is a fallback
     // and none of them is required: the engine uses whatever answers.
-    tmdbKey: env.TMDB_API_KEY || '98bb6b66ece431fbea8a0ee9c18ac712',
+    tmdbKey: env.TMDB_API_KEY || '',
     omdbKey: env.OMDB_API_KEY || '',                 // optional: ratings/runtime
     traktClientId: env.TRAKT_CLIENT_ID || '',        // optional: trending/ids
     metadata: {
@@ -204,8 +213,8 @@ module.exports = {
     // puts anything bigger than drimeThresholdMB on Drime and posts the link.
     maxDownloadMB: Number(env.MOVIE_MAX_DOWNLOAD_MB || movieCapDefault),
     minFreeMB: Number(env.MOVIE_MIN_FREE_MB || 800),  // refuse a download below this
-    diskSizeMultiplier: Number(env.MOVIE_DISK_SIZE_MULTIPLIER ?? 2),
-    diskOverheadMB: Number(env.MOVIE_DISK_OVERHEAD_MB ?? 500),
+    diskSizeMultiplier: Number(env.MOVIE_DISK_SIZE_MULTIPLIER ?? 1.5),
+    diskOverheadMB: Number(env.MOVIE_DISK_OVERHEAD_MB ?? 400),
     unknownSizeMB: Number(env.MOVIE_DISK_UNKNOWN_SIZE_MB ?? 2000),
 
     region: env.REGION || 'US',
@@ -222,8 +231,8 @@ module.exports = {
     tempDir: env.MOVIE_TEMP_DIR || 'temp/movies',
     dataDir: env.MOVIE_DATA_DIR || 'temp/movies/data',
 
-    // movies from different chats download in parallel (no head-of-line block)
-    queueConcurrency: Math.max(1, Number(env.MOVIE_CONCURRENCY || 3)),
+    // movies from different chats download in parallel (1–2 for a 10 GB plan)
+    queueConcurrency: Math.max(1, Number(env.MOVIE_CONCURRENCY || 2)),
     jobTimeoutMs: Number(env.MOVIE_JOB_TIMEOUT_MS || 60 * 60 * 1000),
     dryRun: env.MOVIE_DRY_RUN === '1',                // resolve only, send the link
 
@@ -235,9 +244,9 @@ module.exports = {
   // Replaces the old Google Drive + Service Account setup. Get an access
   // token from Drime Cloud → Account Settings → Developers.
   drime: {
-    // Katabump has no environment-variable panel — set the real token here.
+    // Set DRIME_API_TOKEN in .env or panel Startup Variables (never commit keys).
     // Get it from Drime Cloud → Account Settings → Developers.
-    apiToken: env.DRIME_API_TOKEN || '58989|qn4Jom8CnuscD7WDvp7FHLH3v1B7dzNOYgCe0l3i372d67fe',
+    apiToken: env.DRIME_API_TOKEN || '',
     baseUrl: env.DRIME_BASE_URL || 'https://app.drime.cloud/api/v1',
     // Folder ID (numeric) of the folder in your Drime workspace that
     // contains the past-papers vault — from GET /drive/file-entries.

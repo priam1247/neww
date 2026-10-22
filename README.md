@@ -1,389 +1,107 @@
-# ZaFar WhatsApp Bot
+# ZaFar WhatsApp Bot & Control Room
 
-A command-driven WhatsApp bot built with Baileys. It supports past-paper lookup, media downloads, stickers, view-once media handling, and owner administration. **The bot responds to commands only; natural-language/AI routing has been removed.**
+A command-driven WhatsApp bot built on Baileys v7 with an integrated Past-Paper Vault, streaming media & movie/series downloader, 9 GB folder-quota disk guard, and a standalone Next.js 16 Control Room (`dashboard/`). **The bot responds to prefixed commands only — natural-language/AI routing and edited-message re-execution are disabled.**
 
 ## Commands
 
 ```text
-.movie <title> [year] [quality]        Download a movie (480/720/1080/2160)
-.series <title> s01e03 [quality]       Download one episode
+.movie <title> [year] [quality]        Download a movie (480/720/1080/2160) with poll picker
+.series <title> s01e03 [quality]       Download one episode (supports titles like "9-1-1", "Full House")
 .series <title> s01 1-6 [quality]      Download an episode range
-.series <title> s01 full               Season pack (link when it is huge)
-.info <title> [series]                 Metadata + provider ids + which sources answered
-.providers                             Movie/series source health (download + metadata)
-.moviestatus                           Engine counters, cache and queue
-.paper <course-code> [module] [year]   Search and send past papers
-.paper browse [course-code]            Browse available courses/modules
-.countpapers                           Count papers in the vault
-.song <name-or-YouTube-link>           MP3 document (artist - title, ID3 tagged)
-.ytv <name-or-YouTube-link> [quality]  Download video
-.dl <URL> [audio|video] [quality]      Download supported media from a URL
-.tiktok <URL>   .x <URL>   .pinterest <URL>
+.series <title> s01 full               Season pack (Drime link when oversized)
+.info <title> [series]                 Metadata + provider IDs + active catalogs
+.providers / .moviestatus              Source circuit-breakers, queue depth, and disk usage
+.paper <course-code> [module] [year]   Search & send past papers (capped per query, 3-day dedupe)
+.paper browse [letter|code] [page]     Paginated course/module directory
+.countpapers [course-code]             Count papers in the vault
+.song <name-or-YouTube-link>           ID3-tagged MP3 via yt-dlp + Cobalt/Gifted fallbacks
+.ytv <name-or-YouTube-link> [quality]  Download YouTube MP4 with silent-audio verification
+.dl <URL> [audio|video] [quality]      Universal downloader (~1,000 sites, streamed to disk)
+.tiktok <URL>  .x <URL>  .pinterest <URL>  .instagram <URL>  .fb <URL>
 .spotify <Spotify URL or artist - title>
-.instagram <URL>   .fb <Facebook URL>
-.sticker (reply to media)   .viewonce (reply to view-once media)
+.sticker (reply to media)              512x512 WebP sticker
+.viewonce (reply to view-once media)   Unwrap view-once photo/video/audio (open to allowed users)
 .menu / .ping
 ```
 
-Media searches may show numbered choices; reply with the requested number or `cancel`. In chats where the bot is enabled, messages without the configured prefix are ignored. The default prefix is `.`.
+Interactive title and quality choices use **WhatsApp Polls** (with automatic numbered-reply fallback `1`, `2`, … or `cancel`), scoped strictly to the sender and quoted prompt.
 
-Owner/admin commands include `.on`, `.off`, `.restart`, `.update`, `.broadcast`, `.allow`, `.disallow`, `.listusers`, `.cookies`, `.ytdl`, and `.refreshpapers`.
+Owner/admin commands (hidden from non-owners in `.menu` and error hints):
+`.status` (alias `.update`), `.restart`, `.broadcast`, `.on`, `.off`, `.allow`, `.disallow`, `.listusers`, `.cookies`, `.ytdl` (`status` | `update` | `repair` | `proxy` | `test`), and `.refreshpapers`.
 
-## Repository layout
-
-The bot **is** the repository root — there is no sub-folder to `cd` into:
+## Repository Layout
 
 ```text
-index.js            entry point (WhatsApp connection, pairing, session heal)
-handler.js          command dispatch, prefix, access control
-config.js           every setting, one file (env vars override)
-commands/           one file per command (admin/ general/ media/)
-utils/              bot helpers: temp, download providers, Drime, ffmpeg, movie host
-engine/             movie/series engine (ESM, loaded on demand)
-database/           runtime data (papers index, sent-log, settings)
-scripts/            install-ytdlp.sh, selftest.js
-admin-server.js     HTTP bridge the web portal talks to (see "Dashboard")
-dashboard/          the Next.js web portal (own package.json — deploy root on Vercel)
-Procfile            panel/Heroku start command
+index.js            Entry point (WhatsApp socket, backoff reconnect, built-in /admin/api server)
+handler.js          Command dispatch, per-user cooldown, poll/reply selection routing, error sanitizer
+config.js           Central configuration (all secrets read from env vars)
+commands/           Command modules (admin/, general/, media/)
+utils/              Atomic jsonStore, diskSpace/diskGuard, selections, mediaPipeline, adminApi, etc.
+engine/             ESM movie/series resolver & downloader (loaded via utils/movieEngine.js)
+database/           Git-ignored runtime JSON state & vault_snapshot.json (backed up with .bak)
+scripts/            install-ytdlp.sh and offline regression suite (scripts/selftest.js)
+dashboard/          Standalone Next.js 16 web portal (deploy with Root Directory = dashboard)
+Procfile            Process start command (`node --expose-gc index.js`, matching `npm start`)
 ```
 
-## Setup
+## Quick Start
 
 ```bash
-git clone <this repo> && cd <repo>
+cp .env.example .env   # fill in DRIME_API_TOKEN, ADMIN_DASHBOARD_TOKEN, etc.
 npm ci
 npm run ytdlp:install
-npm start
+npm run selftest       # offline test suite (must pass before deploy)
+npm start              # runs: node --expose-gc index.js
 ```
 
-The bot needs a WhatsApp session. Set `SESSION_ID` or use the pairing flow (`PAIR_NUMBER`); session credentials are stored under the configured session directory and must not be committed. The bot also needs ffmpeg for conversions. Install it on the host if `ffmpeg-static` cannot run there.
-
-Run offline regression tests with:
-
-```bash
-npm run selftest
-```
-
-The test suite uses a fake yt-dlp executable and mocked WhatsApp/API responses; it does not validate live WhatsApp, YouTube, Drime, or third-party service behavior.
-
-## Movies & series
-
-`.movie` and `.series` are powered by a self-contained engine in `engine/`.
-It is written as ES modules (its own `package.json` sets `"type": "module"`), so
-the CommonJS bot loads it with a dynamic `import()` through
-`utils/movieEngine.js`; `config.js` is the single place to configure it.
-
-### It runs *inside* the bot, not next to it
-
-`utils/movieHost.js` is the adapter that makes the engine use everything this
-bot already has, so movies behave exactly like `.dl` / `.song` / `.paper`:
-
-| The bot already has | Movies & series use it for |
-|---|---|
-| `utils/tempManager` | all staging in `temp/movies/` (never swept by `cleanup.js`) |
-| `utils/mediaTransfer` | streamed downloads with size caps + real container sniffing |
-| `utils/ffmpeg` | remux/transcode to WhatsApp-playable mp4 (incl. HLS sources) |
-| `utils/selections` | the numbered picker (`reply with a number`) |
-| reactions | ⏳ → ✅ / ❌ — no chat spam while a movie downloads |
-| `.dl` send rule | playable **video** ≤ 50 MB, **document** above |
-| Drime Cloud (`.paper`) | permanent link for anything too big for WhatsApp |
-| `utils/movieEngine` | fair queue: a 2 GB movie cannot starve `.song` or `.paper` |
-
-If one of those helpers is missing the engine keeps working and only loses that
-one capability — `.movie` can never take the rest of the bot down with it.
-
-### Metadata sources (all 8, merged into one item)
-
-A title can come from any of these; results are merged per film, so one title
-appears once with **every** id the download providers need. A source that is
-down, rate-limited or has no key is skipped — never fatal.
-
-| Source | Needs | Covers | Gives |
-|---|---|---|---|
-| **TMDB** | free key | movies + TV, all years | tmdb id, imdb id, episode guide, posters |
-| **Cinemeta** (Stremio) | nothing | movies + TV | **imdb id + tmdb id**, posters, ratings |
-| **IMDb** | nothing | everything | imdb id, title, year (suggestion API) |
-| **IMDb bulk dump** | nothing (opt-in) | every title ever made | imdb id, offline, no rate limits |
-| **TVMaze** | nothing | TV only | episode count, air dates, niche shows |
-| **OMDb** | free key | movies + TV | IMDb rating, runtime, cast |
-| **Trakt** | free client id | movies + TV | trending, ids for odd titles |
-| **Jikan** (MAL) | nothing | anime | mal id, episode count, alt titles |
-| **AniList** | nothing | anime | romaji titles, second index |
-
-What that buys you: `.movie` / `.series` keep working when TMDB is down or has no
-match — Cinemeta alone returns both ids, and the torrent indexers only need the
-IMDb one. `.info <title>` shows exactly which ids and sources answered.
-
-How a request flows:
-
-```text
-.movie / .series
-   └─ metadata: TMDB → Cinemeta → IMDb → TVMaze → OMDb → Trakt → Jikan → AniList
-        (merged per title; numbered picker when ambiguous)
-   └─ engine queue (1 heavy job at a time, fair per chat)
-        ├─ tier 1  torrent  knaben · torrentio · yts · eztv · nyaa · apibay · solidtorrents
-        ├─ tier 2  ddl      hdhub4u · 4khdhub · moviesdrive → locker resolution → direct file
-        └─ tier 3  stream   moviebox(BFF) first · vidlink · vixsrc · vaplayer → MP4 / HLS
-                            (every other source stays as a fallback)
-   └─ quality ladder: 1080 → 720 → 480 (and up when only 4K exists)
-   └─ verification: real size, container magic bytes, ffprobe quality check when present
-   └─ fake-clip guard: a download shorter than 40 min / 60 % of the runtime is rejected
-   └─ no ffmpeg needed: HLS is fetched and concatenated by engine/media/hls.js
-   └─ streamed download (resume + stall guard) → document upload → LRU cache
-```
-
-Requirements and behaviour:
-
-* **TMDB key** — the primary metadata source (`config.movies.tmdbKey` / `TMDB_API_KEY`).
-  Not a hard requirement any more: without it the bot runs on Cinemeta + IMDb +
-  TVMaze (`.providers` shows which sources are live).
-* **Debrid is optional.** Real-Debrid / All-Debrid unlock the torrent tier (best
-  quality). Without a key the bot downloads the torrent itself (WebTorrent,
-  seeded magnets only) and falls back to the free DDL and stream tiers when that
-  is not possible. `TORRENT_DIRECT=false` restores the old "skip torrents"
-  behaviour. WebTorrent is an *optional* dependency: if the host cannot build
-  `node-datachannel`, `npm install` still succeeds and only torrents are lost
-  (`npm rebuild node-datachannel` adds them back). `.providers` shows what is live.
-* Files are staged in `temp/movies/` — inside the bot's own temp dir, in a
-  subfolder `cleanup.js` never touches. A file still downloading is never swept
-  away: every job holds its temp stamp (`holdTemp`) and both the 10-minute sweep
-  and the memory watchdog skip held files and judge age by write time.
-* **Nothing is cached.** The file is deleted as soon as WhatsApp has accepted
-  it — no LRU, no cloud link, no second copy. Ask again and it downloads again.
-* **Quality menu with sizes.** `.movie spiderman brand new day 2026` asks the
-  sources first and sends a WhatsApp list of the qualities that actually exist,
-  each with its real size (e.g. *1080p ~2.1 GB*). Tap a row — or reply with its
-  number if your client does not support list messages.
-* **Every match, in one message.** A vague title (`spiderman`) lists *all*
-  matching films with year and rating; reply with a number to continue.
-* Episode batches run one episode at a time (`MOVIE_BATCH_LIMIT`, default 10).
-
-Troubleshooting:
-
-```text
-.info <title>     ids + which metadata sources answered (diagnose "no source found")
-.providers        download sources live/tripped + metadata sources live/disabled
-.moviestatus      resolves, tier wins, verification rejects, cache + queue depth
-MOVIE_DRY_RUN=1   resolve and print the link without downloading
-QUALITY_FALLBACK=0   disable the 1080→720→480 ladder
-META_CINEMETA=0 / META_IMDB=0 / META_TVMAZE=0 / META_ANIME=0   switch a source off
-```
-
-## Media downloads
-
-The local yt-dlp engine is tried first. If it cannot handle a source, configured remote fallback providers may be used. Downloads have size/time limits, are staged in the ignored `temp/` directory, and are cleaned after each job and periodically.
-
-For YouTube hosting-IP checks, an owner can upload a Netscape-format cookies file with `.cookies set`; use `.cookies status` to inspect availability and `.cookies clear` to remove it. Treat cookies as account credentials. `.ytdl` reports engine status; `.ytdl test <link>`, `.ytdl raw <link>`, `.ytdl update`, `.ytdl repair`, and `.ytdl proxy <url|off>` help diagnose or repair downloads.
-
-## Deploying the bot to the panel (XS Systems / Pterodactyl)
-
-Panels like `panel.xsystems.hosting` have **no GitHub integration**: no webhook,
-no git in the File Manager, and the console is the bot's own stdin — typing
-`git pull` there goes into Node, not a shell. Three ways to get this repo onto
-the server, in order of how little work they need afterwards.
-
-### 1. GitHub Actions → SFTP (automatic, works on every panel)
-
-`.github/workflows/deploy-panel.yml` uploads the repo over the SFTP details the
-panel already shows and then restarts the server through the panel API.
-
-1. Panel → **Settings → SFTP details**: note *Host*, *Port*, *Username*,
-   *Password* (the username is `something.xxxxxx`, not your login e-mail).
-2. Repo → **Settings → Secrets and variables → Actions**, add:
-   `PANEL_SFTP_HOST`, `PANEL_SFTP_PORT`, `PANEL_SFTP_USER`, `PANEL_SFTP_PASS`.
-   Optional, for the automatic restart: `PANEL_URL`
-   (`https://panel.xsystems.hosting`), `PANEL_SERVER_ID` (the id in the panel
-   URL), `PANEL_API_KEY` (panel → **Account → API Credentials**, client key).
-3. Push to `main` (or **Actions → Deploy bot to XS Systems panel → Run
-   workflow**). The first run can take a couple of minutes.
-
-The **restart** at the end is best-effort: the workflow tries the panel's client
-API (both server-id shapes) and then its application API. On this panel those
-answer `404`/`405`, so the run ends with a warning telling you to press
-**Restart** — the upload itself has already succeeded. A `401`/`403` there means
-`PANEL_API_KEY` is not a *client* key, or was revoked.
-
-Without those secrets the workflow is a green no-op — nothing breaks.
-
-What it does **not** upload, by design: `session/` (your WhatsApp login),
-`.env`, `database/*.json` (the allowed-user list lives on the server), `temp/`,
-`node_modules/` and `dashboard/` (that one deploys to Vercel). It also never
-deletes anything on the server: `mirror -R` without `--delete`.
-
-Node eggs run `npm install` on start when `package.json` is present, so new
-dependencies land on the restart that follows the upload.
-
-### 2. One clone, then `git pull` on every start
-
-Some Node eggs expose an `AUTO_UPDATE` variable: with it set to `1` the start
-script runs `git pull` in the server folder before booting. It only works if the
-folder already **is** a git clone, which needs one shell command on the host
-(ask XS Systems support, or run the workflow once with
-**Run workflow → bootstrap** ticked — that version also uploads `.git`).
-
-Then: **Startup → Environment Variables → `AUTO_UPDATE=1`**, restart. Pushes to
-`main` land on the next restart.
-
-### 3. Manual (no automation)
-
-GitHub → **Code → Download ZIP** → panel → **Files → Upload** → right-click the
-archive → **Unarchive** → **Restart**. Keep `session/` and `.env` from the
-server: never replace them with the archive's.
-
-### Reinstalling the server (XS Systems)
-
-A reinstall stops the server and re-runs the egg install script — **files on the
-server are gone**, startup variables are kept. Order matters:
-
-1. **Before**, save the three things the bot cannot rebuild on its own, using the
-   panel's SFTP details (`Files → SFTP` in any client, e.g. WinSCP/FileZilla):
-   - `session/` → your WhatsApp login (without it the bot needs a new pairing code)
-   - `database/*.json` → the allowed-user list
-   - `.env`, if the server has one
-2. **Reinstall** from the panel. The 3 GB that `temp/` had accumulated goes with
-   it — that is the disk you were missing.
-3. In **Startup → Server Variables** (they survive a reinstall) make sure you
-   have:
-   - `ADMIN_DASHBOARD_TOKEN` — same value you paste in the portal
-   - `PAIR_NUMBER` — the number the bot logs in with
-   - anything else secret (`TMDB_API_KEY`, `REALDEBRID_API_KEY`, …)
-
-   The panel already provides `SERVER_PORT` / `SERVER_MEMORY` / `SERVER_IP`;
-   the bot uses `SERVER_PORT` for the dashboard API and sizes its heap from
-   `SERVER_MEMORY`.
-4. **Upload the code**: Actions → *Deploy bot to XS Systems panel* →
-   *Run workflow*. (The push-triggered run already does this on every `main`
-   commit — the manual run is for a freshly reinstalled server.)
-5. Check the Startup Command runs the install once, e.g.
-   `npm install && node index.js`. Without `npm install` the bot stops with
-   `❌ Dependencies are missing`.
-6. Start, then put `session/` back over SFTP if the bot asks for a pairing code.
-
-With `SERVER_PORT` = the allocated port, the portal's **Bot Server URL** is
-`http://<SERVER_IP>:<SERVER_PORT>` (e.g. `http://195.0.0.1:25763`); the log line
-`🌐 Dashboard API: on (port …)` confirms it is listening.
-
-## Dashboard link (web portal → bot)
-
-The portal source lives in `dashboard/`. It is a **separate app**, so on Vercel
-set the project's **Root Directory** to `dashboard` once; the bot at the repo
-root and the portal then deploy from the same repository without interfering.
-Details in `dashboard/README.md`.
-
-The portal (`troykunsauka@gmail.com` admin console) links to a running bot with
-two values: a **Bot Server URL** and an **ADMIN_DASHBOARD_TOKEN**. The bot side
-of that contract lives here:
-
-```text
-GET    /admin/api/status          { connected, botNumber }        ← "Test connection"
-GET    /admin/api/users           every allowed number
-POST   /admin/api/users           { number, label }               ← member adds / re-enables
-PATCH  /admin/api/users/:number   { enabled: true|false }         ← Allow / Disallow
-DELETE /admin/api/users/:number
-POST   /admin/api/pair            { number } → { code, expiresInSeconds }
-GET    /health                    unauthenticated liveness probe
-```
-
-Every route needs `Authorization: Bearer <ADMIN_DASHBOARD_TOKEN>`; the token is
-compared in constant time. Set on the bot:
-
-```bash
-ADMIN_DASHBOARD_TOKEN=<same value you paste in the portal>
-ADMIN_API_PORT=3000                # a port allocated on the panel, not WhatsApp's
-DASHBOARD_URL=https://your-portal.pages.dev   # optional: pull the member list
-```
-
-Then start the bot as usual — `index.js` brings the API up and logs
-`🌐 Dashboard API: on (port 3000)`. In the portal, the Bot Server URL is
-`http://<node-ip>:<allocated-port>` (or the https tunnel in front of it).
-
-If the portal cannot reach the bot (private VPS, NAT), keep `DASHBOARD_URL` set:
-the bot pulls `GET {DASHBOARD_URL}/api/bot/whitelist` every
-`DASHBOARD_SYNC_MINUTES` (default 5) with the same token, so Allow/Disallow
-still lands even when the inbound port is closed.
-
-`admin-server.js` runs the same API on its own for a quick check:
-
-```bash
-ADMIN_DASHBOARD_TOKEN=... ADMIN_API_PORT=3000 node admin-server.js
-curl -H "Authorization: Bearer ..." http://127.0.0.1:3000/admin/api/status
-```
-
-Pairing codes are only issued while the bot has **no** registered session: a
-`POST /admin/api/pair` wipes the unregistered `./session` folder, reconnects and
-returns WhatsApp's code (valid ~60 s). Once the bot is linked, the API answers
-`409` with the number it is linked to instead of silently breaking the session.
-
-## Past papers
-
-Paper search uses the configured Drime Cloud API and a local vault snapshot. Configure `DRIME_API_TOKEN`, `DRIME_BASE_URL`, `DRIME_PAPERS_FOLDER_ID`, `DRIME_PAPERS_FOLDER_HASH`, and optionally `DRIME_WORKSPACE_ID`. `.refreshpapers` forces a vault refresh. `.paper browse` shows the course codes represented in the vault.
-
-## Disk
-
-Delivered files do not stay on the panel:
-
-- `.movie` / `.series` / `.dl` / `.ytv` / `.song` / `.paper` delete the file as
-  soon as WhatsApp has accepted it (`utils/movieHost.release`, and the `finally`
-  block of `utils/mediaPipeline.js`). There is no movie cache and no send cache:
-  nothing is kept "in case someone asks again".
-- `utils/cleanup.js` walks the whole `temp/` tree (including `temp/movies/`,
-  which used to be skipped because it is a sub-folder) every 10 minutes:
-  downloads older than 30 min, media jobs older than 60 min, and — whatever
-  their age — the oldest files until `temp/` is under `TEMP_MAX_MB` (1 GB).
-- The WhatsApp session directory is never touched.
-
-`.moviestatus` prints `temp disk ... MB` and whether files are kept or
-deleted after sending.
-
-## Many downloads at once
-
-Two lanes (`utils/jobQueue.js`):
-
-| lane | what uses it | at the same time |
-|---|---|---|
-| light | `.ytv` `.dl` `.song` `.spotify` `.facebook` links | **20** (`QUEUE_LIGHT`) |
-| heavy | `.movie` `.series` jobs | **4** (`QUEUE_HEAVY`) |
-
-A 21st download waits for a free slot (the chat gets a ⏳ reaction) instead of
-failing, and messages are handled concurrently, so a running movie never blocks
-`.song`, `.paper` or another chat. A memory guard (`QUEUE_MIN_FREE_MB`, default
-220 MB) delays a start when the box is nearly out of RAM, so 20 slots never
-means 20 downloads fighting over the last megabyte.
-
-## yt-dlp repairs itself
-
-`utils/youtubedl.js` owns its own health:
-
-* **at boot** — if the binary is missing or does not run, it is re-downloaded
-  (standalone build first, then pip);
-* **while running** — a download that reports `NO_YTDLP` triggers one repair and
-  the download is retried; a 30-minute watchdog re-checks the binary;
-* **on bot-check** — an outdated build is updated once before giving up.
-
-`.ytdl` shows the resolved path, version and the last error; `.ytdl update`
-forces an update.
-
-## Configuration
-
-Environment variables can override the defaults in `config.js`. Common settings include:
-
-```text
-PREFIX OWNER_NUMBER ADMIN_NUMBERS OWNER_NAME BOT_NAME SESSION_NAME SESSION_ID PAIR_NUMBER
-DRIME_API_TOKEN DRIME_BASE_URL DRIME_PAPERS_FOLDER_ID DRIME_PAPERS_FOLDER_HASH DRIME_WORKSPACE_ID
-TMDB_API_KEY REALDEBRID_API_KEY ALLDEBRID_API_KEY MOVIE_QUALITY MOVIE_MAX_MB MOVIE_BATCH_LIMIT MOVIE_DRY_RUN
-OMDB_API_KEY TRAKT_CLIENT_ID IMDB_INDEX_FILE QUALITY_FALLBACK
-META_CINEMETA META_IMDB META_TVMAZE META_OMDB META_TRAKT META_ANIME
-MOVIE_MAX_DOWNLOAD_MB MOVIE_CONCURRENCY QUEUE_LIGHT QUEUE_HEAVY QUEUE_MIN_FREE_MB
-GIFTED_API_KEY GIFTED_API_URL
-YOUTUBE_COOKIES YOUTUBE_COOKIES_FILE YTDLP_PROXY YTDLP_DEADLINE_MS
-COBALT_INSTANCES COBALT_USE_DEFAULTS SONG_SEND_AS SONG_MAX_MINUTES SEARCH_PICKER SEARCH_RESULTS
-PREFER_PROVIDERS (default moviebox)  MOVIE_SUBTITLES  MOVIE_SUBTITLE_LANG
-SEARCH_TTL_MINUTES SPOTIFY_CLIENT_ID SPOTIFY_CLIENT_SECRET FFMPEG_PATH TZ
-HEAP_MB (or MEMORY_LIMIT_MB) — heap size; auto = RAM − 450 MB, capped at 4200
-```
-
-Do not commit `.env`, WhatsApp session data, cookies, API tokens, runtime settings, or downloaded media. The bot is command-driven: no provider keys, AI settings, AI commands, or AI routing are required.
+## Disk Budget & Concurrency (10 GB Panel Plan)
+
+Shared container panels often report the entire host node's free space via `statfs`. ZaFar Bot protects against `ENOSPC` crashes with two layers (`utils/diskSpace.js` + `utils/diskGuard.js`):
+
+1. **Bot-Folder Quota (`DISK_BUDGET_MB=9000`)**: Tracks actual bytes inside the bot directory (including `session/`, `database/`, `node_modules/`, and `temp/`) plus **per-job byte reservations** so concurrent downloads can never over-commit a 10 GB plan.
+2. **Comparison Logging & Status**: Startup, periodic warnings, and `.status` print both `bot folder: X / 9000 MB` and `host statfs free: Y MB` so operators can compare against the panel's disk meter.
+3. **Zero Caching & Boot Sweep**:
+   - `QUEUE_LIGHT=20` (short social/music links) and `QUEUE_HEAVY=2` / `MOVIE_CONCURRENCY=2` (movies & episodes).
+   - Every delivered media/movie file is deleted immediately after WhatsApp accepts it; `utils/cleanup.js` sweeps leftover `.part`/`.ytdl` partials on boot and caps `temp/` at `TEMP_MAX_MB` (`2048` MB default).
+   - Direct torrent support (`webtorrent` optional dependency) remains enabled when `TORRENT_DIRECT=true`.
+
+## Deploying to XS Systems / Pterodactyl Panel
+
+### 1. Secret Rotation Order (Zero Downtime)
+1. **Env First**: Add `DRIME_API_TOKEN`, `TMDB_API_KEY`, `GIFTED_API_KEY`, `ADMIN_DASHBOARD_TOKEN`, `PANEL_URL`, `PANEL_SERVER_ID`, and `PANEL_API_KEY` in the panel's **Startup Variables** (or `.env` on disk).
+2. **Code Second**: Merge/push to `main`. `.github/workflows/deploy-panel.yml` runs `npm ci && npm run selftest` + builds `dashboard/` **before** uploading via SFTP.
+3. **Revoke Old Keys Last**: Once `.status`, `.paper`, and `.movie` are verified on the live bot, revoke/regenerate any previously hardcoded keys in Drime Cloud, TMDB, Gifted, and the panel.
+
+### 2. Dedicated Restricted Panel Subuser (Recommended for SFTP & `PANEL_API_KEY`)
+Never put your master panel account password or an unrestricted account API key into GitHub Actions or `.env`:
+1. In the panel, open your server → **Users (Subusers) → New User** and invite a dedicated service email (e.g. `bot-deploy@yourdomain.com`).
+2. Grant **only** these permissions:
+   - **Control**: `control.console` (read), `control.restart` (for `.restart` and post-deploy restart)
+   - **File**: `file.create`, `file.read`, `file.read-content`, `file.update`, `file.sftp` *(leave `file.delete` unchecked if you want SFTP physically unable to delete `session/` or `database/`)*
+3. Log in once as that subuser:
+   - Copy its **SFTP Username & Password** into GitHub Secrets `PANEL_SFTP_USER` / `PANEL_SFTP_PASS`.
+   - Generate a Client API Key (`ptlc_…`) under **Account → API Credentials** and set it as `PANEL_API_KEY` (both in GitHub Secrets for CI restart and in panel Startup Variables for the `.restart` WhatsApp command).
+
+### 3. Manual Panel File Cleanup After Upgrading
+Because `.github/workflows/deploy-panel.yml` runs `lftp mirror -R` **without `--delete`** (so `session/`, `.env`, and `database/*.json` — especially `database/vault_snapshot.json` — are never wiped), delete these obsolete files once in the panel's **Files** tab after deploying:
+
+- `admin-server.js` *(replaced by `utils/adminApi.js` inside `index.js`)*
+- `utils/heapPlan.js` *(heap re-exec removed; `Procfile` & `npm start` pass `--expose-gc` directly)*
+- `utils/memoryWatchdog.js` *(replaced by `utils/diskSpace.js` + `utils/diskGuard.js`)*
+- `commands/media/instagram.js` *(merged into streaming `commands/media/shortcuts.js`)*
+- `commands/media/facebook.js` *(merged into streaming `commands/media/shortcuts.js`)*
+- `engine/core/locker.js` *(unused stub removed)*
+
+> **Do NOT delete** `session/`, `.env`, or `database/*.json` (`whitelist.json`, `botstate.json`, `media_settings.json`, `paper_log.json`, `vault_snapshot.json`) on the panel! Keeping `database/vault_snapshot.json` avoids walking ~10,900 Drime files on cold boot.
+
+## Linking the Web Dashboard (`dashboard/`)
+
+See [`dashboard/README.md`](./dashboard/README.md) for full Vercel / self-hosted portal instructions.
+
+- **Architecture**: `dashboard/` is a standalone Next.js 16 app using **Local-First Cloudflare D1 + `bcryptjs`** authentication (no external Koyeb auth dependency), login rate limiting (`429` + `Retry-After`), mandatory `JWT_SECRET_KEY` in production, and a 3-second fast-fail bot status proxy.
+- **Bot Bridge**: Set `ADMIN_DASHBOARD_TOKEN` and `ADMIN_API_PORT` on the bot. Expose the port over HTTPS via **Cloudflare Tunnel** (`cloudflared tunnel --url http://127.0.0.1:3000` or a named Zero Trust tunnel) and save the `https://` URL + token inside `/admin` → **Bot & Numbers**.
+- **CORS**: `utils/adminApi.js` no longer sends `Access-Control-Allow-Origin: *`. Server-to-server requests from `dashboard/` need no CORS headers; if you explicitly allow a browser origin, set `ADMIN_CORS_ORIGINS=https://your-portal.vercel.app`.
 
 ## License
 
-MIT — Baileys by @whiskeysockets, original bot by ZaFar.
+MIT — Baileys by @whiskeysockets, ZaFar Bot & Control Room.

@@ -47,8 +47,9 @@ import { AccountModal } from './account-modal';
 type AdminTab = 'members' | 'bot' | 'guide';
 type MemberFilter = 'all' | 'allowed' | 'disallowed';
 
-const BOT_ENV_EXAMPLE = `ADMIN_PORT=3000
-ADMIN_DASHBOARD_TOKEN=choose-a-strong-shared-secret`;
+const BOT_ENV_EXAMPLE = `ADMIN_API_PORT=3000
+ADMIN_DASHBOARD_TOKEN=choose-a-strong-shared-secret
+DASHBOARD_URL=https://your-portal.vercel.app`;
 
 export function AdminConsole() {
   const router = useRouter();
@@ -446,8 +447,8 @@ export function AdminConsole() {
             <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-teal-600 font-mono text-sm font-extrabold text-white shadow-sm">
               ZF
             </div>
-            <div>
-              <div className="flex items-center gap-2">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm font-bold text-slate-900">
                   ZaFar Admin Console
                 </span>
@@ -455,7 +456,7 @@ export function AdminConsole() {
                   Admin Only
                 </span>
               </div>
-              <p className="text-xs text-slate-500">
+              <p className="hidden text-xs text-slate-500 sm:block">
                 Controlling members, WhatsApp numbers &amp; live bot link
               </p>
             </div>
@@ -609,8 +610,33 @@ export function AdminConsole() {
           </div>
         )}
 
+        {data.botServerLinked && data.botReachable === false && (
+          <div
+            role="alert"
+            className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-950"
+          >
+            <div className="flex items-start gap-2.5">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+              <div>
+                <strong className="font-bold">Bot Offline:</strong>{' '}
+                {data.botError || 'Could not reach the bot server within 3 seconds.'}{' '}
+                <span className="text-amber-800">
+                  Member &amp; number changes still save to D1 and sync automatically once the bot is back online.
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setTab('bot')}
+              className="shrink-0 rounded-lg border border-amber-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-amber-900 hover:bg-amber-100"
+            >
+              Check Bot Link
+            </button>
+          </div>
+        )}
+
         {/* Summary Metric Cards */}
-        <section className="mb-7 grid grid-cols-1 gap-3.5 sm:grid-cols-4">
+        <section className="mb-7 grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-3.5">
           <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="text-xs font-medium text-slate-500">Allowed Members</div>
             <div className="mt-1.5 flex items-baseline gap-2">
@@ -635,19 +661,23 @@ export function AdminConsole() {
             <div className="text-xs font-medium text-slate-500">Live Bot Socket</div>
             <div className="mt-1.5 flex items-center gap-2">
               <span
-                className={`h-2.5 w-2.5 rounded-full ${
+                className={`h-2.5 w-2.5 shrink-0 rounded-full ${
                   data.connected
                     ? 'bg-teal-500'
-                    : data.botServerLinked
+                    : data.botReachable
                       ? 'bg-amber-500'
-                      : 'bg-slate-300'
+                      : data.botServerLinked
+                        ? 'bg-rose-500'
+                        : 'bg-slate-300'
                 }`}
               />
-              <b className="text-xl font-bold text-slate-900">
+              <b className="text-base font-bold text-slate-900 sm:text-xl">
                 {data.botServerLinked
                   ? data.connected
                     ? 'Online'
-                    : 'Offline'
+                    : data.botReachable
+                      ? 'Awaiting Pair'
+                      : 'Bot Offline'
                   : 'Not Linked'}
               </b>
             </div>
@@ -792,7 +822,7 @@ export function AdminConsole() {
                           )}
                         </div>
                         <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                          <span className="font-mono text-slate-700">{member.email}</span>
+                          <span className="break-all font-mono text-slate-700">{member.email}</span>
                           <span>·</span>
                           <span>{member.numbersCount} linked number(s)</span>
                         </div>
@@ -869,7 +899,7 @@ export function AdminConsole() {
                     htmlFor="admin-bot-url"
                     className="mb-1 block text-xs font-medium text-slate-700"
                   >
-                    Bot Server Public URL (<code className="font-mono">admin-server.js</code>)
+                    Bot Server Public URL (<code className="font-mono">/admin/api</code>)
                   </label>
                   <input
                     id="admin-bot-url"
@@ -920,6 +950,12 @@ export function AdminConsole() {
                   {savingBot ? 'Testing…' : 'Test & Save Bot Link'}
                 </button>
               </form>
+
+              {(data.isInsecureHttp || /^http:\/\/(?!localhost|127\.0\.0\.1)/i.test(botUrlInput.trim())) && (
+                <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900">
+                  <strong>HTTPS Tunnel Recommended:</strong> Plain <code className="font-mono">http://IP:PORT</code> works via the server-side proxy, but sends <code className="font-mono">ADMIN_DASHBOARD_TOKEN</code> unencrypted over the network. Put a free Cloudflare Tunnel (<code className="font-mono">cloudflared tunnel --url http://127.0.0.1:3000</code>) or HTTPS reverse proxy in front of the bot whenever possible.
+                </p>
+              )}
             </section>
 
             {/* All WhatsApp Numbers Table */}
@@ -1100,11 +1136,11 @@ export function AdminConsole() {
                 How to Connect Your WhatsApp Bot to This Website
               </h2>
               <p className="mt-1 text-sm text-slate-600">
-                Your WhatsApp bot already has built-in web API support inside{' '}
+                Your WhatsApp bot includes the built-in dashboard bridge in{' '}
                 <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-800">
-                  admin-server.js
+                  index.js
                 </code>{' '}
-                (on your bot branch <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-800">devin/1792597798-ytv-audio-fixes</code>). Follow these 3 quick steps:
+                (<code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-800">utils/adminApi.js</code>). Follow these 3 quick steps:
               </p>
             </div>
 
@@ -1149,9 +1185,15 @@ export function AdminConsole() {
                   Copy Your Bot&apos;s Public Address
                 </h3>
                 <p className="mt-1 text-xs leading-relaxed text-slate-600">
-                  Copy the public URL or IP:Port pointing to port <code className="font-mono">3000</code> (or your host&apos;s assigned <code className="font-mono">ADMIN_PORT</code>):
+                  Copy the HTTPS tunnel URL (recommended) or allocated IP:Port pointing to <code className="font-mono">ADMIN_API_PORT</code>:
                 </p>
                 <ul className="mt-2.5 space-y-1.5 text-xs text-slate-600">
+                  <li>
+                    • <strong>Cloudflare Tunnel (HTTPS):</strong>{' '}
+                    <code className="font-mono text-slate-800">
+                      cloudflared tunnel --url http://127.0.0.1:3000
+                    </code>
+                  </li>
                   <li>
                     • <strong>Koyeb / Railway:</strong>{' '}
                     <code className="font-mono text-slate-800">
@@ -1159,7 +1201,7 @@ export function AdminConsole() {
                     </code>
                   </li>
                   <li>
-                    • <strong>KataBump / VPS:</strong>{' '}
+                    • <strong>Panel Allocated Port:</strong>{' '}
                     <code className="font-mono text-slate-800">
                       http://SERVER_IP:PORT
                     </code>

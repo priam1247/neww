@@ -1,79 +1,61 @@
-# ZaFar Control Room (web portal)
+# ZaFar Control Room (Web Portal)
 
-Next.js 16 app for sign-in, member self-service and the admin console. It talks
-to the bot over HTTP (see `lib/bot-proxy.ts` and the bot's `admin-server.js`).
+Standalone Next.js 16 application for member sign-in, WhatsApp number self-service, and the administrator console (`/admin`). It talks to the live bot over `/admin/api/*` (`utils/adminApi.js`, started directly by `index.js`) through a server-side proxy (`lib/bot-proxy.ts`) so `ADMIN_DASHBOARD_TOKEN` never leaves the server.
 
-## Deploying on Vercel
+## Deploying on Vercel (or Self-Hosted Node)
 
-The bot lives at the repository root and must stay there — the panel runs
-`node index.js` from the root. This portal is a **separate project root**, so:
+The WhatsApp bot lives at the repository root (`node --expose-gc index.js`). This portal has its own `dashboard/package.json` and `dashboard/package-lock.json`:
 
-1. Vercel → your project → **Settings → General → Root Directory** → set it to
-   `dashboard`, then **Save**.
-2. **Build & Output Settings** stay on the framework preset *Next.js*
-   (install `npm install`, build `npm run build`).
-3. Redeploy. The log now shows `Cloning …` followed by a Next.js build; the
-   `[NEXT_NO_VERSION]` error is gone because `dashboard/package.json` has
-   `next` in its dependencies.
+1. **Vercel → Project → Settings → General → Root Directory** → set to `dashboard` and click **Save**.
+2. Keep the framework preset on **Next.js** (`npm install` / `npm run build`).
+3. Configure the environment variables below, then **Deploy**.
 
-Without step 1 Vercel reads the repository's root `package.json`, which is the
-WhatsApp bot (no Next.js), and the build fails with `NEXT_NO_VERSION`.
+Self-hosting with `npm start` enforces `JWT_SECRET_KEY` (minimum 16 characters) before `next start` binds a port, and `instrumentation.ts` + `lib/jwt.ts` enforce the same check on serverless/edge cold starts.
 
-The portal is completely standalone: `dashboard/package.json` +
-`dashboard/package-lock.json` are its only dependencies, `next.config.mjs` only
-sets the image/headers policy, and nothing outside `dashboard/` is imported. A
-clean `cd dashboard && npm ci && npm run build` succeeds without the bot's
-`node_modules` (verified: 21 routes).
+## Environment Variables
 
-Different portal on the same repo? Nothing else is required — the bot's
-dependencies and the portal's are separate (`dashboard/package-lock.json`), and
-neither deploy touches the other's files.
+| Variable | Required? | Purpose |
+|---|---|---|
+| `JWT_SECRET_KEY` | **Required in production** | Signs HS256 session cookies (min 16 chars; generate via `openssl rand -hex 32`). Production startup refuses to run without it. |
+| `ADMIN_EMAIL` | Recommended | Comma-separated administrator email(s) allowed into `/admin` (default: `troykunsauka@gmail.com`). |
+| `ADMIN_INITIAL_PASSWORD` | Optional | Bootstraps the verified `ADMIN_EMAIL` account in D1 on first sign-in before email delivery is configured. |
+| `CLOUDFLARE_ACCOUNT_ID` / `D1_DATABASE_ID` / `CLOUDFLARE_API_TOKEN` | Recommended | Cloudflare D1 database storing verified accounts (`bcryptjs`), member permissions, approved WhatsApp numbers, and bot link settings. Falls back to `.data/zafar-db.json` in local dev. |
+| `RESEND_API_KEY` + `EMAIL_FROM` | Pick Resend **or** SMTP | Sends 6-digit verification & password-reset codes over HTTPS (works cleanly on serverless/edge hosts). |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` | Pick Resend **or** SMTP | Direct SMTP mail delivery (e.g. Gmail App Password on port `587` or `465`). |
+| `ZAFAR_AUTH_API_URL` | Optional (legacy migration only) | Leave empty. If set during migration from an older external auth service, existing accounts are verified once (6 s cap) and migrated permanently into local D1. |
+| `BOT_API_URL` / `ADMIN_DASHBOARD_TOKEN` | Optional | Defaults if not yet saved inside `/admin` → **Bot & Numbers**. |
 
-## Environment variables (Vercel → Settings → Environment Variables)
+## Linking the Bot Securely (HTTPS Tunnel Recommended)
 
-| Key | What it is |
-|---|---|
-| `JWT_SECRET_KEY` | signs session cookies — long random string |
-| `ADMIN_EMAIL` | administrator account (`troykunsauka@gmail.com`) |
-| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` | verification + reset mail |
-| `CLOUDFLARE_ACCOUNT_ID` / `D1_DATABASE_ID` / `CLOUDFLARE_API_TOKEN` | Cloudflare D1 storage |
-| `ZAFAR_AUTH_API_URL` | shared auth backend base URL |
+1. **On the bot host / panel** (`.env` or Startup Variables):
+   ```ini
+   ADMIN_API_PORT=3000
+   ADMIN_DASHBOARD_TOKEN=<long-random-shared-secret>
+   DASHBOARD_URL=https://your-portal.vercel.app
+   # Optional if any browser origin ever calls the bot directly:
+   ADMIN_CORS_ORIGINS=https://your-portal.vercel.app
+   ```
+   Restart the bot and confirm `🌐 Dashboard API: on (port …)` in the console.
+2. **Expose `/admin/api` over HTTPS (Cloudflare Tunnel recommended)**:
+   Plain `http://<node-ip>:<port>` works through the server-side proxy, but sends `ADMIN_DASHBOARD_TOKEN` unencrypted across the network. Whenever possible, put `cloudflared` or an HTTPS reverse proxy in front of the bot port:
+   ```bash
+   # Quick tunnel test:
+   cloudflared tunnel --url http://127.0.0.1:3000
 
-`BOT_API_URL` and `ADMIN_DASHBOARD_TOKEN` are optional here: the admin console
-saves them into D1 at runtime, so nobody needs to see them in Vercel.
+   # Permanent production tunnel (Cloudflare Zero Trust → Networks → Tunnels):
+   # Route https://bot-api.yourdomain.com → http://127.0.0.1:3000
+   ```
+3. **Save inside `/admin` → Bot & Numbers**:
+   Paste the `https://` tunnel URL (or `http://<node-ip>:<allocated-port>`) and the same `ADMIN_DASHBOARD_TOKEN`, then click **Test & Save Bot Link**.
+   - Status probes time out in **3 seconds** and distinguish **Online**, **Awaiting Pair**, **Bot Offline**, and **Not Linked** immediately.
+   - If the bot is behind strict NAT with no inbound port or tunnel, keep `DASHBOARD_URL` set on the bot: `utils/allowlistSync.js` pulls `/api/bot/whitelist` every 5 minutes so member Allow/Disallow changes still apply.
 
-## Linking the bot
-
-The portal never talks to WhatsApp directly — every screen is served by the
-bot's `/admin/api/*` (`utils/adminApi.js`, started from `index.js`).
-
-1. **On the panel** (bot side): set two startup variables and restart.
-   * `ADMIN_DASHBOARD_TOKEN` — a long random string (this is the shared secret).
-   * `ADMIN_API_PORT` — the **Allocated Port** from the panel's *Network* tab.
-     The API listens on `0.0.0.0`, so the node IP can reach it.
-   The console prints `🌐 Dashboard API: on (port …)` once it is up.
-2. **Check it from outside**: `curl http://<node-ip>:<port>/admin/api/status -H
-   "Authorization: Bearer <token>"` must answer `{"connected":…}`.
-   *No answer?* The panel firewall/NAT is blocking the port, or the port was
-   not allocated. Open it, or put a Cloudflare Tunnel in front of
-   `http://127.0.0.1:<port>` and use the tunnel's `https://` URL.
-3. **In the portal**: `/admin` → **Bot Connection** → Bot Server URL
-   `http://<node-ip>:<port>` (or the tunnel URL) + the same token →
-   **Test connection**. These are stored in D1, not in Vercel env vars.
-4. If the bot cannot be reached inbound at all, set `DASHBOARD_URL` on the bot
-   instead: it pulls `/api/bot/whitelist` every few minutes, so member
-   Allow/Disallow still applies. Only live status and pairing need the port.
-
-Why server-side: the browser calls this Next.js app (`/api/admin/*`), which
-proxies to the bot (`lib/bot-proxy.ts`). The bot token never reaches the
-browser, and no CORS setup is needed on the panel.
-
-## Local development
+## Local Development
 
 ```bash
 cd dashboard
-npm install
-npm run dev      # http://localhost:3000
-npm run build    # what Vercel runs
+npm ci
+npm run dev        # http://localhost:3000 (dev outbox prints 6-digit codes locally)
 npm run typecheck
+npm run build
 ```

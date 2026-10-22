@@ -1,24 +1,27 @@
 /**
  * ZaFar Bot — Database
  *
- * Read-through in-memory cache: this bot is a single process, so every JSON
- * file is parsed once and then served from RAM; every mutation writes through
- * to disk immediately. Getters return LIVE references — do not mutate them
- * directly, always go through the update* functions.
+ * Read-through in-memory cache with atomic writes (temp file + rename) and
+ * `.bak` last-good recovery via utils/jsonStore.js.
+ * Getters return LIVE references — do not mutate them directly, always go
+ * through the update* functions.
  */
 
-const fs   = require('fs');
+const fs = require('fs');
 const path = require('path');
+const { writeJsonAtomic, readJsonSafe } = require('./utils/jsonStore');
 
-const DB_PATH      = path.join(__dirname, 'database');
+const DB_PATH = path.join(__dirname, 'database');
 const BOT_STATE_DB = path.join(DB_PATH, 'botstate.json');
 const PAPER_LOG_DB = path.join(DB_PATH, 'paper_log.json');
 
 if (!fs.existsSync(DB_PATH)) fs.mkdirSync(DB_PATH, { recursive: true });
 
+const isPlainObject = (v) => Boolean(v && typeof v === 'object' && !Array.isArray(v));
+
 const initDB = (filePath, defaultData = {}) => {
-  if (!fs.existsSync(filePath)) {
-    fs.writeFileSync(filePath, JSON.stringify(defaultData, null, 2));
+  if (!fs.existsSync(filePath) && !fs.existsSync(`${filePath}.bak`)) {
+    writeJsonAtomic(filePath, defaultData);
   }
 };
 
@@ -33,14 +36,24 @@ const _defaults = new Map([
 ]);
 
 const _cache = {};
+const _lastGood = {};
 
 const readDB = (filePath) => {
   if (!_cache[filePath]) {
-    try {
-      _cache[filePath] = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-    } catch (error) {
-      console.error(`[DB] Read error (${path.basename(filePath)}): ${error.message}`);
-      _cache[filePath] = JSON.parse(JSON.stringify(_defaults.get(filePath) || {}));
+    const def = _defaults.get(filePath) || {};
+    const res = readJsonSafe(filePath, {
+      defaultValue: def,
+      validate: isPlainObject,
+    });
+    if (res.ok) {
+      _cache[filePath] = res.data;
+      _lastGood[filePath] = JSON.parse(JSON.stringify(res.data));
+    } else if (_lastGood[filePath]) {
+      console.error(`[DB] Corrupt ${path.basename(filePath)} — keeping in-memory last-good state`);
+      _cache[filePath] = JSON.parse(JSON.stringify(_lastGood[filePath]));
+    } else {
+      console.error(`[DB] Read error (${path.basename(filePath)}): ${res.error?.message || 'corrupt JSON'}`);
+      _cache[filePath] = JSON.parse(JSON.stringify(def));
     }
   }
   return _cache[filePath];
@@ -48,8 +61,9 @@ const readDB = (filePath) => {
 
 const writeDB = (filePath, data) => {
   _cache[filePath] = data; // update cache first so readers never see stale data
+  _lastGood[filePath] = JSON.parse(JSON.stringify(data));
   try {
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+    writeJsonAtomic(filePath, data);
     return true;
   } catch (error) {
     console.error(`[DB] Write error (${path.basename(filePath)}): ${error.message}`);

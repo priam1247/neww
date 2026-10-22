@@ -33,7 +33,8 @@ const {
   downloadToFile, sniffFile, audioToMp3, tagMp3, safeName, fmtMB,
 } = require('../../utils/mediaTransfer');
 const log = require('../../utils/logger')('song');
-const { getTempDir, deleteTempFile } = require('../../utils/tempManager');
+const { getTempDir, deleteTempFile, holdTemp } = require('../../utils/tempManager');
+const diskSpace = require('../../utils/diskSpace');
 
 const MAX_AUDIO_MB = Number(config.song?.maxMB) || 120;
 const MAX_AUDIO_SECONDS = Number(config.song?.maxMinutes ? config.song.maxMinutes * 60 : 3 * 60 * 60);
@@ -106,7 +107,7 @@ const execute = async (sock, msg, args, extra) => {
 
         if (!results.length) {
           const engine = YT.resolveCommand() || await YT.ensureInstalled();
-          if (!engine) return reply(YT.friendlyError({ code: 'NO_YTDLP' }));
+          if (!engine) return reply(YT.friendlyError({ code: 'NO_YTDLP' }, { isOwner: Boolean(extra?.isOwner) }));
           return reply('❌ No results found for that search. Try a different spelling, or paste a YouTube link.');
         }
 
@@ -118,16 +119,9 @@ const execute = async (sock, msg, args, extra) => {
             header: `🔎 *Results for "${text}"*`,
             note: `Reply with a number (1-${results.length}) to download, or *cancel*.\n_Next time, add --first to skip this step._`,
           });
-          if (results[0].thumbnail) {
-            await sock.sendMessage(chatId, { image: { url: results[0].thumbnail }, caption: listText }, { quoted: msg })
-              .catch(() => reply(listText));
-          } else {
-            await reply(listText);
-          }
-
-          selections.offer({
-            chatId,
-            sender: extra?.sender || msg.key.participant || chatId,
+          await selections.sendTextPrompt(sock, msg, extra, {
+            text: listText,
+            image: results[0].thumbnail || null,
             items: results,
             label: 'song',
             ttlMs: Math.max(1, Number(config.search?.ttlMinutes) || 5) * 60 * 1000,
@@ -165,6 +159,13 @@ const execute = async (sock, msg, args, extra) => {
       }
 
       return await jobQueue.runInLane('light', async () => {
+      const releaseHold = holdTemp(id);
+      const diskReservation = diskSpace.reserveSpace(getTempDir(), MAX_AUDIO_MB * 2, {
+        label: 'song',
+        tagDir: getTempDir(),
+        tagPrefix: id,
+      });
+      try {
       await react('📥');
 
       // ── 3. Engine 1: yt-dlp ───────────────────────────────────────────────
@@ -292,18 +293,27 @@ const execute = async (sock, msg, args, extra) => {
         }, { quoted: msg });
       }
       await react('✅');
+      } finally {
+        diskReservation.release();
+        releaseHold();
+      }
       }, async () => {
         await react('⏳');
       });
     } catch (err) {
       log.error(`${text || 'song'} · ${YT.classify(err).code} · ${String(err.message).split('\n')[0]}`);
-      const info = YT.classify(err);
-      if (err.attempts && err.attempts.length) info.attempts = err.attempts;
-      YT.recordFailure({ ...info, url: err.url || null });
-      const summary = YT.attemptsSummary(err.attempts || info.attempts);
-      // one short line, never a stack of engine detail
-      const lines = String(YT.friendlyError(err) + summary).split('\n').filter(Boolean);
-      await reply(lines.slice(0, 3).join('\n'));
+      const isOwner = Boolean(extra?.isOwner);
+      if (err.code === 'NOT_ENOUGH_DISK') {
+        const { safeErrorMessage } = require('../../utils/userErrors');
+        await reply(safeErrorMessage(err, { isOwner }));
+      } else {
+        const info = YT.classify(err);
+        if (err.attempts && err.attempts.length) info.attempts = err.attempts;
+        YT.recordFailure({ ...info, url: err.url || null });
+        const summary = isOwner ? YT.attemptsSummary(err.attempts || info.attempts) : '';
+        const lines = String(YT.friendlyError(err, { isOwner }) + summary).split('\n').filter(Boolean);
+        await reply(lines.slice(0, 3).join('\n'));
+      }
       await react('❌');
     } finally {
       for (const f of files) deleteTempFile(f);
