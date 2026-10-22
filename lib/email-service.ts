@@ -34,7 +34,7 @@ async function dispatchMail(options: {
 
   try {
     await transporter.sendMail({
-      from: `"ZaFar Security" <${user}>`,
+      from: `"ZaFar Portal" <${user}>`,
       to: options.to,
       subject: options.subject,
       text: options.text,
@@ -42,8 +42,6 @@ async function dispatchMail(options: {
     });
     return { delivered: true };
   } catch (err) {
-    // Inside isolated dev containers where outbound TCP port 587 is firewalled
-    // (no SMTP server responseCode received), surface dev outbox in development only.
     if (
       process.env.NODE_ENV !== 'production' &&
       !(err as { responseCode?: number })?.responseCode
@@ -73,14 +71,14 @@ export async function sendVerificationEmail(
   ].join('\n');
 
   const html = `
-    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:480px;margin:0 auto;padding:28px;background:#090b10;color:#f4f7fb;border-radius:16px;border:1px solid #242b38;">
-      <div style="font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:#77e0bd;">ZaFar Control Room</div>
-      <h2 style="margin:12px 0 8px;font-size:20px;color:#f4f7fb;">Verify your email address</h2>
-      <p style="margin:0 0 20px;font-size:14px;line-height:1.6;color:#9fb0c5;">${greeting} enter the 6-digit code below to finish signing in to your ZaFar account:</p>
-      <div style="padding:18px;text-align:center;background:#11151e;border:1px solid #2f3a4c;border-radius:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:30px;font-weight:800;letter-spacing:0.28em;color:#77e0bd;">
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:480px;margin:0 auto;padding:28px;background:#ffffff;color:#0f172a;border-radius:16px;border:1px solid #e2e8f0;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#0d9488;">ZaFar Portal</div>
+      <h2 style="margin:10px 0 8px;font-size:20px;color:#0f172a;">Verify your email address</h2>
+      <p style="margin:0 0 20px;font-size:14px;line-height:1.6;color:#475569;">${greeting} enter the 6-digit code below to activate your ZaFar account:</p>
+      <div style="padding:18px;text-align:center;background:#f8fafc;border:1px solid #cbd5e1;border-radius:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:30px;font-weight:800;letter-spacing:0.28em;color:#0f766e;">
         ${code}
       </div>
-      <p style="margin:20px 0 0;font-size:12px;line-height:1.5;color:#8d98aa;">This code expires in 10 minutes. If you didn't request this verification email, you can safely ignore it.</p>
+      <p style="margin:20px 0 0;font-size:12px;line-height:1.5;color:#64748b;">This code expires in 10 minutes. If you didn't request this verification email, you can safely ignore it.</p>
     </div>
   `;
 
@@ -107,14 +105,14 @@ export async function sendPasswordResetEmail(
   ].join('\n');
 
   const html = `
-    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:480px;margin:0 auto;padding:28px;background:#090b10;color:#f4f7fb;border-radius:16px;border:1px solid #242b38;">
-      <div style="font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:#77e0bd;">ZaFar Security</div>
-      <h2 style="margin:12px 0 8px;font-size:20px;color:#f4f7fb;">Reset your password</h2>
-      <p style="margin:0 0 20px;font-size:14px;line-height:1.6;color:#9fb0c5;">Use the 6-digit code below to set a new password for your ZaFar account:</p>
-      <div style="padding:18px;text-align:center;background:#11151e;border:1px solid #2f3a4c;border-radius:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:30px;font-weight:800;letter-spacing:0.28em;color:#77e0bd;">
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:480px;margin:0 auto;padding:28px;background:#ffffff;color:#0f172a;border-radius:16px;border:1px solid #e2e8f0;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#0d9488;">ZaFar Security</div>
+      <h2 style="margin:10px 0 8px;font-size:20px;color:#0f172a;">Reset your password</h2>
+      <p style="margin:0 0 20px;font-size:14px;line-height:1.6;color:#475569;">Use the 6-digit code below to set a new password for your ZaFar account:</p>
+      <div style="padding:18px;text-align:center;background:#f8fafc;border:1px solid #cbd5e1;border-radius:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:30px;font-weight:800;letter-spacing:0.28em;color:#0f766e;">
         ${code}
       </div>
-      <p style="margin:20px 0 0;font-size:12px;line-height:1.5;color:#8d98aa;">This code expires in 10 minutes. If you didn't request this reset, your password will remain unchanged.</p>
+      <p style="margin:20px 0 0;font-size:12px;line-height:1.5;color:#64748b;">This code expires in 10 minutes. If you didn't request this reset, your password will remain unchanged.</p>
     </div>
   `;
 

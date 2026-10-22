@@ -7,11 +7,17 @@ import {
   sendVerificationEmail,
 } from './email-service';
 import { extractSessionToken, signSessionJwt, verifySessionJwt } from './jwt';
-import { findAccountByEmailOrUsername, upsertAccount } from './storage';
+import {
+  findAccountByEmailOrUsername,
+  isMemberEmailAllowed,
+  setMemberPermission,
+  upsertAccount,
+} from './storage';
 import { AuthUser, UserQuota } from './types';
 
+export const PRIMARY_ADMIN_EMAIL = 'troykunsauka@gmail.com';
 const DEFAULT_KOYEB_AUTH_URL = 'https://bloody-brigitta-ahzafar-de9b1709.koyeb.app';
-const CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const CODE_TTL_MS = 10 * 60 * 1000;
 const MAX_CODE_ATTEMPTS = 5;
 
 export class AuthServiceError extends Error {
@@ -26,15 +32,19 @@ export class AuthServiceError extends Error {
 }
 
 export function getAdminEmail(): string {
-  return (
-    process.env.ADMIN_EMAIL?.trim() ||
-    process.env.NEXT_PUBLIC_ADMIN_EMAIL?.trim() ||
-    'troykunsauka6@gmail.com'
-  );
+  return PRIMARY_ADMIN_EMAIL;
 }
 
 export function isAdminEmail(email: string): boolean {
-  return email.trim().toLowerCase() === getAdminEmail().toLowerCase();
+  const clean = email.trim().toLowerCase();
+  if (!clean) return false;
+  if (clean === PRIMARY_ADMIN_EMAIL) return true;
+
+  const configured = (process.env.ADMIN_EMAIL || '')
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+  return configured.includes(clean);
 }
 
 function getKoyebAuthUrl(): string {
@@ -96,7 +106,6 @@ async function callKoyebAuth<T>(
       headers,
       body,
       cache: 'no-store',
-      // 35s allows Koyeb free-tier cold start from deep sleep on first request
       signal: AbortSignal.timeout(35_000),
     });
   } catch (err) {
@@ -119,21 +128,24 @@ async function callKoyebAuth<T>(
   return data as T;
 }
 
-function toAuthUser(input: {
+async function buildAuthUser(input: {
   id: number | string;
   name: string;
   email: string;
   username: string;
   isVerified: boolean;
   createdAt?: string;
-}): AuthUser {
+}): Promise<AuthUser> {
+  const admin = isAdminEmail(input.email);
+  const memberAllowed = admin ? true : await isMemberEmailAllowed(input.email);
   return {
     id: input.id,
-    name: input.name || input.username || 'User',
+    name: input.name || input.username || 'Member',
     email: input.email,
     username: input.username,
     isVerified: input.isVerified,
-    isAdmin: isAdminEmail(input.email),
+    isAdmin: admin,
+    memberAllowed,
     createdAt: input.createdAt,
   };
 }
@@ -157,7 +169,6 @@ export async function registerUserAccount(params: {
     throw new AuthServiceError(400, 'Password must be at least 6 characters.');
   }
 
-  // Direct Nodemailer SMTP + D1/Persistent store when SMTP_USER & SMTP_PASS are set
   if (isDirectSmtpConfigured()) {
     const existing = await findAccountByEmailOrUsername(email);
     if (existing && existing.isVerified) {
@@ -193,7 +204,6 @@ export async function registerUserAccount(params: {
     };
   }
 
-  // Upstream Koyeb zafar-backend service (works zero-config on Vercel immediately)
   const upstream = await callKoyebAuth<{ message: string; email: string }>(
     '/auth/register',
     {
@@ -261,7 +271,7 @@ export async function verifyUserEmailCode(params: {
         verificationAttempts: 0,
       });
 
-      const user = toAuthUser(verified);
+      const user = await buildAuthUser(verified);
       const sessionToken = signSessionJwt({
         sub: user.email,
         email: user.email,
@@ -277,7 +287,7 @@ export async function verifyUserEmailCode(params: {
       };
     }
 
-    const user = toAuthUser(account);
+    const user = await buildAuthUser(account);
     const sessionToken = signSessionJwt({
       sub: user.email,
       email: user.email,
@@ -297,7 +307,6 @@ export async function verifyUserEmailCode(params: {
     json: { email, code },
   });
 
-  // If password is supplied right after signup, automatically sign the user in seamlessly
   if (params.password) {
     const signedIn = await signInWithEmailPassword({
       email,
@@ -377,7 +386,7 @@ export async function signInWithEmailPassword(params: {
         );
       }
 
-      const user = toAuthUser(account);
+      const user = await buildAuthUser(account);
       const sessionToken = signSessionJwt({
         sub: user.email,
         email: user.email,
@@ -388,7 +397,6 @@ export async function signInWithEmailPassword(params: {
     }
   }
 
-  // Authenticate against live zafar-backend service (Koyeb)
   let tokenRes: { access_token: string };
   try {
     tokenRes = await callKoyebAuth<{ access_token: string }>('/auth/login', {
@@ -417,10 +425,15 @@ export async function signInWithEmailPassword(params: {
     bearer: tokenRes.access_token,
   });
 
-  const user = toAuthUser({
+  const resolvedEmail = (profile.email || identifier).toLowerCase();
+  const resolvedName = profile.name || profile.username || 'Member';
+  const currentlyAllowed = await isMemberEmailAllowed(resolvedEmail);
+  await setMemberPermission(resolvedEmail, currentlyAllowed, resolvedName);
+
+  const user = await buildAuthUser({
     id: profile.id,
-    name: profile.name || profile.username,
-    email: profile.email || identifier,
+    name: resolvedName,
+    email: resolvedEmail,
     username: profile.username,
     isVerified: profile.is_verified,
     createdAt: profile.created_at,
@@ -560,7 +573,7 @@ export async function getAuthenticatedSession(req: NextRequest): Promise<{
       ]);
 
       return {
-        user: toAuthUser({
+        user: await buildAuthUser({
           id: me.id,
           name: me.name || me.username,
           email: me.email || claims.email || claims.sub,
@@ -580,7 +593,7 @@ export async function getAuthenticatedSession(req: NextRequest): Promise<{
   if (!account || !account.isVerified) return null;
 
   return {
-    user: toAuthUser(account),
+    user: await buildAuthUser(account),
     quota: null,
   };
 }
@@ -612,7 +625,7 @@ export async function updateUserDisplayName(
       json: { name: cleanName },
     });
 
-    const user = toAuthUser({
+    const user = await buildAuthUser({
       id: updated.id,
       name: updated.name || cleanName,
       email: updated.email || session.user.email,
@@ -639,7 +652,7 @@ export async function updateUserDisplayName(
     ...account,
     name: cleanName,
   });
-  const user = toAuthUser(saved);
+  const user = await buildAuthUser(saved);
   const sessionToken = signSessionJwt({
     sub: user.email,
     email: user.email,
