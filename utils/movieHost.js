@@ -150,7 +150,7 @@ function defaultQuality() {
 }
 
 function maxDownloadMB() {
-  return Number(moviesCfg().maxDownloadMB) || 4096;
+  return Number(moviesCfg().maxDownloadMB) || 2000;
 }
 
 function capabilities() {
@@ -403,7 +403,12 @@ async function drimeUpload(file, name, { onProgress } = {}) {
  *
  * @returns {Promise<{as:'video'|'document'|'link', bytes:number, link?:string, error?:string}>}
  */
-async function deliver(sock, chatId, msg, { file, title = '', caption = '', onProgress } = {}) {
+async function deliver(sock, chatId, msg, opts = {}) {
+  const release = require('./tempManager').holdTemp(opts.file);
+  try { return await deliverFile(sock, chatId, msg, opts); } finally { release(); }
+}
+
+async function deliverFile(sock, chatId, msg, { file, title = '', caption = '', onProgress } = {}) {
   const bytes = fs.statSync(file).size;
 
   if (shouldUploadDrime(bytes) && drimeReady()) {

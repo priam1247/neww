@@ -12,21 +12,20 @@ const config = require('../../config');
 const engine = require('../../utils/movieEngine');
 const host = require('../../utils/movieHost');
 
-const TIER_NAME = { 1: 'torrent', 2: 'ddl', 3: 'stream' };
+const TIER_NAME = { 1: 'torrent', 3: 'stream' };
 
 const providersCommand = {
   name: 'providers',
-  aliases: ['sources', 'health'],
+  aliases: ['sources'],
   category: 'general',
   description: 'Movie/series source health',
   usage: '.providers',
 
   async execute(sock, msg, args, extra) {
     try {
-      const [rows, metaRows, mirrorPools] = await Promise.all([
+      const [rows, metaRows] = await Promise.all([
         engine.providers(),
         engine.metadataTable().catch(() => []),
-        engine.mirrors().catch(() => []),
       ]);
       if (!rows.length) return extra.reply('No sources registered — the engine did not load.');
 
@@ -55,19 +54,11 @@ const providersCommand = {
         ...lines,
         '',
         `🔑 TMDB: ${m.tmdbKey ? 'set' : 'MISSING'}`,
-        `🔑 debrid: ${debrid.length ? debrid.join(', ') : 'none — torrents skipped, free sources only'}`,
+        `🔑 debrid: ${debrid.length ? debrid.join(', ') : config.movies?.torrentDirect !== false
+          ? 'none — torrents download directly'
+          : 'none — torrents skipped, free sources only'}`,
         `🧩 host: ${host.statusLine()}`,
         '',
-        ...(mirrorPools.length ? [
-          '🪞 *DDL mirrors*',
-          ...mirrorPools.map(p => {
-            const live = p.mirrors.filter(m => m.state === 'closed').length;
-            const benched = p.mirrors.filter(m => m.state === 'open').map(m => m.url.replace(/^https?:\/\//, ''));
-            return `• *${p.provider}* ${live}/${p.mirrors.length} up` +
-              (benched.length ? ` · benched: ${benched.join(', ')}` : '');
-          }),
-          '',
-        ] : []),
         `🗂 *Metadata* (${metaRows.filter(s => s.enabled).length}/${metaRows.length} live)`,
         '',
         ...metaLines,

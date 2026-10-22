@@ -2,8 +2,8 @@
  * Engine logger (ESM) — same shape as utils/logger.js so the panel log has one
  * visual language:
  *
- *   22:49:41.798  INFO   registry  registered provider: vidlink (tier 2)
- *   22:49:44.221  WARN   registry  hdhub4u tripped — open 30s (fetch failed)
+ *   22:49:41.798  INFO   registry  registered provider: vidlink (tier 3)
+ *   22:49:44.221  WARN   registry  vidlink tripped — open 30s (fetch failed)
  *
  * Levels: debug 20 < info 30 < warn 40 < error 50. LOG_LEVEL=debug for detail.
  * Every record is forced onto ONE line: long multi-line errors used to flood

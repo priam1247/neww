@@ -54,6 +54,7 @@ const GROUPS = [
       ['.allow  .disallow  .listusers', 'who may use the bot'],
       ['.on  .off', 'enable/disable a chat'],
       ['.cookies  .ytdl', 'YouTube bot-check tools'],
+      ['.health', 'runtime and media health'],
       ['.restart  .update  .broadcast', 'maintenance'],
     ],
   },

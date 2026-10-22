@@ -2,10 +2,8 @@
  * Sticker Command
  * Image/video → WhatsApp sticker (auto-compressed) with pack metadata.
  *
- * Uses the shared ffmpeg resolver: the old build hard-required the
- * `ffmpeg-static` package, which does not run on Termux/Android and is not
- * installed on some hosts — making .sticker fail while the rest of the bot
- * worked fine.
+ * Uses the shared ffmpeg resolver, preferring a system binary and falling back
+ * to the packaged binary when it runs on this host.
  */
 
 const fs = require('fs');

@@ -2,7 +2,7 @@
  * ZaFar Bot — ffmpeg helpers
  *
  * Every ffmpeg call must go through this module: it picks a binary that is
- * actually runnable on the host (system ffmpeg → user install → ffmpeg-static)
+ * actually runnable on the host (system ffmpeg → user install → installer package)
  * instead of assuming one specific packaging.
  *
  * Credits: original wrapper idea from the black-hat-md / Baileys community.
@@ -20,10 +20,9 @@ const FFMPEG_CANDIDATES = () => [
   '/usr/bin/ffmpeg',
   '/usr/local/bin/ffmpeg',
   path.join(os.homedir(), '.local', 'bin', 'ffmpeg'),
-  (() => { try { return require('ffmpeg-static'); } catch { return null; } })(),
   // @ffmpeg-installer ships the binary INSIDE a platform package, so it works
   // on panels that block npm install scripts (which is what killed
-  // ffmpeg-static here). This is what makes .song → mp3 and merged .ytv
+  // install-script-only binaries). This is what makes .song → mp3 and merged .ytv
   // possible on the Pterodactyl image.
   (() => {
     try {
@@ -50,7 +49,7 @@ function resolve() {
 }
 
 let _works = null;
-/** True when ffmpeg actually runs (ffmpeg-static does not run on Termux/Android). */
+/** True when ffmpeg actually runs (some packaged binaries do not run on Termux/Android). */
 function works() {
   if (_works === null) {
     try { execFileSync(resolve(), ['-version'], { stdio: 'ignore', timeout: 8000 }); _works = true; }

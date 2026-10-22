@@ -10,7 +10,7 @@
  *           cookie/proxy aware, streamed to disk (RAM stays flat).
  * Engine 2: remote providers (Gifted / cobalt) when the host IP is refused.
  *
- * Quiet by design: ⏳ → file → ✅ (or ❌ + one short line). No progress card.
+ * Quiet by design: ⏳ → file → ✅ (or ❌ + one short line); long jobs get a progress card.
  *
  * Upgrades over the old build:
  *   • automatic quality fallback when the requested size is too big,
@@ -26,22 +26,23 @@ const settings = require('../../utils/mediaSettings');
 const providers = require('../../utils/downloadProviders');
 const youtubeSearch = require('../../utils/youtubeSearch');
 const selections = require('../../utils/selections');
+const sendCache = require('../../utils/sendCache');
+const jobQueue = require('../../utils/jobQueue');
+const { createProgress } = require('../../utils/progressCard');
 const {
   downloadToFile, ensureWhatsAppMp4, safeName, fmtMB,
 } = require('../../utils/mediaTransfer');
 const { getTempDir, deleteTempFile } = require('../../utils/tempManager');
+const diskSpace = require('../../utils/diskSpace');
 const log = require('../../utils/logger')('ytv');
 
 // ─── LIMITS (config.video, see config.js) ────────────────────────────────────
-const MAX_VIDEO_MB   = Number(config.video?.maxMB) || 300;   // disk holds the file + Baileys' encrypted copy
-const MAX_MINUTES    = Number(config.video?.maxMinutes) || 60; // refuse longer videos
+const MAX_VIDEO_MB   = Number(config.video?.maxMB) || 2000;   // disk holds the file + Baileys' encrypted copy
+const MAX_MINUTES    = Number(config.video?.maxMinutes) || 0;  // 0 = any length
 const AS_DOC_ABOVE   = 50 * 1024 * 1024;    // above this, send as a document
 const DEFAULT_HEIGHT = Number(config.video?.defaultQuality) || 720;
 const QUALITIES      = [144, 240, 360, 480, 720, 1080].sort((a, b) => a - b);
-const LOCK_STALE_MS  = 30 * 60 * 1000;      // a job older than this is treated as dead
 const JOB_DEADLINE   = Number(config.ytdlp?.deadlineMs) || 10 * 60 * 1000;
-
-let busyUntil = 0; // one video job at a time keeps CPU/disk/RAM safe on a 2 GB host
 
 const bar = (percent) => {
   const filled = Math.max(0, Math.min(10, Math.round(percent / 10)));
@@ -66,6 +67,7 @@ const execute = async (sock, msg, args, extra) => {
   let height = Number(settings.get('videoQuality', 0)) || DEFAULT_HEIGHT;
   const last = String(args[args.length - 1] || '').toLowerCase().replace(/p$/, '');
   if (QUALITIES.includes(Number(last))) { height = Number(last); args.pop(); }
+  const requestedHeight = height;
 
   // --first (or a leading !) skips the results list and takes the top hit
   let firstHit = false;
@@ -95,6 +97,7 @@ const execute = async (sock, msg, args, extra) => {
 
     const pickerOn = config.search?.picker !== false && settings.get('searchPicker', true) !== false;
     if (results.length > 1 && pickerOn && !firstHit) {
+      void YT.getInfo(results[0].url).catch(() => {});
       const listText = youtubeSearch.formatResults(results, {
         header: `🔎 *Results for "${query}"*`,
         note: `Reply with a number (1-${results.length}) to download in ${height}p, or *cancel*.\n_Next time, add --first to skip this step._`,
@@ -129,6 +132,13 @@ const execute = async (sock, msg, args, extra) => {
     query = YT.normalizeYouTubeUrl(query);
   }
 
+  const videoId = YT.youtubeId(query);
+  const cacheKey = videoId ? `ytv:${videoId}:${requestedHeight}` : null;
+  if (cacheKey && await sendCache.replay(sock, chatId, msg, cacheKey)) {
+    await react('✅');
+    return;
+  }
+
   // ── Metadata (best effort) ───────────────────────────────────────────────
   if (!title || !duration) {
     try {
@@ -137,19 +147,22 @@ const execute = async (sock, msg, args, extra) => {
       author = author || i.uploader; thumbnail = thumbnail || i.thumbnail;
     } catch { /* the download attempt reports the real reason */ }
   }
-  if (duration && duration > MAX_MINUTES * 60) {
+  if (MAX_MINUTES && duration && duration > MAX_MINUTES * 60) {
     return say(`❌ Video is ${Math.round(duration / 60)} min — the limit is ${MAX_MINUTES} min.`);
   }
 
-  // One heavy job at a time; a stale lock (crashed job) never blocks forever.
-  if (Date.now() < busyUntil) return say('⏳ Another video is being processed. Try again in a minute.');
-  busyUntil = Date.now() + LOCK_STALE_MS;
+  let waited = false;
+  return await jobQueue.runInLane('heavy', async () => {
+    const stamp = `ytv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const outBase = path.join(getTempDir(), stamp);
+    const release = require('../../utils/tempManager').holdTemp(stamp);
+    const progress = config.media?.progressCard !== false
+      ? createProgress(sock, chatId, msg, { label: 'Downloading' })
+      : null;
 
-  const stamp = `ytv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  const outBase = path.join(getTempDir(), stamp);
-
-  try {
-    await react('⏳');
+    try {
+    if (!waited) await react('⏳');
+    diskSpace.requireMediaDownloadSpace(getTempDir(), config.media || {});
 
     // ── Download: yt-dlp first, with automatic quality fallback ────────────
     let file = null;
@@ -172,6 +185,7 @@ const execute = async (sock, msg, args, extra) => {
             log.debug(`yt-dlp profile ${name} failed · ${info.code}`);
             attempts.push({ engine: `yt-dlp:${name}`, code: info.code });
           },
+          onProgress: progress ? (p) => progress.update({ pct: p.percent, speed: p.speed, stage: 'downloading' }) : undefined,
         });
         file = res.file;
         height = q;
@@ -216,6 +230,7 @@ const execute = async (sock, msg, args, extra) => {
       const got = await downloadToFile(remoteHit.url, dest, {
         maxBytes: MAX_VIDEO_MB * 1024 * 1024,
         headers: remoteHit.headers,
+        onProgress: progress ? (p) => progress.update({ pct: p.percent, stage: 'downloading' }) : undefined,
       });
       file = dest;
       title = title || remoteHit.title;
@@ -229,6 +244,7 @@ const execute = async (sock, msg, args, extra) => {
       throw Object.assign(new Error('video too large'), { code: 'TOO_BIG' });
     }
 
+    diskSpace.requireMediaCopySpace(getTempDir(), fs.statSync(file).size / 1048576, config.media || {});
     // ── Make it playable in WhatsApp (no-op without ffmpeg) ────────────────
     const ready = await ensureWhatsAppMp4(file, path.join(getTempDir(), `${stamp}_wa.mp4`));
     const size = fs.statSync(ready).size;
@@ -237,9 +253,13 @@ const execute = async (sock, msg, args, extra) => {
 
     // Send from disk — Baileys streams it, no big Buffer in RAM.
     if (size > AS_DOC_ABOVE) {
-      await sock.sendMessage(chatId, { document: { url: ready }, mimetype: 'video/mp4', fileName: `${name}.mp4`, caption }, { quoted: msg });
+      progress?.update({ stage: 'uploading' });
+      const sent = await sock.sendMessage(chatId, { document: { url: ready }, mimetype: 'video/mp4', fileName: `${name}.mp4`, caption }, { quoted: msg });
+      if (cacheKey) sendCache.remember(cacheKey, sent);
     } else {
-      await sock.sendMessage(chatId, { video: { url: ready }, mimetype: 'video/mp4', caption }, { quoted: msg });
+      progress?.update({ stage: 'uploading' });
+      const sent = await sock.sendMessage(chatId, { video: { url: ready }, mimetype: 'video/mp4', caption }, { quoted: msg });
+      if (cacheKey) sendCache.remember(cacheKey, sent);
     }
     await react('✅');
   } catch (err) {
@@ -249,16 +269,23 @@ const execute = async (sock, msg, args, extra) => {
     // one short line on failure, never a wall of engine detail
     if (err.code === 'TOO_BIG') {
       await say(`❌ Too large even at the lowest quality — try \`.ytv <link> 360\` or a shorter video.`);
+    } else if (err.code === 'NOT_ENOUGH_DISK') {
+      await say(`❌ ${err.message}`);
     } else {
       const lines = String(YT.friendlyError(err) + YT.attemptsSummary(merged)).split('\n').filter(Boolean);
       await say(lines.slice(0, 3).join('\n'));
     }
     await react('❌');
   } finally {
+    if (progress) await progress.done();
+    release();
     sweep(stamp);
-    busyUntil = 0;
     if (typeof global.gc === 'function') global.gc();
   }
+  }, async () => {
+    waited = true;
+    await react('⏳');
+  });
 };
 
 module.exports = {

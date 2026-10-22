@@ -1442,20 +1442,307 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
 
   await test('cleanup sweeps temp/movies subfolders, not just loose files', () => {
     const { cleanupOldFiles } = require(path.join(REPO, 'utils/cleanup.js'));
-    const { getTempDir } = require(path.join(REPO, 'utils/tempManager.js'));
+    const { getTempDir, holdTemp } = require(path.join(REPO, 'utils/tempManager.js'));
     const dir = path.join(getTempDir(), 'movies', 'data');
     fs.mkdirSync(dir, { recursive: true });
+    const stamp = `fresh_${Date.now()}`;
     const stale = path.join(dir, `stale_${Date.now()}.part`);
-    const fresh = path.join(dir, `fresh_${Date.now()}.part`);
+    const fresh = path.join(dir, `${stamp}.part`);
     fs.writeFileSync(stale, Buffer.alloc(64, 1));
     fs.writeFileSync(fresh, Buffer.alloc(64, 1));
-    const old = (Date.now() - 3 * 60 * 60 * 1000) / 1000;
-    fs.utimesSync(stale, old, old);
-    cleanupOldFiles();
-    assert.ok(!fs.existsSync(stale), 'stale file inside temp/movies survived cleanup');
-    assert.ok(fs.existsSync(fresh), 'a fresh download was deleted');
-    try { fs.unlinkSync(fresh); } catch { /* ignore */ }
+    const release = holdTemp(stamp);           // like a download still in flight
+    try {
+      // `now` is injectable, so the tree can be aged without touching clocks
+      cleanupOldFiles(null, { now: Date.now() + 3 * 60 * 60 * 1000 });
+      assert.ok(!fs.existsSync(stale), 'stale file inside temp/movies survived cleanup');
+      assert.ok(fs.existsSync(fresh), 'a fresh download was deleted');
+    } finally {
+      release();
+      try { fs.unlinkSync(fresh); } catch { /* ignore */ }
+    }
   });
+
+  console.log('\n── direct torrent download support ──');
+
+  await test('pickTorrentFile selects the right video and excludes samples', async () => {
+    const { pickTorrentFile } = await import(pathToFileURL(path.join(REPO, 'engine/media/torrent.js')).href);
+    const MB = 1024 * 1024;
+    const files = [
+      { name: 'Film.mp4', length: 700 * MB },
+      { name: 'Film.mkv', length: 900 * MB },
+      { name: 'Film.sample.mkv', length: 1200 * MB },
+      { name: 'Film.txt', length: 500 * MB },
+      { name: 'tiny.mkv', length: 20 * MB },
+    ];
+    assert.strictEqual(pickTorrentFile(files), files[1], 'largest eligible video not selected');
+    assert.strictEqual(pickTorrentFile([{ name: 'small.mkv', length: 29 * MB }]), null, 'video below 30 MB was selected');
+
+    const episodes = [
+      { name: 'Show.S01E01.mkv', length: 700 * MB },
+      { name: 'Show.1x02.mp4', length: 500 * MB },
+      { name: 'Show.S01.E02.webm', length: 800 * MB },
+      { name: 'Show.S01E02.sample.mkv', length: 1200 * MB },
+    ];
+    assert.strictEqual(pickTorrentFile(episodes, { season: 1, episode: 2 }), episodes[2], 'matching episode was not preferred');
+    assert.strictEqual(pickTorrentFile(files, { fileIdx: 0 }), files[0], 'valid fileIdx was ignored');
+    assert.strictEqual(pickTorrentFile([{ name: 'readme.txt', length: 500 * MB }]), null, 'non-video was selected');
+  });
+
+  await test('downloader keeps HTTP downloads available without loading WebTorrent', async () => {
+    const torrentSource = fs.readFileSync(path.join(REPO, 'engine/media/torrent.js'), 'utf8');
+    assert.doesNotMatch(torrentSource, /^\s*import\s+.*\bfrom\s*['"]webtorrent['"]/m, 'WebTorrent is imported statically');
+
+    const { download } = await import(pathToFileURL(path.join(REPO, 'engine/media/downloader.js')).href);
+    const payload = Buffer.from('http download without torrent engine');
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-length': payload.length, 'content-type': 'video/mp4' });
+      res.end(payload);
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const file = path.join(sandbox, 'http-without-torrent.mp4');
+    try {
+      const result = await download({ kind: 'file', url: `http://127.0.0.1:${server.address().port}/video.mp4` }, file);
+      assert.strictEqual(result.bytes, payload.length);
+      assert.deepStrictEqual(fs.readFileSync(file), payload);
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+    }
+  });
+
+  await test('resolveCandidate returns seeded magnets without debrid and rejects low-seed torrents', async () => {
+    const { default: resolver } = await import(pathToFileURL(path.join(REPO, 'engine/core/resolver.js')).href);
+    const { default: debrid } = await import(pathToFileURL(path.join(REPO, 'engine/providers/debrid/index.js')).href);
+    const { default: config } = await import(pathToFileURL(path.join(REPO, 'engine/config.js')).href);
+    assert.strictEqual(config.torrentDirect, true, 'direct torrent downloads are disabled in this test');
+    const originalActive = debrid.active;
+    debrid.active = () => [];
+    try {
+      const candidate = {
+        kind: 'torrent', provider: 'knaben', title: 'Sintel', seeds: config.torrentMinSeeds,
+        magnet: 'magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10', fileIdx: 2, sizeMB: 100,
+      };
+      const out = await resolver.resolveCandidate(candidate, { season: 1, episode: 2, quality: 720 });
+      assert.strictEqual(out.kind, 'torrent');
+      assert.strictEqual(out.url, candidate.magnet);
+      assert.strictEqual(out.magnet, candidate.magnet);
+      assert.strictEqual(out.fileIdx, 2);
+      assert.strictEqual(out.season, 1);
+      assert.strictEqual(out.episode, 2);
+      assert.strictEqual(out.verified, true);
+      await assert.rejects(
+        () => resolver.resolveCandidate({ ...candidate, seeds: config.torrentMinSeeds - 1 }, {}),
+        /not enough torrent seeds/,
+      );
+    } finally {
+      debrid.active = originalActive;
+    }
+  });
+
+  await test('download routes torrent sources to torrentToFile with metadata', async () => {
+    const { download, _setTorrentDownloaderForTests } = await import(pathToFileURL(path.join(REPO, 'engine/media/downloader.js')).href);
+    const { default: config } = await import(pathToFileURL(path.join(REPO, 'engine/config.js')).href);
+    let received;
+    _setTorrentDownloaderForTests(async (...args) => {
+      received = args;
+      return { file: '/tmp/selected.mkv' };
+    });
+    try {
+      const result = await download({
+        kind: 'torrent', magnet: 'magnet:?xt=urn:btih:abc', fileIdx: 4, season: 2, episode: 3,
+      }, '/tmp/movie.mp4', () => {});
+      assert.deepStrictEqual(result, { file: '/tmp/selected.mkv' });
+      assert.strictEqual(received[0], 'magnet:?xt=urn:btih:abc');
+      assert.strictEqual(received[1], '/tmp/movie.mp4');
+      assert.strictEqual(received[2].fileIdx, 4);
+      assert.strictEqual(received[2].season, 2);
+      assert.strictEqual(received[2].episode, 3);
+      assert.strictEqual(received[2].maxMB, config.maxDownloadMB);
+      assert.strictEqual(typeof received[2].onProgress, 'function');
+    } finally {
+      _setTorrentDownloaderForTests(null);
+    }
+  });
+
+  await test('MKV media is sent as a document with Matroska MIME type', async () => {
+    const host = require(path.join(REPO, 'utils/movieHost.js'));
+    const file = path.join(sandbox, 'direct-torrent.mkv');
+    fs.writeFileSync(file, 'mkv-data');
+    let sent;
+    await host.sendMedia({ sendMessage: async (_chat, content) => { sent = content; } }, 'chat', {}, {
+      file, title: 'Sintel',
+    });
+    assert.ok(sent.document, 'MKV was not sent as a document');
+    assert.strictEqual(sent.mimetype, 'video/x-matroska');
+    assert.strictEqual(sent.fileName, 'Sintel.mkv');
+  });
+
+  // ─── silent-video regressions (real ffmpeg; skipped when unavailable) ───────
+  console.log('\n▶ silent video guards');
+  {
+    const MT = require(path.join(REPO, 'utils', 'mediaTransfer'));
+    const YT = require(path.join(REPO, 'utils', 'youtubedl'));
+    const getFfmpeg = require(path.join(REPO, 'utils', 'ffmpeg'));
+    const { execFileSync } = require('child_process');
+
+    await test('findProduced ignores per-format DASH parts (base.f137.mp4)', async () => {
+      const dir = fs.mkdtempSync(path.join(sandbox, 'fp-'));
+      const base = path.join(dir, 'ytv_1');
+      fs.writeFileSync(`${base}.f137.mp4`, 'v');
+      fs.writeFileSync(`${base}.f251.webm`, 'a');
+      assert.strictEqual(YT.findProduced(base), null, 'a video-only part was taken as the result');
+      fs.writeFileSync(`${base}.mp4`, 'merged');
+      assert.strictEqual(YT.findProduced(base), `${base}.mp4`);
+    });
+
+    await test('sniff: mp4 with moov at the end is not mistaken for audio', async () => {
+      const head = Buffer.concat([Buffer.from([0, 0, 0, 0x20]), Buffer.from('ftypisom'), Buffer.alloc(4000, 0)]);
+      assert.strictEqual(MT.sniff(head).kind, 'video');
+      const m4a = Buffer.concat([Buffer.from([0, 0, 0, 0x20]), Buffer.from('ftypM4A '), Buffer.alloc(4000, 0)]);
+      assert.strictEqual(MT.sniff(m4a).kind, 'audio');
+    });
+
+    const ffOk = getFfmpeg.works() && (() => {
+      try { execFileSync(getFfmpeg(), ['-hide_banner', '-encoders'], { stdio: 'pipe' }).toString().match(/libx264/) || (() => { throw 0; })(); return true; }
+      catch { return false; }
+    })();
+    if (!ffOk) {
+      console.log('  ⏭  ffmpeg/libx264 not available — skipping probe/transcode checks');
+    } else {
+      const dir = fs.mkdtempSync(path.join(sandbox, 'ff-'));
+      const ff = (args) => execFileSync(getFfmpeg(), ['-y', '-hide_banner', '-loglevel', 'error', ...args], { stdio: 'pipe' });
+      const silent = path.join(dir, 'silent.mp4');
+      const opus = path.join(dir, 'opus.mp4');
+      const unmergedBase = path.join(dir, 'unmerged');
+      ff(['-f', 'lavfi', '-i', 'testsrc=size=160x120:rate=10', '-t', '1', '-an',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', `${unmergedBase}.f134.mp4`]);
+      ff(['-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '1', '-vn',
+        '-c:a', 'aac', `${unmergedBase}.f140.m4a`]);
+      ff(['-f', 'lavfi', '-i', 'testsrc=size=160x120:rate=10', '-t', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', silent]);
+      ff(['-f', 'lavfi', '-i', 'testsrc=size=160x120:rate=10', '-f', 'lavfi', '-i', 'sine=frequency=440',
+        '-t', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'libopus', '-strict', '-2', '-shortest', opus]);
+
+      await test('assertProduced merges one leftover video and audio part into an A/V MP4', async () => {
+        const merged = YT.assertProduced(unmergedBase, '', 'video');
+        assert.strictEqual(merged, `${unmergedBase}.mp4`);
+        assert.ok(!fs.existsSync(`${unmergedBase}.f134.mp4`) && !fs.existsSync(`${unmergedBase}.f140.m4a`),
+          'the source parts were not deleted after merging');
+        const info = await MT.probeMedia(merged);
+        assert.ok(info.probed && info.hasVideo && info.hasAudio, JSON.stringify(info));
+      });
+
+      await test('probeMedia tells a mute video from one with sound', async () => {
+        const a = await MT.probeMedia(silent);
+        assert.ok(a.probed && a.hasVideo && !a.hasAudio, JSON.stringify(a));
+        const b = await MT.probeMedia(opus);
+        assert.ok(b.probed && b.hasVideo && b.hasAudio && b.audioCodec === 'opus', JSON.stringify(b));
+      });
+
+      await test('ensureWhatsAppMp4 re-encodes Opus audio to AAC (WhatsApp plays Opus-in-mp4 mute)', async () => {
+        const out = await MT.ensureWhatsAppMp4(opus, path.join(dir, 'opus_wa.mp4'));
+        const info = await MT.probeMedia(out);
+        assert.ok(out !== opus, 'file was passed through untouched');
+        assert.strictEqual(info.audioCodec, 'aac', JSON.stringify(info));
+        assert.strictEqual(info.videoCodec, 'h264', 'video should have been stream-copied');
+      });
+    }
+  }
+
+  // ─── cleanup / .movie length / per-command smoke ───────────────────────────
+  console.log('\n▶ temp holds, fake movie clips, command smoke');
+  {
+    const TM = require(path.join(REPO, 'utils', 'tempManager'));
+    const CL = require(path.join(REPO, 'utils', 'cleanup'));
+
+    await test('cleanup never deletes a held job file, even when it looks old', async () => {
+      const dir = fs.mkdtempSync(path.join(sandbox, 'cl-'));
+      const f = path.join(dir, 'dl_123_abc_wa.mp4');
+      const g = path.join(dir, 'junk.tmp');
+      fs.writeFileSync(f, 'x'); fs.writeFileSync(g, 'x');
+      const old = new Date(Date.now() - 5 * 3600 * 1000);
+      fs.utimesSync(f, old, old); fs.utimesSync(g, old, old);
+      const release = TM.holdTemp('dl_123_abc');
+      CL.cleanupOldFiles(dir);
+      assert.ok(fs.existsSync(f), 'held file was deleted');
+      release();
+      // utimes moved mtime back, but ctime is "now" → still too fresh to sweep
+      CL.cleanupOldFiles(dir);
+      assert.ok(fs.existsSync(f), 'a file written seconds ago was swept because of an old mtime');
+    });
+
+    await test('moviebox skips 2-minute "[Hindi] [Full movie]" fakes and music items', async () => {
+      const { pickMatch, minStreamSeconds } = await import(pathToFileURL(path.join(REPO, 'engine/providers/stream/moviebox.js')).href);
+      const items = [
+        { subjectType: 6, title: 'Spider-Man Theme Song', releaseDate: '2026-01-01', hasResource: true, subjectId: '1', detailPath: 'a' },
+        { subjectType: 1, title: 'Spider-Man: Brand New Day[Hindi] [Full movie]', releaseDate: '2026-07-31', hasResource: true, duration: 157, subjectId: '2', detailPath: 'b' },
+        { subjectType: 1, title: 'Spider-Man: Brand New Day', releaseDate: '2026-07-31', hasResource: true, duration: 8100, subjectId: '3', detailPath: 'c' },
+      ];
+      assert.strictEqual(pickMatch(items, { title: 'Spider-Man: Brand New Day', year: '2026', type: 'movie' }).subjectId, '3');
+      assert.ok(minStreamSeconds({ runtime: 0 }, false) >= 40 * 60);
+      assert.ok(minStreamSeconds({ runtime: 148 }, false) > 80 * 60);
+    });
+
+    await test('moviebox rejects unrelated titles and prefers clean exact matches', async () => {
+      const { pickMatch } = await import(pathToFileURL(path.join(REPO, 'engine/providers/stream/moviebox.js')).href);
+      const dune = pickMatch([
+        { subjectType: 1, title: 'Rebel Moon - Part Two: The Scargiver', releaseDate: '2024-04-19', duration: 7200, subjectId: 'rebel' },
+      ], { title: 'Dune: Part Two', year: 2024, type: 'movie' });
+      assert.strictEqual(dune, null);
+
+      const spider = pickMatch([
+        { subjectType: 1, title: 'Spider-Man: Brand New Day[Hindi] [Full movie]', releaseDate: '2026-07-31', duration: 7200, subjectId: 'junk' },
+        { subjectType: 1, title: 'Spider-Man: Brand New Day', releaseDate: '2026-07-31', duration: 7200, subjectId: 'real' },
+      ], { title: 'Spider-Man: Brand New Day', year: 2026, type: 'movie' });
+      assert.strictEqual(spider.subjectId, 'real');
+
+      const breakingBad = pickMatch([
+        { subjectType: 2, title: 'Breaking Bad S1', subjectId: 'series' },
+      ], { title: 'Breaking Bad', type: 'series' });
+      assert.strictEqual(breakingBad.subjectId, 'series');
+    });
+
+    const movie = require(path.join(REPO, 'commands', 'media', 'movie'));
+    await test('.movie: minimum playtime follows the real runtime', () => {
+      assert.strictEqual(movie._minPlaySeconds(0), 40 * 60);
+      assert.strictEqual(movie._minPlaySeconds(150), 150 * 60 * 0.6);
+      assert.strictEqual(movie._minPlaySeconds(0, 'episode'), 5 * 60);
+    });
+
+    await test('disk preflight uses statfs and configured movie/media thresholds', () => {
+      const disk = require(path.join(REPO, 'utils', 'diskSpace'));
+      const statfs = (free) => () => ({ bavail: free, bsize: 1024 * 1024 });
+      assert.throws(
+        () => disk.requireMovieSpace('/fake', 2000, { minFreeMB: 800, diskSizeMultiplier: 2, diskOverheadMB: 500 }, statfs(4000)),
+        /not enough disk \(3\.9 GB free/,
+      );
+      assert.doesNotThrow(() => disk.requireMovieSpace('/fake', 2000, {}, statfs(5000)));
+      assert.throws(() => disk.requireMediaDownloadSpace('/fake', { diskMinFreeMB: 1500 }, statfs(1499)), /not enough disk/);
+      assert.throws(() => disk.requireMediaCopySpace('/fake', 1000, { diskCopyMultiplier: 1.2, diskCopyOverheadMB: 300 }, statfs(1499)), /not enough disk/);
+
+      const warnings = [];
+      const oldError = console.error;
+      console.error = (...args) => warnings.push(args.join(' '));
+      try {
+        const unavailable = () => { throw new Error('statfs unavailable'); };
+        assert.strictEqual(disk.freeMB('/fake', unavailable), null);
+        assert.doesNotThrow(() => disk.requireFreeSpace('/fake', 100, unavailable));
+        assert.doesNotThrow(() => disk.requireMovieSpace('/fake', 2000, {}, unavailable));
+        assert.doesNotThrow(() => disk.requireMediaDownloadSpace('/fake', {}, unavailable));
+        assert.doesNotThrow(() => disk.requireMediaCopySpace('/fake', 100, {}, unavailable));
+      } finally {
+        console.error = oldError;
+      }
+      assert.strictEqual(warnings.length, 1);
+    });
+
+    const getFfmpeg = require(path.join(REPO, 'utils', 'ffmpeg'));
+    if (getFfmpeg.works()) {
+      await test('.movie rejects a downloaded trailer-length file', async () => {
+        const clip = path.join(sandbox, 'clip.mp4');
+        require('child_process').execFileSync(getFfmpeg(), ['-y', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=size=64x48:rate=5', '-t', '3', '-pix_fmt', 'yuv420p', clip]);
+        await assert.rejects(() => movie._assertFullLength(clip, 120), /trailer\/fake/);
+      });
+    }
+  }
 
   // ─── summary ────────────────────────────────────────────────────────────────
   console.log(`\n${'─'.repeat(52)}`);
