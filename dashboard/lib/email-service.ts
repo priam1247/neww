@@ -5,8 +5,55 @@ export interface EmailSendResult {
   devPreviewCode?: string;
 }
 
+export function isResendConfigured(): boolean {
+  return Boolean(process.env.RESEND_API_KEY?.trim());
+}
+
 export function isDirectSmtpConfigured(): boolean {
   return Boolean(process.env.SMTP_USER?.trim() && process.env.SMTP_PASS?.trim());
+}
+
+export function isMailDeliveryConfigured(): boolean {
+  return isResendConfigured() || isDirectSmtpConfigured();
+}
+
+async function sendViaResend(options: {
+  to: string;
+  subject: string;
+  text: string;
+  html: string;
+}): Promise<EmailSendResult> {
+  const apiKey = process.env.RESEND_API_KEY?.trim() || '';
+  const from =
+    process.env.EMAIL_FROM?.trim() ||
+    (process.env.SMTP_USER?.trim()
+      ? `ZaFar Portal <${process.env.SMTP_USER.trim()}>`
+      : 'ZaFar Portal <onboarding@resend.dev>');
+
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from,
+      to: [options.to],
+      subject: options.subject,
+      text: options.text,
+      html: options.html,
+    }),
+    cache: 'no-store',
+    signal: AbortSignal.timeout(10_000),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => null);
+    throw new Error(
+      errBody?.message || `Email API error (${res.status})`,
+    );
+  }
+  return { delivered: true };
 }
 
 async function dispatchMail(options: {
@@ -16,6 +63,22 @@ async function dispatchMail(options: {
   html: string;
   code: string;
 }): Promise<EmailSendResult> {
+  if (isResendConfigured()) {
+    return sendViaResend(options);
+  }
+
+  if (!isDirectSmtpConfigured()) {
+    if (process.env.NODE_ENV !== 'production') {
+      console.info(
+        `[ZaFar Local Dev Outbox] Mail provider not configured — code for ${options.to}: ${options.code}`,
+      );
+      return { delivered: false, devPreviewCode: options.code };
+    }
+    throw new Error(
+      'Email delivery is not configured yet. Set RESEND_API_KEY or SMTP_USER + SMTP_PASS in dashboard environment variables.',
+    );
+  }
+
   const host = process.env.SMTP_HOST?.trim() || 'smtp.gmail.com';
   const port = Number(process.env.SMTP_PORT || 587);
   const user = process.env.SMTP_USER?.trim() || '';
@@ -27,14 +90,14 @@ async function dispatchMail(options: {
     secure: port === 465,
     requireTLS: port !== 465,
     auth: { user, pass },
-    connectionTimeout: 12_000,
-    greetingTimeout: 12_000,
-    socketTimeout: 15_000,
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 12_000,
   });
 
   try {
     await transporter.sendMail({
-      from: `"ZaFar Portal" <${user}>`,
+      from: process.env.EMAIL_FROM?.trim() || `"ZaFar Portal" <${user}>`,
       to: options.to,
       subject: options.subject,
       text: options.text,
@@ -118,7 +181,7 @@ export async function sendPasswordResetEmail(
 
   return dispatchMail({
     to: email,
-    subject: 'Your ZaFar password reset code',
+    subject: `${code} is your ZaFar password reset code`,
     text,
     html,
     code,

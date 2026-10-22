@@ -230,9 +230,9 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
 
   return (
     <div className="bg-portal-canvas flex min-h-screen flex-col justify-between px-4 py-8 sm:px-6">
-      <div className="mx-auto flex w-full max-w-[1080px] items-center justify-between">
+      <div className="mx-auto flex w-full max-w-[1080px] flex-wrap items-center justify-between gap-2.5">
         <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-teal-600 font-mono text-sm font-extrabold text-white shadow-sm">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-teal-600 font-mono text-sm font-extrabold text-white shadow-sm">
             ZF
           </div>
           <div>

@@ -38,7 +38,7 @@ const cfg = {
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
 
   // keys — TMDB is required, everything else is optional enrichment
-  tmdbKey: process.env.TMDB_API_KEY || '98bb6b66ece431fbea8a0ee9c18ac712',
+  tmdbKey: process.env.TMDB_API_KEY || '',
   omdbKey: process.env.OMDB_API_KEY || '',
   traktClientId: process.env.TRAKT_CLIENT_ID || '',
   // DEBRID_API_KEY is accepted as a generic alias (Real-Debrid by default)

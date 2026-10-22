@@ -2,28 +2,24 @@ name: Deploy bot to XS Systems panel
 
 # Pterodactyl-style panels (XS Systems included) have no GitHub integration:
 # no webhook, no git in the File Manager, and the console is the bot's stdin —
-# typing "git pull" there does nothing. So the push happens from GitHub
-# instead: these files go over the SFTP details the panel already shows, then
-# the panel API restarts the server.
-#
-# Nothing runs until the secrets exist — without them this workflow is a green
-# no-op, so forks and pull requests are unaffected.
+# typing "git pull" there does nothing. So:
+#   1. `selftest` runs `npm ci && npm run selftest` + builds `dashboard/` first.
+#   2. Only after `selftest` passes on `main` (or manual dispatch), `deploy`
+#      uploads the bot files over SFTP using a dedicated restricted panel
+#      subuser, then triggers a restart over HTTPS via `PANEL_API_KEY`.
 #
 #   Repo → Settings → Secrets and variables → Actions
 #   secrets:  PANEL_SFTP_HOST  PANEL_SFTP_PORT  PANEL_SFTP_USER  PANEL_SFTP_PASS
-#             PANEL_API_KEY   (optional, panel → Account → API Credentials)
-#   vars:     PANEL_URL  PANEL_SERVER_ID  (optional — enables the auto-restart)
-#
-# Host/port/user/number come straight from the panel's "SFTP Details" box; the
-# password is the one you log into the panel with — it is only ever used here,
-# inside the runner, and never written to a file or the log.
+#             PANEL_API_KEY   (client key from a restricted panel subuser)
+#   vars:     PANEL_URL  PANEL_SERVER_ID  (enables automatic HTTPS restart)
 
 on:
   push:
     branches: [main]
     paths-ignore:
-      - 'dashboard/**'      # the web portal deploys to Vercel, not to the panel
       - '**.md'
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       bootstrap:
@@ -32,12 +28,37 @@ on:
         default: false
 
 concurrency:
-  group: panel-deploy
+  group: panel-deploy-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  selftest:
+    name: Selftest & Dashboard Build Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install bot dependencies & run offline selftest
+        run: |
+          npm ci
+          npm run selftest
+
+      - name: Verify standalone dashboard typecheck & build
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+
   deploy:
     name: Upload to panel over SFTP
+    needs: selftest
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -56,6 +77,16 @@ jobs:
             echo "::notice::PANEL_SFTP_HOST / PANEL_SFTP_USER / PANEL_SFTP_PASS are not all set — skipping the panel deploy."
           fi
 
+      - uses: actions/setup-node@v4
+        if: steps.cfg.outputs.ready == 'true'
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Pre-upload selftest gate
+        if: steps.cfg.outputs.ready == 'true'
+        run: npm ci && npm run selftest
+
       - name: Install lftp
         if: steps.cfg.outputs.ready == 'true'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq lftp
@@ -73,7 +104,6 @@ jobs:
           INCLUDE_GIT: ${{ inputs.bootstrap == true && '1' || '0' }}
         run: |
           set -euo pipefail
-          # a password containing " or \ would break the lftp command string
           SAFE_PASS=${SFTP_PASS//\\/\\\\}
           SAFE_PASS=${SAFE_PASS//\"/\\\"}
           EXCLUDES=(
@@ -85,6 +115,7 @@ jobs:
             --exclude-glob data/
             --exclude-glob .env
             --exclude-glob 'database/*.json'
+            --exclude-glob 'database/*.bak'
             --exclude-glob '*.log'
           )
           if [ "$INCLUDE_GIT" != "1" ]; then
@@ -103,11 +134,6 @@ jobs:
 
       - name: Restart the server so the new code runs
         if: steps.cfg.outputs.ready == 'true'
-        # `run:` steps execute with `bash -e`, so ONE failed command aborts the
-        # step with curl's own exit code — that turned run 39775470548 red after
-        # a perfectly good upload. Nothing here may fail the job, a wrong URL
-        # must not stop the restart, and the diagnostics go into the annotation
-        # so they are visible without opening the log.
         shell: bash
         env:
           PANEL_URL: ${{ vars.PANEL_URL || secrets.PANEL_URL }}
@@ -121,18 +147,15 @@ jobs:
             exit 0
           fi
 
-          # candidates: the configured URL, then the panel next to the SFTP node
-          # (eu3-node.xsystemshosting.com → panel.xsystemshosting.com), https and http
+          # HTTPS-only candidate list so PANEL_API_KEY is never sent over cleartext HTTP
           CANDS=()
           [ -n "$PANEL_URL" ] && CANDS+=("$PANEL_URL")
           if [ -n "$SFTP_HOST" ]; then
             BASE_HOST="panel.${SFTP_HOST#*.}"
-            CANDS+=("https://$BASE_HOST" "http://$BASE_HOST")
+            CANDS+=("https://$BASE_HOST")
           fi
           [ ${#CANDS[@]} -eq 0 ] && CANDS=("https://panel.xsystemshosting.com")
 
-          # Pterodactyl's client API addresses a server by its SHORT identifier
-          # (32197077), not the UUID (32197077-0d94-…). Try both shapes.
           IDS=("$PANEL_SERVER_ID")
           case "$PANEL_SERVER_ID" in
             *-*) IDS+=("${PANEL_SERVER_ID%%-*}") ;;
@@ -142,35 +165,31 @@ jobs:
           for raw in "${CANDS[@]}"; do
             BASE=${raw%/}
             BASE=${BASE%%/server/*}
-            [ -z "$BASE" ] && continue
-          for id in "${IDS[@]}"; do
-            echo "→ $BASE  server=$id"
-            code=$(curl -sS --max-time 20 -o /tmp/out -w '%{http_code}' -X POST \
-              "$BASE/api/client/servers/$id/power" \
-              -H "Authorization: Bearer $PANEL_API_KEY" \
-              -H 'Accept: application/json' \
-              -H 'Content-Type: application/json' \
-              -d '{"signal":"restart"}' 2>/tmp/err) || code="curl:$?"
-            body=$(head -c 200 /tmp/out 2>/dev/null | tr -d '\n')
-            err=$(head -c 160 /tmp/err 2>/dev/null | tr -d '\n')
-            echo "   $code $body $err"
-            LAST="$code @ $BASE (server=$id)"
-            case "$code" in
-              200|204) ok="$BASE"; break 2 ;;
-              404) continue ;;                                 # wrong id shape — next id
-              000|curl:6|curl:7|curl:28|curl:35) continue 2 ;; # unreachable — next host
-              *) break 2 ;;                                    # reachable, refused: report it
-            esac
+            case "$BASE" in https://*) ;; *) continue ;; esac
+            for id in "${IDS[@]}"; do
+              echo "→ $BASE  server=$id"
+              code=$(curl -sS --max-time 20 -o /tmp/out -w '%{http_code}' -X POST \
+                "$BASE/api/client/servers/$id/power" \
+                -H "Authorization: Bearer $PANEL_API_KEY" \
+                -H 'Accept: application/json' \
+                -H 'Content-Type: application/json' \
+                -d '{"signal":"restart"}' 2>/tmp/err) || code="curl:$?"
+              err=$(head -c 160 /tmp/err 2>/dev/null | tr -d '\n')
+              echo "   status=$code $err"
+              LAST="$code @ $BASE (server=$id)"
+              case "$code" in
+                200|204) ok="$BASE"; break 2 ;;
+                404) continue ;;
+                000|curl:6|curl:7|curl:28|curl:35) continue 2 ;;
+                *) break 2 ;;
+              esac
             done
           done
 
-          # Last try: an ADMIN (application) key lives under another prefix.
-          # Same token, different endpoint — free to attempt, silent if useless.
           if [ -z "$ok" ]; then
             for raw in "${CANDS[@]}"; do
               BASE=${raw%/}; BASE=${BASE%%/server/*}
-              case "$BASE" in http://*) continue ;; esac      # only https for this one
-              [ -z "$BASE" ] && continue
+              case "$BASE" in https://*) ;; *) continue ;; esac
               for id in "${IDS[@]}"; do
                 code=$(curl -sS --max-time 20 -o /tmp/out -w '%{http_code}' -X POST \
                   "$BASE/api/application/servers/$id/power" \
@@ -185,9 +204,10 @@ jobs:
             done
           fi
 
+          rm -f /tmp/out /tmp/err
           if [ -n "$ok" ]; then
             echo "::notice::✅ Restart requested via $ok"
             exit 0
           fi
-          echo "::warning::Restart not accepted ($LAST). The files ARE uploaded — press Restart in the panel. (401/403 = PANEL_API_KEY is not a client key or was revoked; curl:6/35 = that host is unreachable from the runner.)"
+          echo "::warning::Restart not accepted ($LAST). The files ARE uploaded — press Restart in the panel."
           exit 0

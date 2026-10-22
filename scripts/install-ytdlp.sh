@@ -7,6 +7,7 @@ cd "$(dirname "$0")/.."
 
 # yt-dlp is usable either as a command or as a python module
 have_ytdlp() {
+  if [ -x ./bin/yt-dlp ]; then ./bin/yt-dlp --version >/dev/null 2>&1 && return 0; fi
   if command -v yt-dlp >/dev/null 2>&1; then yt-dlp --version >/dev/null 2>&1 && return 0; fi
   python3 -m yt_dlp --version >/dev/null 2>&1 && return 0
   return 1

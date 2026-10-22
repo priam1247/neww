@@ -2,23 +2,62 @@ import crypto from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
 
 export const SESSION_COOKIE_NAME = 'zafar_session';
-export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7; // 7 days (matches zafar-backend)
+export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7; // 7 days
+const MIN_SECRET_LENGTH = 16;
+
+export class JwtConfigError extends Error {
+  status = 503;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'JwtConfigError';
+  }
+}
 
 export interface SessionClaims {
   sub: string;
   email?: string;
   name?: string;
   uid?: number | string;
-  upstream?: string; // upstream Koyeb bearer token when authenticated via zafar-backend
   exp: number;
   iat?: number;
 }
 
-function getSigningSecret(): string {
-  const configured = process.env.JWT_SECRET_KEY?.trim();
-  if (configured) return configured;
+function isProductionRuntime(): boolean {
+  return (
+    process.env.NODE_ENV === 'production' &&
+    process.env.NEXT_PHASE !== 'phase-production-build'
+  );
+}
 
-  // Ephemeral per-instance secret when relying purely on upstream zafar-backend verification
+export function assertProductionJwtSecret(): void {
+  if (!isProductionRuntime()) return;
+  const configured = process.env.JWT_SECRET_KEY?.trim() || '';
+  if (configured.length < MIN_SECRET_LENGTH) {
+    throw new JwtConfigError(
+      `FATAL: JWT_SECRET_KEY must be set to at least ${MIN_SECRET_LENGTH} characters in production.`,
+    );
+  }
+}
+
+function getSigningSecret(): string {
+  const configured = process.env.JWT_SECRET_KEY?.trim() || '';
+  if (configured) {
+    if (isProductionRuntime() && configured.length < MIN_SECRET_LENGTH) {
+      throw new JwtConfigError(
+        `JWT_SECRET_KEY must be at least ${MIN_SECRET_LENGTH} characters in production.`,
+      );
+    }
+    return configured;
+  }
+
+  if (isProductionRuntime()) {
+    throw new JwtConfigError(
+      'JWT_SECRET_KEY environment variable is required in production.',
+    );
+  }
+
+  // Development-only ephemeral secret
   if (!globalThis.__zafarRuntimeJwtSecret) {
     globalThis.__zafarRuntimeJwtSecret = crypto.randomBytes(32).toString('hex');
   }
@@ -49,6 +88,7 @@ export function signSessionJwt(
   claims: Omit<SessionClaims, 'exp' | 'iat'>,
   expiresInSeconds = SESSION_MAX_AGE_SECONDS,
 ): string {
+  const secret = getSigningSecret();
   const now = Math.floor(Date.now() / 1000);
   const header = toBase64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
   const payload = toBase64Url(
@@ -60,13 +100,21 @@ export function signSessionJwt(
   );
   const signingInput = `${header}.${payload}`;
   const sig = crypto
-    .createHmac('sha256', getSigningSecret())
+    .createHmac('sha256', secret)
     .update(signingInput)
     .digest();
   return `${signingInput}.${toBase64Url(sig)}`;
 }
 
 export function verifySessionJwt(token: string): SessionClaims | null {
+  let secret: string;
+  try {
+    secret = getSigningSecret();
+  } catch (err) {
+    if (err instanceof JwtConfigError) throw err;
+    return null;
+  }
+
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
@@ -76,7 +124,7 @@ export function verifySessionJwt(token: string): SessionClaims | null {
     if (header?.alg !== 'HS256') return null;
 
     const expectedSig = crypto
-      .createHmac('sha256', getSigningSecret())
+      .createHmac('sha256', secret)
       .update(`${headerB64}.${payloadB64}`)
       .digest();
     const providedSig = fromBase64Url(sigB64);
@@ -104,9 +152,8 @@ export function verifySessionJwt(token: string): SessionClaims | null {
 }
 
 export function extractSessionToken(req: NextRequest): string | null {
-  const bearer = req.headers
-    .get('x-session-token')
-    ?.trim() ||
+  const bearer =
+    req.headers.get('x-session-token')?.trim() ||
     req.headers
       .get('authorization')
       ?.replace(/^Bearer\s+/i, '')

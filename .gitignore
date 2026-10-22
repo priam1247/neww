@@ -22,6 +22,8 @@ database/*.tmp
 # web portal build output (dashboard/)
 .next/
 dashboard/.next/
+dashboard/.data/
+dashboard/next-env.d.ts
 .vercel/
 next-env.d.ts
 

@@ -52,6 +52,9 @@ export interface AdminOverviewPayload {
   botEnabledForMembers: boolean;
   storageEngine: 'bot-live' | 'cloudflare-d1' | 'persistent-db';
   upstreamHost?: string | null;
+  isInsecureHttp?: boolean;
+  botReachable?: boolean;
+  botError?: string | null;
   connected: boolean;
   botNumber: string | null;
   users: ApprovedUser[];
@@ -65,6 +68,8 @@ export interface MemberOverviewPayload {
   memberAllowed: boolean;
   botEnabledForMembers: boolean;
   botServerLinked: boolean;
+  botReachable?: boolean;
+  botError?: string | null;
   botConnected: boolean;
   botNumber: string | null;
   numbers: ApprovedUser[];

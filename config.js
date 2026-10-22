@@ -51,11 +51,10 @@ module.exports = {
 
   packname: env.PACK_NAME || 'ZaFar Bot',
 
-  // Gifted API (fallback downloader). Register your own key at
-  // api.gifted.co.ke — the shipped one is heavily used and may be disabled.
+  // Gifted API (optional fallback downloader). Set GIFTED_API_KEY in .env.
   giftedApi: {
     baseUrl: env.GIFTED_API_URL || 'https://api.gifted.co.ke',
-    apiKey: env.GIFTED_API_KEY || '_0u5aff45,_0l1876s8qc',
+    apiKey: env.GIFTED_API_KEY || '',
   },
 
   // ─── yt-dlp / YouTube (used by .song and .ytv) ────────────────────────────
@@ -165,9 +164,13 @@ module.exports = {
   admin: {
     token: env.ADMIN_DASHBOARD_TOKEN || '',
     // Pterodactyl hands the container a port (SERVER_PORT / PORT); on other
-    // hosts ADMIN_API_PORT is the one to set. 3000 is only a last resort.
-    port: Number(env.ADMIN_API_PORT || env.SERVER_PORT || env.PORT || 3000),
-    dashboardUrl: (env.DASHBOARD_URL || env.ZAFAR_AUTH_API_URL || '').replace(/\/+$/, ''),
+    // hosts ADMIN_API_PORT (or ADMIN_PORT) is the one to set. 3000 is last resort.
+    port: Number(env.ADMIN_API_PORT || env.ADMIN_PORT || env.SERVER_PORT || env.PORT || 3000),
+    dashboardUrl: (env.DASHBOARD_URL || '').replace(/\/+$/, ''),
+    corsOrigins: String(env.ADMIN_CORS_ORIGINS || '')
+      .split(',')
+      .map((s) => s.trim().replace(/\/+$/, ''))
+      .filter(Boolean),
     syncMinutes: Number(env.DASHBOARD_SYNC_MINUTES || 5),
   },
 
@@ -178,7 +181,7 @@ module.exports = {
     // ── metadata sources ──────────────────────────────────────────────────
     // TMDB is the primary source (free key). Everything below it is a fallback
     // and none of them is required: the engine uses whatever answers.
-    tmdbKey: env.TMDB_API_KEY || '98bb6b66ece431fbea8a0ee9c18ac712',
+    tmdbKey: env.TMDB_API_KEY || '',
     omdbKey: env.OMDB_API_KEY || '',                 // optional: ratings/runtime
     traktClientId: env.TRAKT_CLIENT_ID || '',        // optional: trending/ids
     metadata: {
@@ -241,9 +244,9 @@ module.exports = {
   // Replaces the old Google Drive + Service Account setup. Get an access
   // token from Drime Cloud → Account Settings → Developers.
   drime: {
-    // Katabump has no environment-variable panel — set the real token here.
+    // Set DRIME_API_TOKEN in .env or panel Startup Variables (never commit keys).
     // Get it from Drime Cloud → Account Settings → Developers.
-    apiToken: env.DRIME_API_TOKEN || '58989|qn4Jom8CnuscD7WDvp7FHLH3v1B7dzNOYgCe0l3i372d67fe',
+    apiToken: env.DRIME_API_TOKEN || '',
     baseUrl: env.DRIME_BASE_URL || 'https://app.drime.cloud/api/v1',
     // Folder ID (numeric) of the folder in your Drime workspace that
     // contains the past-papers vault — from GET /drive/file-entries.

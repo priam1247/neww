@@ -66,8 +66,8 @@ export function PairingCodeBanner({ activePair, onDismiss }: PairingCodeBannerPr
       </div>
 
       <div className="mt-3.5 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <code className="rounded-xl border border-teal-200 bg-white px-4 py-2.5 font-mono text-2xl font-bold tracking-[0.2em] text-slate-900 shadow-sm tabular-nums">
+        <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
+          <code className="rounded-xl border border-teal-200 bg-white px-3.5 py-2 font-mono text-xl font-bold tracking-[0.16em] text-slate-900 shadow-sm tabular-nums sm:px-4 sm:py-2.5 sm:text-2xl sm:tracking-[0.2em]">
             {activePair.code}
           </code>
           <button

@@ -2263,6 +2263,93 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       assert.ok(!idxSrc.includes("sock.ev.on('messages.update'"), 'empty messages.update listener still in index.js');
     });
 
+    await test('Phase 5: adminApi CORS allowlist, dashboard JWT guard, local D1 auth, rate-limit, fast offline probe', async () => {
+      const { startAdminApi } = require(path.join(REPO, 'utils/adminApi.js'));
+      const port = 3390 + Math.floor(Math.random() * 500);
+      const api = startAdminApi({
+        port,
+        token: 'cors-test-token',
+        allowedOrigins: ['https://portal.example.com'],
+        hooks: { status: async () => ({ connected: true, botNumber: '265991234567' }) },
+      });
+      try {
+        await new Promise((r) => setTimeout(r, 80));
+        // Server-to-server: no wildcard CORS
+        const s2s = await fetch(`http://127.0.0.1:${port}/admin/api/status`, {
+          headers: { Authorization: 'Bearer cors-test-token' },
+        });
+        assert.strictEqual(s2s.status, 200);
+        assert.strictEqual(s2s.headers.get('access-control-allow-origin'), null);
+
+        // Disallowed browser origin preflight -> 403
+        const badPreflight = await fetch(`http://127.0.0.1:${port}/admin/api/status`, {
+          method: 'OPTIONS',
+          headers: { Origin: 'https://evil.example.org' },
+        });
+        assert.strictEqual(badPreflight.status, 403);
+
+        // Allowed browser origin -> echoed origin + Vary: Origin
+        const okOrigin = await fetch(`http://127.0.0.1:${port}/admin/api/status`, {
+          headers: {
+            Authorization: 'Bearer cors-test-token',
+            Origin: 'https://portal.example.com',
+          },
+        });
+        assert.strictEqual(okOrigin.status, 200);
+        assert.strictEqual(okOrigin.headers.get('access-control-allow-origin'), 'https://portal.example.com');
+        assert.match(String(okOrigin.headers.get('vary')), /Origin/i);
+      } finally {
+        await api.stop();
+      }
+
+      const jwtSrc = fs.readFileSync(path.join(REPO, 'dashboard/lib/jwt.ts'), 'utf8');
+      assert.match(jwtSrc, /JWT_SECRET_KEY environment variable is required in production/);
+      assert.ok(fs.existsSync(path.join(REPO, 'dashboard/instrumentation.ts')));
+      assert.ok(fs.existsSync(path.join(REPO, 'dashboard/scripts/check-prod-env.mjs')));
+
+      const authSrc = fs.readFileSync(path.join(REPO, 'dashboard/lib/auth-engine.ts'), 'utf8');
+      assert.ok(!authSrc.includes('bloody-brigitta-ahzafar'), 'hardcoded Koyeb URL still in auth-engine.ts');
+
+      const loginSrc = fs.readFileSync(path.join(REPO, 'dashboard/app/api/auth/login/route.ts'), 'utf8');
+      assert.match(loginSrc, /checkRateLimit/);
+      assert.match(loginSrc, /status:\s*429/);
+
+      const proxySrc = fs.readFileSync(path.join(REPO, 'dashboard/lib/bot-proxy.ts'), 'utf8');
+      assert.match(proxySrc, /STATUS_TIMEOUT_MS\s*=\s*3_000/);
+    });
+
+    await test('Phase 6 & Secrets: CI selftest gate, Procfile alignment, log redaction, and clean config defaults', async () => {
+      const pkg = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+      const procfile = fs.readFileSync(path.join(REPO, 'Procfile'), 'utf8').trim();
+      assert.strictEqual(procfile, `web: ${pkg.scripts.start}`, 'Procfile and package.json start script drifted');
+
+      const wf = fs.readFileSync(path.join(REPO, '.github/workflows/deploy-panel.yml'), 'utf8');
+      assert.match(wf, /npm ci/);
+      assert.match(wf, /npm run selftest/);
+      assert.match(wf, /needs:\s*selftest/);
+      assert.match(wf, /database\/\*\.json/);
+      assert.ok(!wf.includes('"http://$BASE_HOST"'), 'deploy workflow must not try cleartext HTTP with PANEL_API_KEY');
+
+      const { redactSecrets } = require(path.join(REPO, 'utils/safeLog.js'));
+      const dirty =
+        'Authorization: Bearer superSecretToken12345 ptlc_abcdef1234567890 token=mySecret99 ' +
+        '58989|qn4Jom8CnuscD7WDvp7FHLH3v1B7dzNOYgCe0l3i372d67fe http://user:myPass@proxy.local:8080';
+      const clean = redactSecrets(dirty);
+      assert.ok(!clean.includes('superSecretToken12345'), 'Bearer token leaked');
+      assert.ok(!clean.includes('abcdef1234567890'), 'ptlc_ key leaked');
+      assert.ok(!clean.includes('mySecret99'), 'query token leaked');
+      assert.ok(!clean.includes('qn4Jom8Cnusc'), 'Sanctum token leaked');
+      assert.ok(!clean.includes('myPass'), 'proxy password leaked');
+
+      const cfgSrc = fs.readFileSync(path.join(REPO, 'config.js'), 'utf8');
+      const engCfgSrc = fs.readFileSync(path.join(REPO, 'engine/config.js'), 'utf8');
+      for (const leaked of ['_0u5aff45', '98bb6b66ece431fbea8a0ee9c18ac712', 'qn4Jom8Cnusc']) {
+        assert.ok(!cfgSrc.includes(leaked), `hardcoded key still in config.js: ${leaked}`);
+        assert.ok(!engCfgSrc.includes(leaked), `hardcoded key still in engine/config.js: ${leaked}`);
+      }
+      assert.strictEqual(require(path.join(REPO, 'config.js')).pairNumber, '');
+    });
+
     await test('nothing is cached: a delivered movie file is deleted', async () => {
       const host = require(path.join(REPO, 'utils', 'movieHost'));
       const file = path.join(host.tempDir(), `no-cache-${Date.now()}.mp4`);

@@ -444,6 +444,8 @@ function cookieFile() {
 
 // ─── PROXY ────────────────────────────────────────────────────────────────────
 
+const { maskUrlCredentials } = require('./safeLog');
+
 const proxyUrl = () => {
   const cfg = config.ytdlp || {};
   // Runtime setting (.ytdl proxy) wins over config/environment.
@@ -1367,7 +1369,7 @@ async function diagnostics() {
     cookieSource: ci.source,
     cookieCount: ci.count,
     cookieAgeMs: ci.mtime ? Date.now() - ci.mtime : null,
-    proxy: proxyUrl() || null,
+    proxy: maskUrlCredentials(proxyUrl()) || null,
     capabilities: {
       version: caps.version,
       impersonate: caps.impersonate && !caps.impersonateBroken,

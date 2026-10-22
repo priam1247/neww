@@ -5,6 +5,7 @@ import {
   isAdminEmail,
 } from '@/lib/auth-engine';
 import { fetchLiveBotStatus, getResolvedBotTarget } from '@/lib/bot-proxy';
+import { JwtConfigError } from '@/lib/jwt';
 import {
   isUsingCloudflareD1,
   listAllMembers,
@@ -14,7 +15,16 @@ import {
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
-  const session = await getAuthenticatedSession(req);
+  let session;
+  try {
+    session = await getAuthenticatedSession(req);
+  } catch (err) {
+    if (err instanceof JwtConfigError) {
+      return NextResponse.json({ error: err.message }, { status: 503 });
+    }
+    throw err;
+  }
+
   if (!session) {
     return NextResponse.json(
       { error: 'Please sign in with your administrator email.' },
@@ -45,6 +55,7 @@ export async function GET(req: NextRequest) {
     botServerLinked: Boolean(target.baseUrl && target.token),
     botApiUrl: target.rawUrl,
     hasBotToken: Boolean(target.token),
+    isInsecureHttp: target.isInsecureHttp,
     botEnabledForMembers: target.botEnabledForMembers,
     storageEngine: liveStatus.reachable
       ? 'bot-live'
@@ -52,6 +63,8 @@ export async function GET(req: NextRequest) {
         ? 'cloudflare-d1'
         : 'persistent-db',
     upstreamHost: target.hostLabel,
+    botReachable: liveStatus.reachable,
+    botError: liveStatus.error || null,
     connected: liveStatus.connected,
     botNumber: liveStatus.botNumber,
     latencyMs: liveStatus.latencyMs,

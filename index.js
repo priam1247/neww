@@ -18,7 +18,7 @@
 // Override with NODE_ENV=development when debugging locally.
 process.env.NODE_ENV = process.env.NODE_ENV || 'production';
 
-const { formatArgs } = require('./utils/safeLog');
+const { formatArgs, redactArg } = require('./utils/safeLog');
 const { initializeTempSystem } = require('./utils/tempManager');
 const { startCleanup } = require('./utils/cleanup');
 const { startDiskGuard } = require('./utils/diskGuard');
@@ -49,21 +49,21 @@ const forbiddenPatternsConsole = [
 console.log = (...args) => {
   const message = formatArgs(args);
   if (!forbiddenPatternsConsole.some(pattern => message.includes(pattern))) {
-    originalConsoleLog.apply(console, args);
+    originalConsoleLog.apply(console, args.map(redactArg));
   }
 };
 
 console.error = (...args) => {
   const message = formatArgs(args);
   if (!forbiddenPatternsConsole.some(pattern => message.includes(pattern))) {
-    originalConsoleError.apply(console, args);
+    originalConsoleError.apply(console, args.map(redactArg));
   }
 };
 
 console.warn = (...args) => {
   const message = formatArgs(args);
   if (!forbiddenPatternsConsole.some(pattern => message.includes(pattern))) {
-    originalConsoleWarn.apply(console, args);
+    originalConsoleWarn.apply(console, args.map(redactArg));
   }
 };
 
@@ -468,6 +468,7 @@ require('./utils/logger').banner([
   startAdminApi({
     port: admin.port,
     token: admin.token,
+    allowedOrigins: admin.corsOrigins || [],
     hooks: {
       status: async () => {
         const number = connectedNumber();
