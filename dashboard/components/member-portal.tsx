@@ -205,6 +205,39 @@ export function MemberPortal() {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error || 'Could not request code');
+
+      if (json.pending && json.requestId) {
+        setNotice({
+          text: `Requesting 60-second linking code from live bot for +${num}…`,
+        });
+        const deadline = Date.now() + 26_000;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 1500));
+          const pollRes = await fetch(
+            `/api/member/pair?requestId=${encodeURIComponent(json.requestId)}`,
+            { headers: authHeaders(), cache: 'no-store' },
+          );
+          const pollJson = await pollRes.json();
+          if (!pollRes.ok) {
+            throw new Error(pollJson?.error || 'Failed to get linking code');
+          }
+          if (!pollJson.pending && pollJson.code) {
+            setActivePair({
+              ok: true,
+              code: pollJson.code,
+              expiresInSeconds: Number(pollJson.expiresInSeconds) || 60,
+              number: num,
+              issuedAt: Date.now(),
+            });
+            setNotice({
+              text: `Generated your 60-second WhatsApp linking code for +${num}.`,
+            });
+            return;
+          }
+        }
+        throw new Error('Timed out waiting for live bot to issue pairing code.');
+      }
+
       setActivePair({
         ok: true,
         code: json.code,

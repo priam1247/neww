@@ -14,8 +14,8 @@ function redactSecrets(input) {
   if (!s) return s;
   // Authorization: Bearer <token>
   s = s.replace(/\b(Bearer\s+)[A-Za-z0-9._~+|/-]{8,}/gi, '$1[REDACTED]');
-  // Pterodactyl client / application keys
-  s = s.replace(/\b(ptl[ca]_)[A-Za-z0-9]{12,}/g, '$1[REDACTED]');
+  // Pterodactyl & Hydrodactyl client / application keys (ptlc_, ptla_, hydro_)
+  s = s.replace(/\b(ptl[ca]_|hydro_)[A-Za-z0-9]{6,}/g, '$1[REDACTED]');
   // Sanctum / Drime tokens like 58989|qn4Jom8Cnusc...
   s = s.replace(/\b\d+\|[A-Za-z0-9]{24,}\b/g, '[REDACTED_TOKEN]');
   // URL user:password@host credentials (proxies, SFTP, etc.)

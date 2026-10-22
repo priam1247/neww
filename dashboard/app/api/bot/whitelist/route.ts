@@ -1,40 +1,58 @@
-import crypto from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
-import { getBotConnectionConfig, listStoredWhatsAppUsers } from '@/lib/storage';
+import { verifyBotSyncRequest } from '@/lib/bot-sync-auth';
+import {
+  checkRateLimit,
+  getClientIp,
+  recordRateLimitHit,
+} from '@/lib/rate-limit';
+import { computeWhitelistSnapshot } from '@/lib/storage';
 
 export const dynamic = 'force-dynamic';
 
 /**
- * Pull sync endpoint allowing ZaFar Bot instances behind NAT / firewalls to
- * fetch active approved numbers using `Authorization: Bearer <ADMIN_DASHBOARD_TOKEN>`.
+ * Versioned whitelist pull endpoint (`ETag` / `If-None-Match` supported)
+ * authenticated via `BOT_SYNC_TOKEN` or `ADMIN_DASHBOARD_TOKEN`.
  */
 export async function GET(req: NextRequest) {
-  const cfg = await getBotConnectionConfig();
-  const expected = cfg.botAdminToken;
-  const provided =
-    req.headers.get('authorization')?.replace(/^Bearer\s+/i, '').trim() ||
-    req.headers.get('x-admin-token')?.trim() ||
-    '';
+  const ipKey = `botwl:ip:${getClientIp(req)}`;
+  const rate = checkRateLimit(ipKey, 60, 60_000);
+  if (!rate.allowed) {
+    return NextResponse.json(
+      { error: 'Rate limit exceeded' },
+      {
+        status: 429,
+        headers: { 'Retry-After': String(rate.retryAfterSeconds) },
+      },
+    );
+  }
+  recordRateLimitHit(ipKey, 60_000);
 
-  if (!expected || !provided) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const auth = await verifyBotSyncRequest(req, '');
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.error }, { status: auth.status });
   }
 
-  const a = Buffer.from(provided);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const snapshot = await computeWhitelistSnapshot();
+  const etag = `"${snapshot.version}"`;
+  const ifNoneMatch = req.headers.get('if-none-match')?.trim();
+
+  if (ifNoneMatch && (ifNoneMatch === etag || ifNoneMatch === snapshot.version)) {
+    return new NextResponse(null, {
+      status: 304,
+      headers: { ETag: etag },
+    });
   }
 
-  const all = await listStoredWhatsAppUsers();
-  const activeUsers = cfg.botEnabledForMembers
-    ? all.filter((u) => u.enabled)
-    : [];
-
-  return NextResponse.json({
-    ok: true,
-    botEnabledForMembers: cfg.botEnabledForMembers,
-    numbers: activeUsers.map((u) => u.number),
-    users: all,
-  });
+  return NextResponse.json(
+    {
+      ok: true,
+      version: snapshot.version,
+      botEnabledForMembers: snapshot.botEnabledForMembers,
+      numbers: snapshot.numbers,
+      users: snapshot.users,
+    },
+    {
+      headers: { ETag: etag },
+    },
+  );
 }

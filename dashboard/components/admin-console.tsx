@@ -47,9 +47,9 @@ import { AccountModal } from './account-modal';
 type AdminTab = 'members' | 'bot' | 'guide';
 type MemberFilter = 'all' | 'allowed' | 'disallowed';
 
-const BOT_ENV_EXAMPLE = `ADMIN_API_PORT=3000
-ADMIN_DASHBOARD_TOKEN=choose-a-strong-shared-secret
-DASHBOARD_URL=https://your-portal.vercel.app`;
+const BOT_ENV_EXAMPLE = `DASHBOARD_URL=https://your-portal.vercel.app
+BOT_SYNC_TOKEN=choose-a-strong-bot-sync-secret
+ADMIN_API_ENABLED=false`;
 
 export function AdminConsole() {
   const router = useRouter();
@@ -88,8 +88,17 @@ export function AdminConsole() {
   // Bot & numbers state
   const [botUrlInput, setBotUrlInput] = useState('');
   const [botTokenInput, setBotTokenInput] = useState('');
+  const [botSyncTokenInput, setBotSyncTokenInput] = useState('');
   const [showBotToken, setShowBotToken] = useState(false);
   const [savingBot, setSavingBot] = useState(false);
+
+  // Hydrodactyl / Pterodactyl Panel Control state
+  const [panelUrlInput, setPanelUrlInput] = useState('https://panel.xsystemshosting.com');
+  const [panelServerIdInput, setPanelServerIdInput] = useState('');
+  const [panelKeyInput, setPanelKeyInput] = useState('');
+  const [showPanelKey, setShowPanelKey] = useState(false);
+  const [savingPanel, setSavingPanel] = useState(false);
+  const [sendingPower, setSendingPower] = useState<string | null>(null);
 
   const [numInput, setNumInput] = useState('');
   const [numLabel, setNumLabel] = useState('');
@@ -121,6 +130,10 @@ export function AdminConsole() {
         if (hydrateInputs) {
           setBotUrlInput(json.botApiUrl || '');
           setBotTokenInput(json.hasBotToken ? '••••••••' : '');
+          setBotSyncTokenInput(json.hasBotSyncToken ? '••••••••' : '');
+          setPanelUrlInput(json.panelUrl || 'https://panel.xsystemshosting.com');
+          setPanelServerIdInput(json.panelServerId || '');
+          setPanelKeyInput(json.hasPanelApiKey ? '••••••••' : '');
         }
       } catch (err) {
         setNotice({
@@ -246,6 +259,7 @@ export function AdminConsole() {
         body: JSON.stringify({
           botApiUrl: botUrlInput.trim(),
           botAdminToken: botTokenInput.trim(),
+          botSyncToken: botSyncTokenInput.trim(),
         }),
       });
       const json = await res.json();
@@ -377,6 +391,74 @@ export function AdminConsole() {
     }
   };
 
+  const handleSavePanel = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingPanel(true);
+    try {
+      const res = await fetch('/api/admin/panel', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          action: 'save_and_discover',
+          panelUrl: panelUrlInput.trim(),
+          panelServerId: panelServerIdInput.trim(),
+          panelApiKey: panelKeyInput.trim(),
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || 'Could not save panel settings');
+      if (json.panelServerId) setPanelServerIdInput(json.panelServerId);
+      if (json.hasPanelApiKey) setPanelKeyInput('••••••••');
+      await loadOverview(true, false);
+
+      if (json.discoveryOk) {
+        const names = (json.servers || [])
+          .map((s: { name: string; id: string }) => `${s.name} (${s.id})`)
+          .join(', ');
+        setNotice({
+          text: `Panel API verified! Detected server${
+            (json.servers || []).length === 1 ? '' : 's'
+          }: ${names || json.panelServerId || 'OK'}.`,
+        });
+      } else if (json.discoveryError) {
+        setNotice({
+          text: `Saved panel credentials, though live check reported: ${json.discoveryError}`,
+          bad: true,
+        });
+      } else {
+        setNotice({ text: 'Updated panel configuration.' });
+      }
+    } catch (err) {
+      setNotice({
+        text: err instanceof Error ? err.message : 'Failed to save panel settings',
+        bad: true,
+      });
+    } finally {
+      setSavingPanel(false);
+    }
+  };
+
+  const handlePanelPower = async (signal: 'restart' | 'start' | 'stop') => {
+    setSendingPower(signal);
+    try {
+      const res = await fetch('/api/admin/panel', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ action: 'power', signal }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || `Could not ${signal} bot`);
+      setNotice({ text: json.message || `Sent "${signal}" signal to bot.` });
+    } catch (err) {
+      setNotice({
+        text: err instanceof Error ? err.message : 'Panel power command failed',
+        bad: true,
+      });
+    } finally {
+      setSendingPower(null);
+    }
+  };
+
   const handlePairNumber = async (number: string) => {
     setBusyNumber(number);
     try {
@@ -387,6 +469,37 @@ export function AdminConsole() {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error || 'Could not request code');
+
+      if (json.pending && json.requestId) {
+        setNotice({
+          text: `Waiting for bot to pick up pairing request for +${number}…`,
+        });
+        const deadline = Date.now() + 26_000;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 1500));
+          const pollRes = await fetch(
+            `/api/admin/pair?requestId=${encodeURIComponent(json.requestId)}`,
+            { headers: authHeaders(), cache: 'no-store' },
+          );
+          const pollJson = await pollRes.json();
+          if (!pollRes.ok) {
+            throw new Error(pollJson?.error || 'Pairing request failed.');
+          }
+          if (!pollJson.pending && pollJson.code) {
+            setActivePair({
+              ok: true,
+              code: pollJson.code,
+              expiresInSeconds: Number(pollJson.expiresInSeconds) || 60,
+              number,
+              issuedAt: Date.now(),
+            });
+            setNotice({ text: `Generated linking code for +${number}.` });
+            return;
+          }
+        }
+        throw new Error('Timed out waiting for bot to return a pairing code.');
+      }
+
       setActivePair({
         ok: true,
         code: json.code,
@@ -681,6 +794,14 @@ export function AdminConsole() {
                   : 'Not Linked'}
               </b>
             </div>
+            {data.lastSeenSecondsAgo != null && (
+              <div className="mt-1 text-[11px] font-medium text-slate-500">
+                Last seen {data.lastSeenSecondsAgo}s ago
+                {data.diskUsedMB != null && data.diskBudgetMB != null
+                  ? ` · ${data.diskUsedMB}/${data.diskBudgetMB} MB`
+                  : ''}
+              </div>
+            )}
           </div>
 
           <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -875,10 +996,10 @@ export function AdminConsole() {
                 <div>
                   <h2 className="flex items-center gap-2 text-lg font-bold text-slate-900">
                     <Server className="h-5 w-5 text-teal-600" />
-                    Link Live WhatsApp Bot Server
+                    Link Live WhatsApp Bot (Outbound HTTPS Sync — No Open Port Needed)
                   </h2>
                   <p className="mt-0.5 text-xs text-slate-500">
-                    Saved securely in Cloudflare D1 — once linked here, all allowed members automatically use this bot connection on their own page without seeing your URL or token.
+                    Recommended: set <code className="font-mono">DASHBOARD_URL</code> and <code className="font-mono">BOT_SYNC_TOKEN</code> on your bot. It pushes live heartbeats, pulls whitelist deltas, and generates pairing codes over outbound HTTPS without opening any port on your panel.
                   </p>
                 </div>
                 <button
@@ -892,39 +1013,22 @@ export function AdminConsole() {
 
               <form
                 onSubmit={handleSaveBotConfig}
-                className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[1.2fr_1fr_auto] md:items-end"
+                className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_1fr_auto] md:items-end"
               >
                 <div>
                   <label
-                    htmlFor="admin-bot-url"
+                    htmlFor="admin-bot-sync-token"
                     className="mb-1 block text-xs font-medium text-slate-700"
                   >
-                    Bot Server Public URL (<code className="font-mono">/admin/api</code>)
-                  </label>
-                  <input
-                    id="admin-bot-url"
-                    type="url"
-                    value={botUrlInput}
-                    onChange={(e) => setBotUrlInput(e.target.value)}
-                    placeholder="https://your-whatsapp-bot.koyeb.app or http://IP:3000"
-                    className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="admin-bot-token"
-                    className="mb-1 block text-xs font-medium text-slate-700"
-                  >
-                    Shared Token (<code className="font-mono">ADMIN_DASHBOARD_TOKEN</code>)
+                    Outbound Sync Token (<code className="font-mono">BOT_SYNC_TOKEN</code>)
                   </label>
                   <div className="relative">
                     <input
-                      id="admin-bot-token"
+                      id="admin-bot-sync-token"
                       type={showBotToken ? 'text' : 'password'}
-                      value={botTokenInput}
-                      onChange={(e) => setBotTokenInput(e.target.value)}
-                      placeholder="Same token set in bot .env"
+                      value={botSyncTokenInput}
+                      onChange={(e) => setBotSyncTokenInput(e.target.value)}
+                      placeholder="Same BOT_SYNC_TOKEN set in bot .env"
                       className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-3.5 pr-10 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
                     />
                     <button
@@ -942,20 +1046,174 @@ export function AdminConsole() {
                   </div>
                 </div>
 
+                <div>
+                  <label
+                    htmlFor="admin-bot-url"
+                    className="mb-1 block text-xs font-medium text-slate-700"
+                  >
+                    Optional Inbound Bot URL (<code className="font-mono">blank = outbound mode</code>)
+                  </label>
+                  <input
+                    id="admin-bot-url"
+                    type="url"
+                    value={botUrlInput}
+                    onChange={(e) => setBotUrlInput(e.target.value)}
+                    placeholder="Leave blank on Hydrodactyl/Pterodactyl"
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="admin-bot-token"
+                    className="mb-1 block text-xs font-medium text-slate-700"
+                  >
+                    Optional <code className="font-mono">ADMIN_DASHBOARD_TOKEN</code>
+                  </label>
+                  <input
+                    id="admin-bot-token"
+                    type={showBotToken ? 'text' : 'password'}
+                    value={botTokenInput}
+                    onChange={(e) => setBotTokenInput(e.target.value)}
+                    placeholder="Optional fallback token"
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                  />
+                </div>
+
                 <button
                   type="submit"
                   disabled={savingBot}
                   className="inline-flex h-[40px] items-center justify-center gap-1.5 rounded-xl bg-teal-600 px-5 text-xs font-semibold text-white shadow-sm transition hover:bg-teal-700 disabled:opacity-60"
                 >
-                  {savingBot ? 'Testing…' : 'Test & Save Bot Link'}
+                  {savingBot ? 'Saving…' : 'Save Sync Settings'}
                 </button>
               </form>
 
               {(data.isInsecureHttp || /^http:\/\/(?!localhost|127\.0\.0\.1)/i.test(botUrlInput.trim())) && (
                 <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900">
-                  <strong>HTTPS Tunnel Recommended:</strong> Plain <code className="font-mono">http://IP:PORT</code> works via the server-side proxy, but sends <code className="font-mono">ADMIN_DASHBOARD_TOKEN</code> unencrypted over the network. Put a free Cloudflare Tunnel (<code className="font-mono">cloudflared tunnel --url http://127.0.0.1:3000</code>) or HTTPS reverse proxy in front of the bot whenever possible.
+                  <strong>Tip:</strong> Leave Inbound Bot URL blank and use <code className="font-mono">BOT_SYNC_TOKEN</code> instead — your bot connects outbound over encrypted HTTPS automatically!
                 </p>
               )}
+            </section>
+
+            {/* Hydrodactyl / Pterodactyl Panel Control Card */}
+            <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h2 className="flex items-center gap-2 text-lg font-bold text-slate-900">
+                    <Power className="h-5 w-5 text-teal-600" />
+                    Hydrodactyl / Pterodactyl Panel Power Control
+                  </h2>
+                  <p className="mt-0.5 text-xs text-slate-500">
+                    Store your <code className="font-mono">hydro_…</code> / <code className="font-mono">ptlc_…</code> Client API Key server-side so you can restart, start, or stop your bot container right here — even if the bot is crashed or offline.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={sendingPower !== null}
+                    onClick={() => handlePanelPower('restart')}
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-teal-600 px-3.5 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-teal-700 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${sendingPower === 'restart' ? 'animate-spin' : ''}`} />
+                    {sendingPower === 'restart' ? 'Restarting…' : 'Restart Bot'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={sendingPower !== null}
+                    onClick={() => handlePanelPower('start')}
+                    className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800 transition hover:bg-emerald-100 disabled:opacity-50"
+                  >
+                    {sendingPower === 'start' ? 'Starting…' : 'Start'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={sendingPower !== null}
+                    onClick={() => handlePanelPower('stop')}
+                    className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 disabled:opacity-50"
+                  >
+                    {sendingPower === 'stop' ? 'Stopping…' : 'Stop'}
+                  </button>
+                </div>
+              </div>
+
+              <form
+                onSubmit={handleSavePanel}
+                className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[1.1fr_1fr_0.75fr_auto] md:items-end"
+              >
+                <div>
+                  <label
+                    htmlFor="admin-panel-url"
+                    className="mb-1 block text-xs font-medium text-slate-700"
+                  >
+                    Panel URL (<code className="font-mono">HTTPS</code>)
+                  </label>
+                  <input
+                    id="admin-panel-url"
+                    type="url"
+                    value={panelUrlInput}
+                    onChange={(e) => setPanelUrlInput(e.target.value)}
+                    placeholder="https://panel.xsystemshosting.com"
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="admin-panel-key"
+                    className="mb-1 block text-xs font-medium text-slate-700"
+                  >
+                    Account Client API Key (<code className="font-mono">hydro_… / ptlc_…</code>)
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="admin-panel-key"
+                      type={showPanelKey ? 'text' : 'password'}
+                      value={panelKeyInput}
+                      onChange={(e) => setPanelKeyInput(e.target.value)}
+                      placeholder="Account → API Credentials → Create Key"
+                      className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-3.5 pr-10 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPanelKey((s) => !s)}
+                      aria-label={showPanelKey ? 'Hide API key' : 'Show API key'}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                    >
+                      {showPanelKey ? (
+                        <EyeOff className="h-4 w-4" />
+                      ) : (
+                        <Eye className="h-4 w-4" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="admin-panel-sid"
+                    className="mb-1 block text-xs font-medium text-slate-700"
+                  >
+                    Server ID (<code className="font-mono">auto-detected if blank</code>)
+                  </label>
+                  <input
+                    id="admin-panel-sid"
+                    type="text"
+                    value={panelServerIdInput}
+                    onChange={(e) => setPanelServerIdInput(e.target.value)}
+                    placeholder="e.g. a1b2c3d4"
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={savingPanel}
+                  className="inline-flex h-[40px] items-center justify-center gap-1.5 rounded-xl border border-teal-600 bg-teal-50 px-4 text-xs font-semibold text-teal-800 transition hover:bg-teal-100 disabled:opacity-60"
+                >
+                  {savingPanel ? 'Verifying…' : 'Verify & Save Panel'}
+                </button>
+              </form>
             </section>
 
             {/* All WhatsApp Numbers Table */}
@@ -1182,29 +1440,20 @@ export function AdminConsole() {
               <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
                 <div className="font-mono text-xs font-bold text-teal-700">STEP 2</div>
                 <h3 className="mt-1 text-sm font-bold text-slate-900">
-                  Copy Your Bot&apos;s Public Address
+                  Zero Open Ports Required
                 </h3>
                 <p className="mt-1 text-xs leading-relaxed text-slate-600">
-                  Copy the HTTPS tunnel URL (recommended) or allocated IP:Port pointing to <code className="font-mono">ADMIN_API_PORT</code>:
+                  On Hydrodactyl / Pterodactyl panels (<code className="font-mono">panel.xsystemshosting.com</code>), your bot connects <strong>outbound over HTTPS</strong> to <code className="font-mono">/api/bot/sync</code>:
                 </p>
                 <ul className="mt-2.5 space-y-1.5 text-xs text-slate-600">
                   <li>
-                    • <strong>Cloudflare Tunnel (HTTPS):</strong>{' '}
-                    <code className="font-mono text-slate-800">
-                      cloudflared tunnel --url http://127.0.0.1:3000
-                    </code>
+                    • <strong>Live Heartbeat:</strong> Updates &ldquo;Last seen Xs ago&rdquo; + disk usage automatically
                   </li>
                   <li>
-                    • <strong>Koyeb / Railway:</strong>{' '}
-                    <code className="font-mono text-slate-800">
-                      https://your-bot.koyeb.app
-                    </code>
+                    • <strong>Instant Disallow:</strong> Versioned whitelist deltas sync within seconds
                   </li>
                   <li>
-                    • <strong>Panel Allocated Port:</strong>{' '}
-                    <code className="font-mono text-slate-800">
-                      http://SERVER_IP:PORT
-                    </code>
+                    • <strong>Pairing Codes:</strong> Picked up securely from D1 queue with HMAC verification
                   </li>
                 </ul>
               </div>
@@ -1212,17 +1461,17 @@ export function AdminConsole() {
               <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
                 <div className="font-mono text-xs font-bold text-teal-700">STEP 3</div>
                 <h3 className="mt-1 text-sm font-bold text-slate-900">
-                  Save Inside &ldquo;Bot &amp; Numbers&rdquo;
+                  Save Token &amp; Optional Panel Key
                 </h3>
                 <p className="mt-1 text-xs leading-relaxed text-slate-600">
-                  Open the <strong>Bot &amp; Numbers</strong> tab above, paste your Bot URL and the same <code className="font-mono">ADMIN_DASHBOARD_TOKEN</code>, and click <strong>Test &amp; Save Bot Link</strong>.
+                  In <strong>Bot &amp; Numbers</strong>, paste the same <code className="font-mono">BOT_SYNC_TOKEN</code>, and optionally save your Hydrodactyl <code className="font-mono">hydro_…</code> API key for 1-click container restarts.
                 </p>
                 <button
                   type="button"
                   onClick={() => setTab('bot')}
                   className="mt-3 rounded-xl bg-teal-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-teal-700"
                 >
-                  Open Bot Link Form →
+                  Open Bot &amp; Panel Settings →
                 </button>
               </div>
             </div>

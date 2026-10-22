@@ -24,23 +24,25 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const [target, numbers] = await Promise.all([
+  const [target, numbers, live] = await Promise.all([
     getResolvedBotTarget(),
     listStoredWhatsAppUsers(session.user.email),
+    fetchLiveBotStatus(),
   ]);
 
-  const live = target.baseUrl
-    ? await fetchLiveBotStatus({ baseUrl: target.baseUrl, token: target.token })
-    : { reachable: false, connected: false, botNumber: null };
+  const botLinked =
+    live.connectionMode === 'heartbeat' ||
+    Boolean(target.baseUrl && target.token);
 
   return NextResponse.json({
     ok: true,
     adminEmail: getAdminEmail(),
     memberAllowed: session.user.memberAllowed,
     botEnabledForMembers: target.botEnabledForMembers,
-    botServerLinked: Boolean(target.baseUrl && target.token),
+    botServerLinked: botLinked,
     botReachable: live.reachable,
     botError: live.error || null,
+    lastSeenSecondsAgo: live.lastSeenSecondsAgo ?? null,
     botConnected: live.connected,
     botNumber: live.botNumber,
     numbers,

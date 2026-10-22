@@ -69,12 +69,13 @@ jobs:
           H: ${{ secrets.PANEL_SFTP_HOST }}
           U: ${{ secrets.PANEL_SFTP_USER }}
           P: ${{ secrets.PANEL_SFTP_PASS }}
+          K: ${{ secrets.PANEL_SSH_KEY }}
         run: |
-          if [ -n "$H" ] && [ -n "$U" ] && [ -n "$P" ]; then
+          if [ -n "$H" ] && [ -n "$U" ] && { [ -n "$P" ] || [ -n "$K" ]; }; then
             echo "ready=true" >> "$GITHUB_OUTPUT"
           else
             echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::PANEL_SFTP_HOST / PANEL_SFTP_USER / PANEL_SFTP_PASS are not all set — skipping the panel deploy."
+            echo "::notice::PANEL_SFTP_HOST / PANEL_SFTP_USER and (PANEL_SSH_KEY or PANEL_SFTP_PASS) are not all set — skipping the panel deploy."
           fi
 
       - uses: actions/setup-node@v4
@@ -101,11 +102,10 @@ jobs:
           SFTP_PORT: ${{ secrets.PANEL_SFTP_PORT || '2022' }}
           SFTP_USER: ${{ secrets.PANEL_SFTP_USER }}
           SFTP_PASS: ${{ secrets.PANEL_SFTP_PASS }}
+          SSH_KEY: ${{ secrets.PANEL_SSH_KEY }}
           INCLUDE_GIT: ${{ inputs.bootstrap == true && '1' || '0' }}
         run: |
           set -euo pipefail
-          SAFE_PASS=${SFTP_PASS//\\/\\\\}
-          SAFE_PASS=${SAFE_PASS//\"/\\\"}
           EXCLUDES=(
             --exclude-glob .github/
             --exclude-glob node_modules/
@@ -122,15 +122,35 @@ jobs:
             EXCLUDES+=(--exclude-glob .git/)
           fi
 
-          lftp -c "
-            set sftp:auto-confirm yes;
-            set net:timeout 25;
-            set net:max-retries 3;
-            set net:reconnect-interval-base 5;
-            open -u \"$SFTP_USER\",\"$SAFE_PASS\" sftp://$SFTP_HOST:${SFTP_PORT:-2022};
-            mirror -R --verbose --no-perms --parallel=4 ${EXCLUDES[*]} ./ /;
-            bye
-          "
+          if [ -n "$SSH_KEY" ]; then
+            mkdir -p ~/.ssh
+            chmod 700 ~/.ssh
+            printf '%s\n' "$SSH_KEY" > ~/.ssh/id_panel
+            chmod 600 ~/.ssh/id_panel
+            trap 'rm -f ~/.ssh/id_panel' EXIT
+            lftp -c "
+              set sftp:auto-confirm yes;
+              set sftp:connect-program \"ssh -a -x -i $HOME/.ssh/id_panel -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new\";
+              set net:timeout 25;
+              set net:max-retries 3;
+              set net:reconnect-interval-base 5;
+              open -u \"$SFTP_USER\",DUMMY sftp://$SFTP_HOST:${SFTP_PORT:-2022};
+              mirror -R --verbose --no-perms --parallel=4 ${EXCLUDES[*]} ./ /;
+              bye
+            "
+          else
+            SAFE_PASS=${SFTP_PASS//\\/\\\\}
+            SAFE_PASS=${SAFE_PASS//\"/\\\"}
+            lftp -c "
+              set sftp:auto-confirm yes;
+              set net:timeout 25;
+              set net:max-retries 3;
+              set net:reconnect-interval-base 5;
+              open -u \"$SFTP_USER\",\"$SAFE_PASS\" sftp://$SFTP_HOST:${SFTP_PORT:-2022};
+              mirror -R --verbose --no-perms --parallel=4 ${EXCLUDES[*]} ./ /;
+              bye
+            "
+          fi
 
       - name: Restart the server so the new code runs
         if: steps.cfg.outputs.ready == 'true'
@@ -142,8 +162,8 @@ jobs:
           SFTP_HOST: ${{ secrets.PANEL_SFTP_HOST }}
         run: |
           set +e
-          if [ -z "$PANEL_SERVER_ID" ] || [ -z "$PANEL_API_KEY" ]; then
-            echo "::notice::Restart skipped: PANEL_SERVER_ID / PANEL_API_KEY not set. Files were uploaded — press Restart in the panel."
+          if [ -z "$PANEL_API_KEY" ]; then
+            echo "::notice::Restart skipped: PANEL_API_KEY not set. Files were uploaded — press Restart in the panel."
             exit 0
           fi
 
@@ -156,10 +176,40 @@ jobs:
           fi
           [ ${#CANDS[@]} -eq 0 ] && CANDS=("https://panel.xsystemshosting.com")
 
-          IDS=("$PANEL_SERVER_ID")
-          case "$PANEL_SERVER_ID" in
-            *-*) IDS+=("${PANEL_SERVER_ID%%-*}") ;;
-          esac
+          IDS=()
+          if [ -n "$PANEL_SERVER_ID" ]; then
+            IDS+=("$PANEL_SERVER_ID")
+            case "$PANEL_SERVER_ID" in
+              *-*) IDS+=("${PANEL_SERVER_ID%%-*}") ;;
+            esac
+          else
+            # Auto-discover server identifier via GET /api/client when PANEL_SERVER_ID is blank
+            for raw in "${CANDS[@]}"; do
+              BASE=${raw%/}; BASE=${BASE%%/server/*}
+              case "$BASE" in https://*) ;; *) continue ;; esac
+              disc=$(curl -sS --max-time 15 "$BASE/api/client" \
+                -H "Authorization: Bearer $PANEL_API_KEY" \
+                -H 'Accept: application/json' 2>/dev/null)
+              found=$(printf '%s' "$disc" | node -e '
+                let d=""; process.stdin.on("data",c=>d+=c).on("end",()=>{
+                  try {
+                    const j=JSON.parse(d);
+                    const ids=(j.data||[]).map(x=>x.attributes&&x.attributes.identifier).filter(Boolean);
+                    console.log(ids.join(" "));
+                  } catch {}
+                });
+              ')
+              if [ -n "$found" ]; then
+                for fid in $found; do IDS+=("$fid"); done
+                break
+              fi
+            done
+          fi
+
+          if [ ${#IDS[@]} -eq 0 ]; then
+            echo "::warning::Could not auto-discover PANEL_SERVER_ID via /api/client. Set PANEL_SERVER_ID in repo Variables."
+            exit 0
+          fi
 
           ok=""; LAST="none"
           for raw in "${CANDS[@]}"; do
