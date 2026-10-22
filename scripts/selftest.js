@@ -1090,12 +1090,24 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
 
   console.log('\n── 16b. Phase 1 stability guards ──');
 
-  await test('index.js has no heap re-exec or broken startAdminServer call', () => {
+  await test('index.js has no heap re-exec, broken startAdminServer, or undefined store export', () => {
+    const vm = require('vm');
     const src = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8');
+    new vm.Script(src, { filename: 'index.js' });
     assert.ok(!src.includes('respawnWithBiggerHeap'), 'respawnWithBiggerHeap still in index.js');
     assert.ok(!src.includes('heapPlan'), 'heapPlan still referenced in index.js');
     assert.ok(!src.includes('startAdminServer'), 'startAdminServer crash still in index.js');
+    assert.ok(!/\bmodule\.exports\s*=\s*\{[^}]*\bstore\b/.test(src), 'undefined store still exported in index.js');
     assert.ok(/Session files .* were NOT deleted/i.test(src), 'logout notice missing');
+  });
+
+  await test('converter.ensureExecutable heals 0644 ffmpeg when npm allowScripts blocks postinstall', () => {
+    const { ensureExecutable } = require(path.join(REPO, 'utils/converter.js'));
+    const bin = path.join(sandbox, 'fake-ffmpeg-allowscripts');
+    fs.writeFileSync(bin, '#!/bin/sh\necho "ffmpeg version 6.1"\n', { mode: 0o644 });
+    fs.chmodSync(bin, 0o644);
+    assert.strictEqual(ensureExecutable(bin), true);
+    fs.accessSync(bin, fs.constants.X_OK);
   });
 
   await test('reconnector backs off and retries when startBot() throws', async () => {

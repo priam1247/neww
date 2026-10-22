@@ -446,6 +446,8 @@ require('./utils/logger').banner([
 // and re-download the binary when a download reports it as missing or broken.
 (() => {
   const YT = require('./utils/youtubedl');
+  const ffmpeg = require('./utils/ffmpeg');
+  console.log(ffmpeg.works() ? `🎞️ ffmpeg  ${ffmpeg.version() || 'ready'}` : '🎞️ ffmpeg  ❌ not available');
   YT.scheduleAutoUpdate();
   YT.healthCheck().then((cmd) => {
     console.log(cmd ? `🎬 yt-dlp  ${YT.version() || 'ready'}` : '🎬 yt-dlp  ❌ not available (will retry while running)');
@@ -561,5 +563,5 @@ process.on('unhandledRejection', (err) => {
   }
   console.error('Unhandled Rejection:', err);
 });
-// Export store for use in commands
-module.exports = { store };
+
+module.exports = {};

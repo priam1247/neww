@@ -34,11 +34,34 @@ const FFMPEG_CANDIDATES = () => [
 
 let cached = null;
 
+/**
+ * Hardened panels (npm 11 `allowScripts`) block `@ffmpeg-installer/linux-x64`'s
+ * `postinstall: chmod u+x ffmpeg`, leaving the unpacked binary at 0644 (EACCES).
+ * Ensure execute permission on any existing absolute binary path before probing.
+ */
+function ensureExecutable(candidate) {
+  if (!candidate || !path.isAbsolute(candidate)) return false;
+  try {
+    if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) return false;
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return true;
+    } catch {
+      fs.chmodSync(candidate, 0o755);
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return true;
+    }
+  } catch {
+    return false;
+  }
+}
+
 /** @returns {string} path to a working ffmpeg binary (falls back to 'ffmpeg'). */
 function resolve() {
   if (cached) return cached;
   for (const candidate of FFMPEG_CANDIDATES()) {
     try {
+      ensureExecutable(candidate);
       execFileSync(candidate, ['-version'], { stdio: 'ignore', timeout: 8000 });
       cached = candidate;
       return cached;
@@ -142,5 +165,5 @@ function toVideo(buffer, ext) {
 
 module.exports = {
   ffmpeg, toAudio, toPTT, toVideo,
-  resolve, works, version,
+  resolve, works, version, ensureExecutable,
 };
