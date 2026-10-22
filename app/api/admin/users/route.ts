@@ -1,10 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthenticatedSession } from '@/lib/auth-engine';
-import {
-  forwardToBotServer,
-  normalizePhoneNumber,
-  resolveBotBaseUrl,
-} from '@/lib/bot-proxy';
+import { normalizePhoneNumber, syncNumberToLiveBot } from '@/lib/bot-proxy';
 import { saveStoredWhatsAppUser } from '@/lib/storage';
 
 export const dynamic = 'force-dynamic';
@@ -12,9 +8,12 @@ export const dynamic = 'force-dynamic';
 export async function POST(req: NextRequest) {
   const session = await getAuthenticatedSession(req);
   if (!session) {
+    return NextResponse.json({ error: 'Authentication required.' }, { status: 401 });
+  }
+  if (!session.user.isAdmin) {
     return NextResponse.json(
-      { error: 'Please sign in with your verified email account.' },
-      { status: 401 },
+      { error: 'Administrator privileges required.' },
+      { status: 403 },
     );
   }
 
@@ -32,22 +31,14 @@ export async function POST(req: NextRequest) {
   }
 
   const label =
-    String(payload.label || session.user.name || 'Approved operator')
-      .trim()
-      .slice(0, 80) || 'Approved operator';
+    String(payload.label || 'Approved number').trim().slice(0, 80) ||
+    'Approved number';
+  const ownerEmail =
+    String(payload.ownerEmail || session.user.email).trim().toLowerCase() ||
+    session.user.email;
 
-  const { baseUrl, hostLabel, error } = resolveBotBaseUrl(req);
-  if (error) {
-    return NextResponse.json({ error }, { status: 400 });
-  }
+  const users = await saveStoredWhatsAppUser(number, label, ownerEmail);
+  await syncNumberToLiveBot(number, label, true);
 
-  if (baseUrl) {
-    return forwardToBotServer(req, baseUrl, hostLabel, '/users', {
-      method: 'POST',
-      body: { number, label },
-    });
-  }
-
-  const users = await saveStoredWhatsAppUser(number, label, session.user.email);
   return NextResponse.json({ ok: true, users }, { status: 201 });
 }

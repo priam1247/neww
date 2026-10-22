@@ -1,26 +1,16 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getAdminEmail } from './auth-engine';
+import { getBotConnectionConfig } from './storage';
 
 export function normalizePhoneNumber(input: unknown): string {
   return String(input ?? '').replace(/[^0-9]/g, '');
 }
 
-/**
- * Safely parse and normalize an upstream Bot API URL (either from Admin UI
- * header `x-bot-api-url` or server `process.env.BOT_API_URL`).
- */
-export function resolveBotBaseUrl(req: NextRequest): {
+export function parseAndValidateBotUrl(rawUrl: string): {
   baseUrl: string | null;
   hostLabel: string | null;
   error?: string;
 } {
-  const headerOverride = req.headers.get('x-bot-api-url')?.trim() || '';
-  const envUrl = process.env.BOT_API_URL?.trim() || '';
-  const raw = headerOverride || envUrl;
-
-  if (!raw) {
-    return { baseUrl: null, hostLabel: null };
-  }
+  const raw = rawUrl.trim();
+  if (!raw) return { baseUrl: null, hostLabel: null };
 
   try {
     const parsed = new URL(raw);
@@ -35,86 +25,241 @@ export function resolveBotBaseUrl(req: NextRequest): {
       .replace(/\/admin\/api\/?$/i, '')
       .replace(/\/admin\/?$/i, '')
       .replace(/\/+$/, '');
-    const normalized = `${parsed.origin}${cleanPath}`;
-    return { baseUrl: normalized, hostLabel: parsed.host };
+    return {
+      baseUrl: `${parsed.origin}${cleanPath}`,
+      hostLabel: parsed.host,
+    };
   } catch {
     return {
       baseUrl: null,
       hostLabel: null,
-      error: 'Invalid Bot Server URL format (expected e.g. http://203.0.113.10:3000)',
+      error:
+        'Invalid Bot Server URL format (expected e.g. https://your-bot.koyeb.app or http://203.0.113.10:3000)',
+    };
+  }
+}
+
+export async function getResolvedBotTarget(): Promise<{
+  baseUrl: string | null;
+  hostLabel: string | null;
+  token: string;
+  botEnabledForMembers: boolean;
+  rawUrl: string;
+}> {
+  const cfg = await getBotConnectionConfig();
+  const parsed = parseAndValidateBotUrl(cfg.botApiUrl);
+  return {
+    baseUrl: parsed.baseUrl,
+    hostLabel: parsed.hostLabel,
+    token: cfg.botAdminToken,
+    botEnabledForMembers: cfg.botEnabledForMembers,
+    rawUrl: cfg.botApiUrl,
+  };
+}
+
+export async function fetchLiveBotStatus(customTarget?: {
+  baseUrl: string;
+  token: string;
+}): Promise<{
+  reachable: boolean;
+  connected: boolean;
+  botNumber: string | null;
+  latencyMs?: number;
+  error?: string;
+}> {
+  const resolved = customTarget || (await getResolvedBotTarget());
+  if (!resolved.baseUrl) {
+    return { reachable: false, connected: false, botNumber: null };
+  }
+  if (!resolved.token) {
+    return {
+      reachable: false,
+      connected: false,
+      botNumber: null,
+      error: 'ADMIN_DASHBOARD_TOKEN is not set yet.',
+    };
+  }
+
+  const startedAt = Date.now();
+  try {
+    const res = await fetch(`${resolved.baseUrl}/admin/api/status`, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${resolved.token}`,
+      },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(12_000),
+    });
+    const latencyMs = Date.now() - startedAt;
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        reachable: false,
+        connected: false,
+        botNumber: null,
+        latencyMs,
+        error: data?.error || `Bot server returned HTTP ${res.status}`,
+      };
+    }
+    return {
+      reachable: true,
+      connected: Boolean(data.connected),
+      botNumber: data.botNumber ? String(data.botNumber) : null,
+      latencyMs,
+    };
+  } catch (err) {
+    return {
+      reachable: false,
+      connected: false,
+      botNumber: null,
+      error: err instanceof Error ? err.message : 'Unable to reach bot server',
     };
   }
 }
 
 /**
- * Forward an authenticated operator request from Next.js server runtime to
- * `${baseUrl}/admin/api${subpath}` on ZaFar Bot's `admin-server.js`.
+ * Push a number state change to the live bot (`admin-server.js`) whenever
+ * a Bot Server URL + Token is configured. Fails softly if bot is offline so
+ * D1 records always remain authoritative.
  */
-export async function forwardToBotServer(
-  req: NextRequest,
-  baseUrl: string,
-  hostLabel: string | null,
-  subpath: string,
-  options: { method: string; body?: unknown },
-): Promise<NextResponse> {
-  const clientBotToken = req.headers.get('x-admin-token')?.trim() || '';
-  const serverBotToken = process.env.ADMIN_DASHBOARD_TOKEN?.trim() || '';
-  const bearer = clientBotToken || serverBotToken;
+export async function syncNumberToLiveBot(
+  number: string,
+  label: string,
+  enabled: boolean,
+): Promise<void> {
+  const { baseUrl, token } = await getResolvedBotTarget();
+  if (!baseUrl || !token) return;
 
-  if (!bearer) {
-    return NextResponse.json(
-      {
-        error: `Set your Bot Server Token (ADMIN_DASHBOARD_TOKEN for ${getAdminEmail()}) in Bot Connection settings.`,
-      },
-      { status: 401 },
-    );
-  }
-
-  const startedAt = Date.now();
   try {
-    const upstreamRes = await fetch(`${baseUrl}/admin/api${subpath}`, {
-      method: options.method,
+    await fetch(`${baseUrl}/admin/api/users`, {
+      method: 'POST',
       headers: {
         Accept: 'application/json',
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${bearer}`,
+        Authorization: `Bearer ${token}`,
       },
-      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      body: JSON.stringify({ number, label }),
+      cache: 'no-store',
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!enabled) {
+      await fetch(`${baseUrl}/admin/api/users/${encodeURIComponent(number)}`, {
+        method: 'PATCH',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ enabled: false }),
+        cache: 'no-store',
+        signal: AbortSignal.timeout(10_000),
+      });
+    }
+  } catch {
+    // D1 state remains saved even when bot container restarts
+  }
+}
+
+export async function removeNumberFromLiveBot(number: string): Promise<void> {
+  const { baseUrl, token } = await getResolvedBotTarget();
+  if (!baseUrl || !token) return;
+
+  try {
+    await fetch(`${baseUrl}/admin/api/users/${encodeURIComponent(number)}`, {
+      method: 'DELETE',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    // ignore if bot offline
+  }
+}
+
+export async function requestLiveBotPairingCode(
+  number: string,
+  label: string,
+): Promise<{
+  ok: boolean;
+  status: number;
+  code?: string;
+  expiresInSeconds?: number;
+  error?: string;
+}> {
+  const { baseUrl, token } = await getResolvedBotTarget();
+  if (!baseUrl || !token) {
+    return {
+      ok: false,
+      status: 400,
+      error:
+        'The live WhatsApp Bot Server is not linked yet. Ask the administrator (troykunsauka@gmail.com) to link the Bot Server URL in the Admin Console.',
+    };
+  }
+
+  try {
+    // Ensure number is registered and enabled on the running bot container first
+    await fetch(`${baseUrl}/admin/api/users`, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ number, label }),
+      cache: 'no-store',
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    await fetch(`${baseUrl}/admin/api/users/${encodeURIComponent(number)}`, {
+      method: 'PATCH',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ enabled: true }),
+      cache: 'no-store',
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    const res = await fetch(`${baseUrl}/admin/api/pair`, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ number }),
       cache: 'no-store',
       signal: AbortSignal.timeout(15_000),
     });
-
-    const latencyMs = Date.now() - startedAt;
-    const data = await upstreamRes.json().catch(() => ({}));
-
-    if (!upstreamRes.ok) {
-      return NextResponse.json(
-        {
-          error:
-            data?.error ||
-            `Bot server responded with HTTP ${upstreamRes.status}. Verify your ADMIN_DASHBOARD_TOKEN and Bot URL.`,
-        },
-        { status: upstreamRes.status },
-      );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        status: res.status,
+        error: data?.error || `Bot server returned HTTP ${res.status}`,
+      };
     }
 
-    return NextResponse.json(
-      {
-        ...data,
-        botServerLinked: true,
-        storageEngine: 'bot-live',
-        upstreamHost: hostLabel,
-        latencyMs,
-      },
-      { status: upstreamRes.status },
-    );
+    return {
+      ok: true,
+      status: 200,
+      code: String(data.code),
+      expiresInSeconds: Number(data.expiresInSeconds) || 60,
+    };
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Connection failed';
-    return NextResponse.json(
-      {
-        error: `Could not reach live bot server at ${hostLabel || baseUrl} (${message}).`,
-      },
-      { status: 502 },
-    );
+    return {
+      ok: false,
+      status: 502,
+      error: `Could not reach live WhatsApp bot server (${
+        err instanceof Error ? err.message : 'connection failed'
+      }).`,
+    };
   }
 }

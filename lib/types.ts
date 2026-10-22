@@ -5,6 +5,7 @@ export interface AuthUser {
   username: string;
   isVerified: boolean;
   isAdmin: boolean;
+  memberAllowed: boolean;
   createdAt?: string;
 }
 
@@ -17,6 +18,16 @@ export interface UserQuota {
   books_left: number;
 }
 
+export interface MemberRecord {
+  email: string;
+  name: string;
+  isVerified: boolean;
+  isAdmin: boolean;
+  allowed: boolean;
+  numbersCount: number;
+  createdAt: string;
+}
+
 export interface ApprovedUser {
   number: string;
   label?: string;
@@ -25,16 +36,38 @@ export interface ApprovedUser {
   addedBy?: string;
 }
 
-export interface BotStatusPayload {
+export interface BotConnectionConfig {
+  botApiUrl: string;
+  botAdminToken: string;
+  botEnabledForMembers: boolean;
+  updatedAt?: string;
+}
+
+export interface AdminOverviewPayload {
   ok: boolean;
+  adminEmail: string;
   botServerLinked: boolean;
+  botApiUrl: string;
+  hasBotToken: boolean;
+  botEnabledForMembers: boolean;
   storageEngine: 'bot-live' | 'cloudflare-d1' | 'persistent-db';
   upstreamHost?: string | null;
-  adminEmail: string;
   connected: boolean;
   botNumber: string | null;
   users: ApprovedUser[];
+  members: MemberRecord[];
   latencyMs?: number;
+}
+
+export interface MemberOverviewPayload {
+  ok: boolean;
+  adminEmail: string;
+  memberAllowed: boolean;
+  botEnabledForMembers: boolean;
+  botServerLinked: boolean;
+  botConnected: boolean;
+  botNumber: string | null;
+  numbers: ApprovedUser[];
 }
 
 export interface PairCodePayload {

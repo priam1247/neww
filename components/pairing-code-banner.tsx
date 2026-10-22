@@ -42,14 +42,14 @@ export function PairingCodeBanner({ activePair, onDismiss }: PairingCodeBannerPr
   };
 
   return (
-    <div className="mb-4 overflow-hidden rounded-2xl border border-mint/40 bg-gradient-to-br from-[#132923] via-obsidian-800 to-obsidian-850 p-4 shadow-lg">
+    <div className="mb-5 overflow-hidden rounded-2xl border border-teal-200 bg-gradient-to-br from-teal-50/90 via-white to-slate-50 p-5 shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="space-y-1">
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-mint">
+          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-teal-700">
             <Smartphone className="h-3.5 w-3.5" />
             WhatsApp Linking Code · +{activePair.number}
           </div>
-          <p className="text-xs text-[#9fb0c5]">
+          <p className="text-xs text-slate-600">
             Open WhatsApp → <strong>Linked Devices</strong> →{' '}
             <strong>Link with phone number instead</strong> and enter this code.
           </p>
@@ -59,42 +59,44 @@ export function PairingCodeBanner({ activePair, onDismiss }: PairingCodeBannerPr
           type="button"
           onClick={onDismiss}
           aria-label="Close pairing code banner"
-          className="rounded-lg p-1 text-[#8d98aa] hover:bg-obsidian-700 hover:text-[#f4f7fb]"
+          className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
         >
           <X className="h-4 w-4" />
         </button>
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+      <div className="mt-3.5 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <code className="rounded-xl border border-mint/30 bg-obsidian-950 px-4 py-2.5 font-mono text-2xl font-bold tracking-[0.2em] text-[#f4f7fb] tabular-nums">
+          <code className="rounded-xl border border-teal-200 bg-white px-4 py-2.5 font-mono text-2xl font-bold tracking-[0.2em] text-slate-900 shadow-sm tabular-nums">
             {activePair.code}
           </code>
           <button
             type="button"
             onClick={handleCopy}
-            className="flex items-center gap-1.5 rounded-xl bg-mint px-3.5 py-2.5 text-xs font-bold text-[#071510] transition hover:brightness-110"
+            className="flex items-center gap-1.5 rounded-xl bg-teal-600 px-3.5 py-2.5 text-xs font-semibold text-white shadow-sm transition hover:bg-teal-700"
           >
             {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
             {copied ? 'Copied' : 'Copy Code'}
           </button>
         </div>
 
-        <div className="font-mono text-xs tabular-nums text-[#8d98aa]">
+        <div className="font-mono text-xs tabular-nums text-slate-600">
           {remaining > 0 ? (
             <span>
-              Expires in <strong className="text-mint">{remaining}s</strong>
+              Expires in <strong className="text-teal-700">{remaining}s</strong>
             </span>
           ) : (
-            <span className="text-coral">Expired — request a fresh code</span>
+            <span className="font-semibold text-rose-600">
+              Expired — request a fresh code
+            </span>
           )}
         </div>
       </div>
 
-      <div className="mt-3 h-1 w-full overflow-hidden rounded-full bg-obsidian-950">
+      <div className="mt-3.5 h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
         <div
           className={`h-full transition-all duration-500 ${
-            remaining > 12 ? 'bg-mint' : 'bg-coral'
+            remaining > 12 ? 'bg-teal-600' : 'bg-rose-500'
           }`}
           style={{ width: `${pct}%` }}
         />
