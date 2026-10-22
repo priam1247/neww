@@ -103,10 +103,11 @@ jobs:
 
       - name: Restart the server so the new code runs
         if: steps.cfg.outputs.ready == 'true'
-        # `run:` steps execute with `bash -e`, so ONE failed command (a DNS blip
-        # inside the runner, a 403 from the panel) aborts the step with curl's
-        # own exit code — that is what turned run #39775470548 red after a
-        # perfectly good upload. Nothing here may fail the job.
+        # `run:` steps execute with `bash -e`, so ONE failed command (a DNS blip,
+        # a 403 from the panel) aborts the step with curl's own exit code — that
+        # turned run 39775470548 red after a perfectly good upload. Nothing in
+        # this step may fail the job, and a wrong URL must not stop the restart:
+        # every candidate base is tried in turn.
         shell: bash
         env:
           PANEL_URL: ${{ vars.PANEL_URL || secrets.PANEL_URL }}
@@ -121,32 +122,39 @@ jobs:
             exit 0
           fi
 
-          # No PANEL_URL set? The panel always sits next to the SFTP node:
-          #   eu3-node.xsystemshosting.com  →  panel.xsystemshosting.com
-          if [ -z "$PANEL_URL" ] && [ -n "$SFTP_HOST" ]; then
-            PANEL_URL="https://panel.${SFTP_HOST#*.}"
+          # candidates: the configured URL first, then the panel next to the
+          # SFTP node (eu3-node.xsystemshosting.com → panel.xsystemshosting.com)
+          CANDS=()
+          [ -n "$PANEL_URL" ] && CANDS+=("$PANEL_URL")
+          [ -n "$SFTP_HOST" ] && CANDS+=("https://panel.${SFTP_HOST#*.}")
+          [ ${#CANDS[@]} -eq 0 ] && CANDS=("https://panel.xsystemshosting.com")
+
+          ok=""
+          for raw in "${CANDS[@]}"; do
+            BASE=${raw%/}
+            BASE=${BASE%%/server/*}
+            [ -z "$BASE" ] && continue
+            echo "→ trying $BASE"
+            code=$(curl -sS --max-time 20 -o /tmp/out -w '%{http_code}' -X POST \
+              "$BASE/api/client/servers/$PANEL_SERVER_ID/power" \
+              -H "Authorization: Bearer $PANEL_API_KEY" \
+              -H 'Accept: application/json' \
+              -H 'Content-Type: application/json' \
+              -d '{"signal":"restart"}' 2>/tmp/err) || code="curl:$?"
+            echo "   panel responded: $code"
+            [ -s /tmp/out ] && cat /tmp/out && echo
+            [ -s /tmp/err ] && cat /tmp/err
+            case "$code" in
+              200|204) ok="$BASE"; break ;;
+              curl:6|curl:7|000) continue ;;          # wrong host — try the next one
+              *) ok=""; break ;;                       # reachable but refused: stop, report it
+            esac
+          done
+
+          if [ -n "$ok" ]; then
+            echo "✅ restart requested via $ok"
+            exit 0
           fi
-
-          # tolerate a trailing slash or a copied …/server/<id> URL
-          BASE=${PANEL_URL%/}
-          BASE=${BASE%%/server/*}
-          echo "panel:  $BASE"
-          echo "server: $PANEL_SERVER_ID"
-
-          code=$(curl -sS --max-time 25 -o /tmp/out -w '%{http_code}' -X POST \
-            "$BASE/api/client/servers/$PANEL_SERVER_ID/power" \
-            -H "Authorization: Bearer $PANEL_API_KEY" \
-            -H 'Accept: application/json' \
-            -H 'Content-Type: application/json' \
-            -d '{"signal":"restart"}' 2>/tmp/curl_err) || code="curl:$?"
-          echo "panel responded: $code"
-          [ -s /tmp/out ] && cat /tmp/out
-          [ -s /tmp/curl_err ] && cat /tmp/curl_err
-
-          if [ "$code" = "204" ] || [ "$code" = "200" ]; then
-            echo "✅ restart requested"
-          else
-            echo "::warning::The panel did not accept the restart ($code). The files ARE uploaded — press Restart in the panel."
-            echo "::notice::Common causes: the API key is not a *client* key (Account → API Credentials), it was revoked, or it lacks the control.server scope."
-          fi
+          echo "::warning::The panel did not accept the restart. The files ARE uploaded — press Restart in the panel."
+          echo "::notice::If this says curl:6, the PANEL_URL secret points at a host that does not exist; set it to the URL in your browser (e.g. https://panel.xsystemshosting.com) or delete it and let the workflow derive the URL from the SFTP host. A 401/403 means PANEL_API_KEY is not a client key (Account → API Credentials) or was revoked."
           exit 0
