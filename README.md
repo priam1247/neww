@@ -168,6 +168,55 @@ The local yt-dlp engine is tried first. If it cannot handle a source, configured
 
 For YouTube hosting-IP checks, an owner can upload a Netscape-format cookies file with `.cookies set`; use `.cookies status` to inspect availability and `.cookies clear` to remove it. Treat cookies as account credentials. `.ytdl` reports engine status; `.ytdl test <link>`, `.ytdl raw <link>`, `.ytdl update`, `.ytdl repair`, and `.ytdl proxy <url|off>` help diagnose or repair downloads.
 
+## Deploying the bot to the panel (XS Systems / Pterodactyl)
+
+Panels like `panel.xsystems.hosting` have **no GitHub integration**: no webhook,
+no git in the File Manager, and the console is the bot's own stdin — typing
+`git pull` there goes into Node, not a shell. Three ways to get this repo onto
+the server, in order of how little work they need afterwards.
+
+### 1. GitHub Actions → SFTP (automatic, works on every panel)
+
+`.github/workflows/deploy-panel.yml` uploads the repo over the SFTP details the
+panel already shows and then restarts the server through the panel API.
+
+1. Panel → **Settings → SFTP details**: note *Host*, *Port*, *Username*,
+   *Password* (the username is `something.xxxxxx`, not your login e-mail).
+2. Repo → **Settings → Secrets and variables → Actions**, add:
+   `PANEL_SFTP_HOST`, `PANEL_SFTP_PORT`, `PANEL_SFTP_USER`, `PANEL_SFTP_PASS`.
+   Optional, for the automatic restart: `PANEL_URL`
+   (`https://panel.xsystems.hosting`), `PANEL_SERVER_ID` (the id in the panel
+   URL), `PANEL_API_KEY` (panel → **Account → API Credentials**, client key).
+3. Push to `main` (or **Actions → Deploy bot to XS Systems panel → Run
+   workflow**). The first run can take a couple of minutes.
+
+Without those secrets the workflow is a green no-op — nothing breaks.
+
+What it does **not** upload, by design: `session/` (your WhatsApp login),
+`.env`, `database/*.json` (the allowed-user list lives on the server), `temp/`,
+`node_modules/` and `dashboard/` (that one deploys to Vercel). It also never
+deletes anything on the server: `mirror -R` without `--delete`.
+
+Node eggs run `npm install` on start when `package.json` is present, so new
+dependencies land on the restart that follows the upload.
+
+### 2. One clone, then `git pull` on every start
+
+Some Node eggs expose an `AUTO_UPDATE` variable: with it set to `1` the start
+script runs `git pull` in the server folder before booting. It only works if the
+folder already **is** a git clone, which needs one shell command on the host
+(ask XS Systems support, or run the workflow once with
+**Run workflow → bootstrap** ticked — that version also uploads `.git`).
+
+Then: **Startup → Environment Variables → `AUTO_UPDATE=1`**, restart. Pushes to
+`main` land on the next restart.
+
+### 3. Manual (no automation)
+
+GitHub → **Code → Download ZIP** → panel → **Files → Upload** → right-click the
+archive → **Unarchive** → **Restart**. Keep `session/` and `.env` from the
+server: never replace them with the archive's.
+
 ## Dashboard link (web portal → bot)
 
 The portal source lives in `dashboard/`. It is a **separate app**, so on Vercel
