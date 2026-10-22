@@ -7,6 +7,7 @@ import {
 import { fetchLiveBotStatus, getResolvedBotTarget } from '@/lib/bot-proxy';
 import { JwtConfigError } from '@/lib/jwt';
 import {
+  getPanelConnectionConfig,
   isUsingCloudflareD1,
   listAllMembers,
   listStoredWhatsAppUsers,
@@ -38,23 +39,28 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const [target, d1Active, users, members] = await Promise.all([
-    getResolvedBotTarget(),
-    isUsingCloudflareD1(),
-    listStoredWhatsAppUsers(),
-    listAllMembers(isAdminEmail),
-  ]);
+  const [target, panelCfg, d1Active, users, members, liveStatus] =
+    await Promise.all([
+      getResolvedBotTarget(),
+      getPanelConnectionConfig(),
+      isUsingCloudflareD1(),
+      listStoredWhatsAppUsers(),
+      listAllMembers(isAdminEmail),
+      fetchLiveBotStatus(),
+    ]);
 
-  const liveStatus = target.baseUrl
-    ? await fetchLiveBotStatus({ baseUrl: target.baseUrl, token: target.token })
-    : { reachable: false, connected: false, botNumber: null };
+  const botLinked =
+    liveStatus.connectionMode === 'heartbeat' ||
+    Boolean(target.baseUrl && target.token);
 
   return NextResponse.json({
     ok: true,
     adminEmail: getAdminEmail(),
-    botServerLinked: Boolean(target.baseUrl && target.token),
+    botServerLinked: botLinked,
+    connectionMode: liveStatus.connectionMode,
     botApiUrl: target.rawUrl,
     hasBotToken: Boolean(target.token),
+    hasBotSyncToken: Boolean(target.syncToken),
     isInsecureHttp: target.isInsecureHttp,
     botEnabledForMembers: target.botEnabledForMembers,
     storageEngine: liveStatus.reachable
@@ -67,6 +73,17 @@ export async function GET(req: NextRequest) {
     botError: liveStatus.error || null,
     connected: liveStatus.connected,
     botNumber: liveStatus.botNumber,
+    lastSeenAt: liveStatus.lastSeenAt ?? null,
+    lastSeenSecondsAgo: liveStatus.lastSeenSecondsAgo ?? null,
+    botVersion: liveStatus.version ?? null,
+    diskUsedMB: liveStatus.diskUsedMB ?? null,
+    diskBudgetMB: liveStatus.diskBudgetMB ?? null,
+    queueLight: liveStatus.queueLight ?? null,
+    queueHeavy: liveStatus.queueHeavy ?? null,
+    panelConfigured: Boolean(panelCfg.panelApiKey),
+    panelUrl: panelCfg.panelUrl,
+    panelServerId: panelCfg.panelServerId,
+    hasPanelApiKey: Boolean(panelCfg.panelApiKey),
     latencyMs: liveStatus.latencyMs,
     users,
     members,

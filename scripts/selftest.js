@@ -2394,6 +2394,146 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
         YT.downloadVideo = original;
       }
     });
+
+    console.log('\n── 23. outbound dashboard sync & hydrodactyl panel client ──');
+
+    await test('safeLog redacts Hydrodactyl (hydro_) and Pterodactyl (ptlc_/ptla_) keys', () => {
+      const { redactSecrets } = require(path.join(REPO, 'utils', 'safeLog'));
+      const out = redactSecrets('key=hydro_TestVector99 and ptlc_abcdefghijklmnop');
+      assert.ok(!out.includes('TestVector99'), `hydro_ secret leaked: ${out}`);
+      assert.ok(out.includes('hydro_[REDACTED]'), `missing hydro_ redaction: ${out}`);
+      assert.ok(out.includes('ptlc_[REDACTED]'), `missing ptlc_ redaction: ${out}`);
+    });
+
+    await test('panelClient auto-discovers server ID via GET /api/client and sends restart over HTTPS', async () => {
+      const { panelRestart } = require(path.join(REPO, 'utils', 'panelClient'));
+      const calls = [];
+      const fakeFetch = async (url, init = {}) => {
+        calls.push({ url, method: init.method || 'GET', body: init.body });
+        if (url.endsWith('/api/client')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: [{ attributes: { identifier: 'srv99abc', uuid: 'srv99abc-1111' } }],
+            }),
+          };
+        }
+        if (url.endsWith('/api/client/servers/srv99abc/power')) {
+          return { ok: true, status: 204, json: async () => ({}) };
+        }
+        return { ok: false, status: 404, json: async () => ({}) };
+      };
+
+      const res = await panelRestart({
+        env: {
+          PANEL_URL: 'https://panel.xsystemshosting.com',
+          PANEL_API_KEY: 'hydro_SyntheticTestKey01',
+          PANEL_SERVER_ID: '',
+          P_SERVER_UUID: '',
+        },
+        fetchImpl: fakeFetch,
+      });
+      assert.strictEqual(res.ok, true);
+      assert.strictEqual(res.serverId, 'srv99abc');
+      assert.strictEqual(calls.length, 2);
+
+      const httpRejected = await panelRestart({
+        env: {
+          PANEL_URL: 'http://panel.xsystemshosting.com',
+          PANEL_API_KEY: 'hydro_SyntheticTestKey01',
+          PANEL_SERVER_ID: 'srv99abc',
+        },
+        fetchImpl: fakeFetch,
+      });
+      assert.strictEqual(httpRejected.ok, false);
+      assert.ok(/https:\/\//i.test(httpRejected.reason));
+    });
+
+    await test('dashboardSync signs HMAC requests, applies whitelist deltas, and answers queued pair commands', async () => {
+      const crypto = require('crypto');
+      const { startDashboardSync } = require(path.join(REPO, 'utils', 'dashboardSync'));
+      const wlTemp = path.join(sandbox, 'sync-wl.json');
+      fs.writeFileSync(wlTemp, JSON.stringify({ users: [] }));
+
+      const secret = 'sync-secret-for-selftest-123456';
+      const receivedBodies = [];
+
+      const fakeFetch = async (url, init = {}) => {
+        assert.strictEqual(url, 'https://portal.example.test/api/bot/sync');
+        const ts = init.headers['X-Bot-Timestamp'];
+        const nonce = init.headers['X-Bot-Nonce'];
+        const sig = init.headers['X-Bot-Signature'];
+        const expected =
+          'sha256=' +
+          crypto
+            .createHmac('sha256', secret)
+            .update(`${ts}.${nonce}.${init.body}`)
+            .digest('hex');
+        assert.strictEqual(sig, expected, 'HMAC signature mismatch');
+
+        const parsed = JSON.parse(init.body);
+        receivedBodies.push(parsed);
+
+        if (receivedBodies.length === 1) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              ok: true,
+              nextPollMs: 2000,
+              whitelistVersion: 'v-abc123',
+              whitelistChanged: true,
+              users: [
+                { number: '265991112233', label: 'Portal Member', addedBy: 'm@example.com', enabled: true },
+              ],
+              commands: [
+                { id: 'cmd_pair_1', type: 'pair', payload: { number: '265998887766', label: 'Pair Me' } },
+              ],
+            }),
+          };
+        }
+
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            nextPollMs: 10000,
+            whitelistVersion: 'v-abc123',
+            whitelistChanged: false,
+            commands: [],
+          }),
+        };
+      };
+
+      const sync = startDashboardSync({
+        manualOnly: true,
+        dashboardUrl: 'https://portal.example.test',
+        token: secret,
+        wlFile: wlTemp,
+        fetchImpl: fakeFetch,
+        getStatus: () => ({ connected: false, botNumber: null }),
+        requestPairing: async (num) => ({ code: `ABCD-${num.slice(-4)}`, expiresInSeconds: 60 }),
+      });
+
+      await sync.syncNow();
+      // Second tick delivers completedResults for cmd_pair_1
+      await sync.syncNow();
+      sync.stop();
+
+      assert.strictEqual(receivedBodies.length, 2);
+      assert.strictEqual(receivedBodies[1].whitelistVersion, 'v-abc123');
+      assert.strictEqual(receivedBodies[1].completedResults.length, 1);
+      assert.strictEqual(receivedBodies[1].completedResults[0].id, 'cmd_pair_1');
+      assert.strictEqual(receivedBodies[1].completedResults[0].ok, true);
+      assert.strictEqual(receivedBodies[1].completedResults[0].result.code, 'ABCD-7766');
+
+      const savedWl = JSON.parse(fs.readFileSync(wlTemp, 'utf8'));
+      const nums = savedWl.users.map((u) => u.number);
+      assert.ok(nums.includes('265991112233'), 'whitelist delta not applied');
+      assert.ok(nums.includes('265998887766'), 'paired number not added to whitelist');
+    });
   }
 
   // ─── summary ────────────────────────────────────────────────────────────────

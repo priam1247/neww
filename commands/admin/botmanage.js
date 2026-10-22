@@ -17,55 +17,12 @@ function uptime(ms) {
 
 // ─── Real restart (panel API) ─────────────────────────────────────────────────
 // A plain process.exit() only STOPS the server on hosts where crash detection is
-// disabled, so the restart is requested from the panel itself.
-//   PANEL_API_KEY    client key (Panel → Account → API Credentials, "ptlc_…")  REQUIRED
-//   PANEL_SERVER_ID  short server id from the panel URL                         optional
-//   PANEL_URL        panel address                                              optional
-// The server id falls back to P_SERVER_UUID, which Pterodactyl sets itself.
-const PANEL_URL_DEFAULT = 'https://panel.xsystemshosting.com';
+// disabled, so the restart is requested from the panel itself via utils/panelClient.js.
+//   PANEL_API_KEY    client key (Panel → Account → API Keys, "hydro_…" / "ptlc_…") REQUIRED
+//   PANEL_SERVER_ID  short server id (auto-discovered via /api/client if omitted)  optional
+//   PANEL_URL        panel HTTPS address                                           optional
+const { panelRestart } = require('../../utils/panelClient');
 let restarting = false;
-
-function panelConfig() {
-  const key = String(process.env.PANEL_API_KEY || '').trim();
-  const base = String(process.env.PANEL_URL || PANEL_URL_DEFAULT).trim()
-    .replace(/\/server\/.*$/, '').replace(/\/+$/, '');
-  const uuid = String(process.env.P_SERVER_UUID || '').trim();
-  const configured = String(process.env.PANEL_SERVER_ID || '').trim();
-  const ids = [...new Set([configured, uuid.split('-')[0], uuid].filter(Boolean))];
-  return { key, base, ids };
-}
-
-async function panelRestart() {
-  const { key, base, ids } = panelConfig();
-  if (!key) return { ok: false, reason: 'PANEL_API_KEY is not set' };
-  if (!ids.length) return { ok: false, reason: 'PANEL_SERVER_ID is not set' };
-
-  let reason = 'no answer';
-  for (const id of ids) {
-    try {
-      const res = await fetch(`${base}/api/client/servers/${id}/power`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${key}`,
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ signal: 'restart' }),
-        signal: AbortSignal.timeout(15000),
-      });
-      if (res.status === 204 || res.status === 200) return { ok: true };
-      reason = res.status === 401 || res.status === 403
-        ? `panel refused the key (HTTP ${res.status})`
-        : `panel answered HTTP ${res.status}`;
-      if (res.status === 404) continue;   // wrong id shape: try the next one
-      break;
-    } catch (e) {
-      reason = e.message || 'panel unreachable';
-      break;
-    }
-  }
-  return { ok: false, reason };
-}
 
 function mb(bytes) { return `${(bytes / 1024 / 1024).toFixed(1)} MB`; }
 

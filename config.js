@@ -163,6 +163,8 @@ module.exports = {
   //   DASHBOARD_URL          dashboard origin, enables whitelist pull sync
   admin: {
     token: env.ADMIN_DASHBOARD_TOKEN || '',
+    syncToken: env.BOT_SYNC_TOKEN || env.ADMIN_DASHBOARD_TOKEN || '',
+    apiEnabled: !/^(0|false|no|off)$/i.test(String(env.ADMIN_API_ENABLED ?? 'true')),
     // Pterodactyl hands the container a port (SERVER_PORT / PORT); on other
     // hosts ADMIN_API_PORT (or ADMIN_PORT) is the one to set. 3000 is last resort.
     port: Number(env.ADMIN_API_PORT || env.ADMIN_PORT || env.SERVER_PORT || env.PORT || 3000),
@@ -172,6 +174,7 @@ module.exports = {
       .map((s) => s.trim().replace(/\/+$/, ''))
       .filter(Boolean),
     syncMinutes: Number(env.DASHBOARD_SYNC_MINUTES || 5),
+    syncIntervalMs: Number(env.DASHBOARD_SYNC_INTERVAL_MS || 10_000),
   },
 
   // ─── Movies & series (.movie / .series) ──────────────────────────────────

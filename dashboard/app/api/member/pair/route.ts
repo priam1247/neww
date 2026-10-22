@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAdminEmail, getAuthenticatedSession } from '@/lib/auth-engine';
 import {
+  checkQueuedPairCommand,
   getResolvedBotTarget,
   normalizePhoneNumber,
   requestLiveBotPairingCode,
@@ -8,6 +9,33 @@ import {
 import { getStoredWhatsAppUser } from '@/lib/storage';
 
 export const dynamic = 'force-dynamic';
+
+export async function GET(req: NextRequest) {
+  const session = await getAuthenticatedSession(req);
+  if (!session) {
+    return NextResponse.json({ error: 'Authentication required.' }, { status: 401 });
+  }
+
+  const requestId = req.nextUrl.searchParams.get('requestId')?.trim() || '';
+  if (!requestId) {
+    return NextResponse.json({ error: 'Missing requestId.' }, { status: 400 });
+  }
+
+  const res = await checkQueuedPairCommand(requestId);
+  if (!res.ok) {
+    return NextResponse.json({ error: res.error }, { status: res.status });
+  }
+  if (res.pending) {
+    return NextResponse.json({ ok: true, pending: true, requestId }, { status: 202 });
+  }
+
+  return NextResponse.json({
+    ok: true,
+    code: res.code,
+    expiresInSeconds: res.expiresInSeconds || 60,
+    issuedAt: Date.now(),
+  });
+}
 
 export async function POST(req: NextRequest) {
   const session = await getAuthenticatedSession(req);
@@ -56,9 +84,22 @@ export async function POST(req: NextRequest) {
   const result = await requestLiveBotPairingCode(
     number,
     `${existing.label || session.user.name} (${session.user.email})`,
+    session.user.email,
   );
   if (!result.ok) {
     return NextResponse.json({ error: result.error }, { status: result.status });
+  }
+
+  if (result.pending && result.requestId) {
+    return NextResponse.json(
+      {
+        ok: true,
+        pending: true,
+        requestId: result.requestId,
+        number,
+      },
+      { status: 202 },
+    );
   }
 
   return NextResponse.json({

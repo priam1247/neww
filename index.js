@@ -352,6 +352,7 @@ async function startBot() {
           `waiting for pairing from the web dashboard (or remove ./${config.sessionName} manually and restart).`
         );
       }
+      try { require('./utils/dashboardSync').triggerImmediateSync(); } catch { /* ignore */ }
     } else if (connection === 'open') {
       reconnector.reset();
       console.log('\n✅ Bot connected successfully!');
@@ -361,6 +362,7 @@ async function startBot() {
       const ownerNames = Array.isArray(config.ownerName) ? config.ownerName.join(',') : config.ownerName;
       console.log(`👑 Owner: ${ownerNames}\n`);
       console.log('Bot is ready to receive messages!\n');
+      try { require('./utils/dashboardSync').triggerImmediateSync(); } catch { /* ignore */ }
     }
   });
 
@@ -451,68 +453,79 @@ require('./utils/logger').banner([
   YT.startWatchdog({ everyMinutes: 30 });
 })();
 
-// ── Dashboard API + whitelist sync ───────────────────────────────────────────
-// The web dashboard (Cloudflare app) links to this bot with a URL + token and
-// then drives it over /admin/api/*. Without ADMIN_DASHBOARD_TOKEN nothing here
-// starts, so a plain WhatsApp-only deployment is byte-for-byte the same.
+// ── Dashboard Outbound HTTPS Sync + Optional Inbound API ─────────────────────
+// Recommended on Hydrodactyl / Pterodactyl: set DASHBOARD_URL + BOT_SYNC_TOKEN
+// (with ADMIN_API_ENABLED=false so no open port is needed). The bot pushes live
+// heartbeats, pulls versioned whitelist deltas, and picks up pairing requests.
 (function startDashboardBridge() {
   const admin = config.admin || {};
   const { startAdminApi } = require('./utils/adminApi');
-  const { startAllowlistSync } = require('./utils/allowlistSync');
+  const { startDashboardSync } = require('./utils/dashboardSync');
 
-  if (!admin.token) {
-    console.log('🌐 Dashboard API: off (ADMIN_DASHBOARD_TOKEN not set)');
-    return;
-  }
+  const requestPairForDashboard = async (number) => {
+    if (!/^\d{7,15}$/.test(number)) {
+      throw Object.assign(new Error('WhatsApp numbers must be 7–15 digits, country code first.'), { statusCode: 400 });
+    }
+    const live = connectedNumber();
+    if (live) {
+      throw Object.assign(new Error(
+        `This bot is already linked to +${live}. Log it out in WhatsApp → Linked devices before linking another number.`,
+      ), { statusCode: 409 });
+    }
 
-  startAdminApi({
-    port: admin.port,
-    token: admin.token,
-    allowedOrigins: admin.corsOrigins || [],
-    hooks: {
-      status: async () => {
-        const number = connectedNumber();
-        const { readWL } = require('./utils/accessControl');
-        return {
-          connected: Boolean(number),
-          botNumber: number,
-          botName: config.botName,
-          paired: Boolean(config.pairNumber),
-          members: readWL().users.filter((u) => u.enabled !== false).length,
-          pendingPairing: Boolean(pairing.code && Date.now() - pairing.at < 60_000),
-        };
-      },
+    // fresh session: WhatsApp only issues a code for an unregistered socket
+    const folder = `./${config.sessionName}`;
+    try { fs.rmSync(folder, { recursive: true, force: true }); } catch { /* ignore */ }
 
-      requestPair: async (number) => {
-        if (!/^\d{7,15}$/.test(number)) {
-          throw Object.assign(new Error('WhatsApp numbers must be 7–15 digits, country code first.'), { statusCode: 400 });
-        }
-        const live = connectedNumber();
-        if (live) {
-          throw Object.assign(new Error(
-            `This bot is already linked to +${live}. Log it out in WhatsApp → Linked devices before linking another number.`,
-          ), { statusCode: 409 });
-        }
+    pairing.number = number;
+    pairing.code = null;
+    pairing.at = 0;
+    pairing.error = null;
+    config.pairNumber = number;
+    reconnector.reset();
 
-        // fresh session: WhatsApp only issues a code for an unregistered socket
-        const folder = `./${config.sessionName}`;
-        try { fs.rmSync(folder, { recursive: true, force: true }); } catch { /* ignore */ }
+    await startBot();
+    return waitForPairingCode();
+  };
 
-        pairing.number = number;
-        pairing.code = null;
-        pairing.at = 0;
-        pairing.error = null;
-        config.pairNumber = number;
-        reconnector.reset();
-
-        await startBot();
-        return waitForPairingCode();
-      },
+  const sync = startDashboardSync({
+    dashboardUrl: admin.dashboardUrl,
+    token: admin.syncToken,
+    intervalMs: admin.syncIntervalMs,
+    getStatus: () => {
+      const number = connectedNumber();
+      return { connected: Boolean(number), botNumber: number };
     },
+    requestPairing: requestPairForDashboard,
   });
 
-  startAllowlistSync();
-  console.log(`🌐 Dashboard API: on (port ${admin.port}${admin.dashboardUrl ? `, sync ${admin.dashboardUrl}` : ''})`);
+  if (admin.apiEnabled && admin.token) {
+    startAdminApi({
+      port: admin.port,
+      token: admin.token,
+      allowedOrigins: admin.corsOrigins || [],
+      hooks: {
+        status: async () => {
+          const number = connectedNumber();
+          const { readWL } = require('./utils/accessControl');
+          return {
+            connected: Boolean(number),
+            botNumber: number,
+            botName: config.botName,
+            paired: Boolean(config.pairNumber),
+            members: readWL().users.filter((u) => u.enabled !== false).length,
+            pendingPairing: Boolean(pairing.code && Date.now() - pairing.at < 60_000),
+          };
+        },
+        requestPair: requestPairForDashboard,
+      },
+    });
+    console.log(`🌐 Dashboard API: on (port ${admin.port}${sync.enabled ? `, outbound sync ${admin.dashboardUrl}` : ''})`);
+  } else if (sync.enabled) {
+    console.log(`🌐 Dashboard Sync: outbound HTTPS active (${admin.dashboardUrl}, no open port required)`);
+  } else {
+    console.log('🌐 Dashboard Sync: off (set DASHBOARD_URL + BOT_SYNC_TOKEN to connect)');
+  }
 })();
 
 startBot().catch(err => {

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthenticatedSession } from '@/lib/auth-engine';
 import { fetchLiveBotStatus, parseAndValidateBotUrl } from '@/lib/bot-proxy';
-import { saveBotConnectionConfig } from '@/lib/storage';
+import { saveBotConnectionConfig, setFastPollWindow } from '@/lib/storage';
 
 export const dynamic = 'force-dynamic';
 
@@ -35,11 +35,17 @@ export async function POST(req: NextRequest) {
       typeof body.botAdminToken === 'string' && body.botAdminToken !== '••••••••'
         ? body.botAdminToken
         : undefined,
+    botSyncToken:
+      typeof body.botSyncToken === 'string' && body.botSyncToken !== '••••••••'
+        ? body.botSyncToken
+        : undefined,
     botEnabledForMembers:
       typeof body.botEnabledForMembers === 'boolean'
         ? body.botEnabledForMembers
         : undefined,
   });
+
+  await setFastPollWindow(30_000).catch(() => {});
 
   const parsed = parseAndValidateBotUrl(saved.botApiUrl);
   const probe = parsed.baseUrl
@@ -47,12 +53,13 @@ export async function POST(req: NextRequest) {
         baseUrl: parsed.baseUrl,
         token: saved.botAdminToken,
       })
-    : null;
+    : await fetchLiveBotStatus();
 
   return NextResponse.json({
     ok: true,
     botApiUrl: saved.botApiUrl,
     hasBotToken: Boolean(saved.botAdminToken),
+    hasBotSyncToken: Boolean(saved.botSyncToken),
     botEnabledForMembers: saved.botEnabledForMembers,
     probe,
   });

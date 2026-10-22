@@ -39,8 +39,47 @@ export interface ApprovedUser {
 export interface BotConnectionConfig {
   botApiUrl: string;
   botAdminToken: string;
+  botSyncToken: string;
   botEnabledForMembers: boolean;
   updatedAt?: string;
+}
+
+export interface PanelConnectionConfig {
+  panelUrl: string;
+  panelServerId: string;
+  panelApiKey: string;
+  updatedAt?: string;
+}
+
+export interface PanelServerSummary {
+  id: string;
+  uuid: string;
+  name: string;
+}
+
+export interface BotHeartbeatRecord {
+  lastSeenAt: number;
+  connected: boolean;
+  botNumber: string | null;
+  botName?: string;
+  version?: string;
+  uptimeSeconds?: number;
+  diskUsedMB?: number;
+  diskBudgetMB?: number;
+  queueLight?: number;
+  queueHeavy?: number;
+}
+
+export interface BotCommandRecord {
+  id: string;
+  type: 'pair' | 'restart';
+  payload: Record<string, unknown>;
+  status: 'pending' | 'claimed' | 'completed' | 'failed';
+  result?: Record<string, unknown> | null;
+  error?: string | null;
+  requestedBy?: string;
+  createdAt: number;
+  expiresAt: number;
 }
 
 export interface AdminOverviewPayload {
@@ -49,14 +88,27 @@ export interface AdminOverviewPayload {
   botServerLinked: boolean;
   botApiUrl: string;
   hasBotToken: boolean;
+  hasBotSyncToken?: boolean;
   botEnabledForMembers: boolean;
   storageEngine: 'bot-live' | 'cloudflare-d1' | 'persistent-db';
+  connectionMode?: 'heartbeat' | 'direct' | 'unconfigured';
   upstreamHost?: string | null;
   isInsecureHttp?: boolean;
   botReachable?: boolean;
   botError?: string | null;
   connected: boolean;
   botNumber: string | null;
+  lastSeenAt?: number | null;
+  lastSeenSecondsAgo?: number | null;
+  botVersion?: string | null;
+  diskUsedMB?: number | null;
+  diskBudgetMB?: number | null;
+  queueLight?: number | null;
+  queueHeavy?: number | null;
+  panelConfigured?: boolean;
+  panelUrl?: string;
+  panelServerId?: string;
+  hasPanelApiKey?: boolean;
   users: ApprovedUser[];
   members: MemberRecord[];
   latencyMs?: number;
@@ -70,6 +122,7 @@ export interface MemberOverviewPayload {
   botServerLinked: boolean;
   botReachable?: boolean;
   botError?: string | null;
+  lastSeenSecondsAgo?: number | null;
   botConnected: boolean;
   botNumber: string | null;
   numbers: ApprovedUser[];
