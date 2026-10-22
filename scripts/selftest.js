@@ -1076,34 +1076,122 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
   });
 
 
-  console.log('\n── 16b. heap plan (watchdog budget for the running host) ──');
+  console.log('\n── 16b. Phase 1 stability guards ──');
 
-  await test('a 4.5 GB box plans 3900–4200 MB of heap', () => {
-    const { computeHeapMB } = require(path.join(REPO, 'utils/heapPlan.js'));
-    for (const totalMB of [4500, 4608, 4700]) {
-      const { heapMB } = computeHeapMB({ totalMB });
-      assert.ok(heapMB >= 3900 && heapMB <= 4200, `${totalMB} MB box planned ${heapMB} MB`);
-    }
+  await test('index.js has no heap re-exec or broken startAdminServer call', () => {
+    const src = fs.readFileSync(path.join(REPO, 'index.js'), 'utf8');
+    assert.ok(!src.includes('respawnWithBiggerHeap'), 'respawnWithBiggerHeap still in index.js');
+    assert.ok(!src.includes('heapPlan'), 'heapPlan still referenced in index.js');
+    assert.ok(!src.includes('startAdminServer'), 'startAdminServer crash still in index.js');
+    assert.ok(/Session files .* were NOT deleted/i.test(src), 'logout notice missing');
   });
 
-  await test('HEAP_MB is honoured inside the band and capped above it', () => {
-    const { computeHeapMB } = require(path.join(REPO, 'utils/heapPlan.js'));
-    assert.strictEqual(computeHeapMB({ totalMB: 4608, askedMB: 3900 }).heapMB, 3900);
-    assert.strictEqual(computeHeapMB({ totalMB: 4608, askedMB: 4200 }).heapMB, 4200);
-    const over = computeHeapMB({ totalMB: 4608, askedMB: 8000 });
-    assert.strictEqual(over.heapMB, 4200, 'an over-ask must be capped, not trusted');
-    assert.strictEqual(over.capped, true);
-    // small boxes must not be told to use 4 GB
-    assert.ok(computeHeapMB({ totalMB: 2048 }).heapMB < 2048, '2 GB box got an impossible heap');
+  await test('reconnector backs off and retries when startBot() throws', async () => {
+    const { createReconnector, computeBackoffMs } = require(path.join(REPO, 'utils/reconnect.js'));
+    assert.strictEqual(computeBackoffMs(0, { baseMs: 3000, maxMs: 60000 }), 3000);
+    assert.strictEqual(computeBackoffMs(1, { baseMs: 3000, maxMs: 60000 }), 6000);
+    assert.strictEqual(computeBackoffMs(2, { baseMs: 3000, maxMs: 60000 }), 12000);
+    assert.strictEqual(computeBackoffMs(9, { baseMs: 3000, maxMs: 60000 }), 60000);
+
+    const pendingTimers = [];
+    let runs = 0;
+    const rc = createReconnector({
+      baseMs: 100,
+      maxMs: 800,
+      setTimer: (fn, delay) => { const t = { fn, delay }; pendingTimers.push(t); return t; },
+      clearTimer: () => {},
+      start: async () => {
+        runs++;
+        if (runs === 1) throw new Error('transient network error');
+      },
+    });
+
+    assert.strictEqual(rc.schedule(), 100);
+    assert.strictEqual(pendingTimers.length, 1);
+    await pendingTimers.shift().fn(); // fails -> must schedule retry automatically!
+    assert.strictEqual(pendingTimers.length, 1, 'failed reconnect left the bot dead instead of retrying');
+    assert.strictEqual(pendingTimers[0].delay, 200);
+    await pendingTimers.shift().fn(); // succeeds
+    assert.strictEqual(runs, 2);
+    rc.reset();
+    assert.strictEqual(rc.attempts, 0);
   });
 
-  await test('the watchdog budget follows the real heap limit, not RAM×0.9', () => {
-    const { detectLimitMB } = require(path.join(REPO, 'utils/memoryWatchdog.js'));
-    const limit = detectLimitMB();
-    const heapMB = require('v8').getHeapStatistics().heap_size_limit / (1024 * 1024);
-    // within a few MB of the heap limit the process is actually running under
-    assert.ok(Math.abs(limit - heapMB) <= 2 || limit < heapMB,
-      `watchdog budget ${limit} MB does not match heap limit ${Math.round(heapMB)} MB`);
+  await test('atomic JSON store keeps .bak and whitelist never treats corruption as "no users"', () => {
+    const { writeJsonAtomic, readJsonSafe } = require(path.join(REPO, 'utils/jsonStore.js'));
+    const ac = require(path.join(REPO, 'utils/accessControl.js'));
+    const wlFile = path.join(sandbox, 'wl-test.json');
+
+    ac.writeWL({ users: [{ number: '265991112222', addedAt: 1 }] }, { filePath: wlFile });
+    assert.ok(fs.existsSync(`${wlFile}.bak`), '.bak backup was not created');
+
+    // Corrupt primary -> must recover from .bak, NOT return empty users
+    fs.writeFileSync(wlFile, '{corrupt-half-write', 'utf8');
+    const recovered = ac.readWL({ force: true, filePath: wlFile });
+    assert.strictEqual(recovered.users.length, 1);
+    assert.strictEqual(recovered.users[0].number, '265991112222');
+
+    // Corrupt BOTH primary and .bak -> must throw WHITELIST_CORRUPT, never { users: [] }
+    const unrec = path.join(sandbox, 'wl-dead.json');
+    fs.writeFileSync(unrec, '{broken', 'utf8');
+    fs.writeFileSync(`${unrec}.bak`, '{also-broken', 'utf8');
+    assert.throws(() => ac.readWL({ force: true, filePath: unrec }), /WHITELIST_CORRUPT|refusing to treat/);
+
+    // Generic JSON helper test
+    const stateFile = path.join(sandbox, 'state.json');
+    writeJsonAtomic(stateFile, { on: false });
+    fs.writeFileSync(stateFile, '', 'utf8');
+    const res = readJsonSafe(stateFile, { defaultValue: { on: true } });
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.recovered, true);
+    assert.strictEqual(res.data.on, false);
+  });
+
+  await test('.on and .off follow the invoked command name (including disappearing messages)', async () => {
+    const handler = require(path.join(REPO, 'handler.js'));
+    const db = require(path.join(REPO, 'database.js'));
+    const sent = [];
+    const sock = {
+      user: { id: '265894016453:1@s.whatsapp.net' },
+      sendMessage: async (_jid, content) => { sent.push(content); return { key: { id: 'x' } }; },
+    };
+    // Disappearing message container: msg.message.conversation is undefined!
+    await handler.handleMessage(sock, {
+      key: { remoteJid: '265894016453@s.whatsapp.net', id: 'eph-off', fromMe: true },
+      message: { ephemeralMessage: { message: { extendedTextMessage: { text: '.off' } } } },
+    });
+    assert.strictEqual(db.getBotState(), false, '.off inside ephemeralMessage did not turn bot off');
+
+    await handler.handleMessage(sock, {
+      key: { remoteJid: '265894016453@s.whatsapp.net', id: 'eph-on', fromMe: true },
+      message: { ephemeralMessage: { message: { extendedTextMessage: { text: '.on' } } } },
+    });
+    assert.strictEqual(db.getBotState(), true, '.on inside ephemeralMessage did not turn bot on');
+  });
+
+  await test('editing a command message never re-runs the command', async () => {
+    const handler = require(path.join(REPO, 'handler.js'));
+    const sent = [];
+    const sock = {
+      user: { id: '265894016453:1@s.whatsapp.net' },
+      sendMessage: async (_jid, content) => { sent.push(content); return { key: { id: 'x' } }; },
+    };
+    // Direct editedMessage wrapper
+    await handler.handleMessage(sock, {
+      key: { remoteJid: '265894016453@s.whatsapp.net', id: 'edit-1', fromMe: true },
+      message: { editedMessage: { message: { protocolMessage: { editedMessage: { conversation: '.ping' } } } } },
+    });
+    // Ephemeral -> editedMessage wrapper
+    await handler.handleMessage(sock, {
+      key: { remoteJid: '265894016453@s.whatsapp.net', id: 'edit-2', fromMe: true },
+      message: { ephemeralMessage: { message: { editedMessage: { message: { conversation: '.ping' } } } } },
+    });
+    // protocolMessage type 14 (MESSAGE_EDIT)
+    await handler.handleMessage(sock, {
+      key: { remoteJid: '265894016453@s.whatsapp.net', id: 'edit-3', fromMe: true },
+      message: { protocolMessage: { type: 14, editedMessage: { conversation: '.ping' } } },
+    });
+    assert.strictEqual(sent.length, 0, 'an edited message triggered a command reply');
   });
 
   console.log('\n── 17. ffmpeg-free HLS downloader (movies/series core) ──');
@@ -1829,11 +1917,11 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
         engine.qualityOptions = original;
         selections.clear('q@s.whatsapp.net', 'u@s.whatsapp.net');
       }
-      const list = sent.find((m) => Array.isArray(m.sections));
-      assert.ok(list, 'no quality list message was sent');
-      assert.strictEqual(list.sections[0].rows.length, 2);
-      assert.match(list.sections[0].rows[0].description, /2\.1 GB/);
-      assert.strictEqual(list.sections[0].rows[0].rowId, 'q1080');
+      assert.ok(!sent.some((m) => Array.isArray(m.sections)), 'broken WhatsApp sections list message was sent');
+      const body = sent.map((m) => m.text || m.poll?.name || (m.poll?.values || []).join('\n')).join('\n');
+      assert.match(body, /1080p/);
+      assert.match(body, /2\.1 GB/);
+      assert.match(body, /720p/);
     });
 
     await test('.movie falls back to a numbered list when the client rejects lists', async () => {

@@ -12,6 +12,9 @@ data/
 
 # runtime settings written by the bot itself
 database/media_settings.json
+database/*.bak
+database/*.corrupt*
+database/*.tmp
 
 # local secrets
 .env

@@ -218,25 +218,6 @@ async function askQuality(sock, msg, extra, meta, job) {
     },
   });
 
-  const rows = options.map((o, i) => ({
-    title: `${o.quality}p`,
-    description: `${o.sizeMB ? `~${fmtSize(o.sizeMB)}` : 'size unknown'} · ${o.candidates} source${o.candidates > 1 ? 's' : ''}`,
-    rowId: ids[i],
-  }));
-
-  try {
-    await sock.sendMessage(extra.from, {
-      text: header,
-      footer: 'Tap a quality, or reply with its number',
-      title: 'Quality',
-      buttonText: 'Choose quality',
-      sections: [{ title, rows }],
-    }, { quoted: msg });
-    return;
-  } catch (e) {
-    log.debug(`list message rejected (${e.message}) — using a numbered list`);
-  }
-
   const lines = options.map((o, i) => `*${i + 1}.* ${o.quality}p${o.sizeMB ? ` · ~${fmtSize(o.sizeMB)}` : ''}`);
   await say(`${header}\n\n${lines.join('\n')}\n\n_reply with a number_`);
 }

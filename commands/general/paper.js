@@ -142,17 +142,19 @@ const isFileRow = (r) => r.type !== 'folder' && !r.is_folder;
 
 // ─── SNAPSHOT (disk persistence) ──────────────────────────────────────────────
 // Compact tuple format: [id, hash, name, size, created_at] — ~1–2 MB for 11k files.
+const { writeRawAtomic, readJsonSafe } = require('../../utils/jsonStore');
+
 function loadSnapshot() {
-  try {
-    const raw = JSON.parse(fs.readFileSync(SNAPSHOT_PATH, 'utf-8'));
-    if (!raw || raw.version !== SNAPSHOT_VERSION || !Array.isArray(raw.files)) return null;
-    const files = raw.files.map(([id, hash, name, size, created_at]) => ({ id, hash, name, size, created_at }));
-    let maxTs = raw.maxTs || '';
-    if (!maxTs) for (const f of files) if (f.created_at > maxTs) maxTs = f.created_at;
-    return { files, fetchedAt: raw.fetchedAt || 0, expected: raw.expected || files.length, folders: raw.folders || 0, maxTs };
-  } catch (_) {
-    return null;
-  }
+  const res = readJsonSafe(SNAPSHOT_PATH, {
+    defaultValue: null,
+    validate: (raw) => raw === null || (raw && raw.version === SNAPSHOT_VERSION && Array.isArray(raw.files)),
+  });
+  if (!res.ok || !res.data) return null;
+  const raw = res.data;
+  const files = raw.files.map(([id, hash, name, size, created_at]) => ({ id, hash, name, size, created_at }));
+  let maxTs = raw.maxTs || '';
+  if (!maxTs) for (const f of files) if (f.created_at > maxTs) maxTs = f.created_at;
+  return { files, fetchedAt: raw.fetchedAt || 0, expected: raw.expected || files.length, folders: raw.folders || 0, maxTs };
 }
 
 function saveSnapshot(files, expected, folders) {
@@ -163,10 +165,8 @@ function saveSnapshot(files, expected, folders) {
       return [f.id, f.hash, f.name, f.size, f.created_at];
     });
     const payload = JSON.stringify({ version: SNAPSHOT_VERSION, fetchedAt: Date.now(), expected, folders, maxTs, files: tuples });
-    fs.mkdirSync(path.dirname(SNAPSHOT_PATH), { recursive: true });
-    const tmp = SNAPSHOT_PATH + '.tmp';
-    fs.writeFileSync(tmp, payload);
-    fs.renameSync(tmp, SNAPSHOT_PATH); // atomic: readers never see a half-write
+    writeRawAtomic(SNAPSHOT_PATH, payload);
+    try { writeRawAtomic(`${SNAPSHOT_PATH}.bak`, payload); } catch { /* non-fatal */ }
   } catch (e) {
     console.warn('[paper] snapshot save failed:', e.message);
   }

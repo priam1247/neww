@@ -52,7 +52,7 @@ function detectLimitMB() {
   if (candidates.length) return Math.round(Math.min(...candidates));
 
   // No heap limit and no cgroup (bare `node index.js` on the host): plan one.
-  return require('./heapPlan').autoHeapMB(os.totalmem() / (1024 * 1024));
+  return Math.max(1024, Math.min(4200, Math.round(os.totalmem() / (1024 * 1024)) - 450));
 }
 
 const TOTAL_MB          = detectLimitMB();

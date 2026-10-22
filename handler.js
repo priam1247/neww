@@ -12,17 +12,29 @@ const { readWL, findAllowedUserIndex } = require('./utils/accessControl');
 // Load all commands
 const commands = loadCommands();
 
-// Unwrap WhatsApp containers (ephemeral, view once, edited, …).
-// Loops because containers nest (e.g. viewOnce inside ephemeral).
+// Unwrap WhatsApp containers (ephemeral, view once, …).
+// Deliberately excludes `editedMessage`: edited messages must NOT re-trigger commands.
 const CONTAINER_KEYS = [
   'ephemeralMessage',
   'viewOnceMessage',
   'viewOnceMessageV2',
   'viewOnceMessageV2Extension',
   'documentWithCaptionMessage',
-  'editedMessage',
   'deviceSentMessage',
 ];
+
+const isEditedMessage = (msg) => {
+  if (!msg || !msg.message) return false;
+  let m = msg.message;
+  for (let i = 0; i < 6 && m; i++) {
+    if (m.editedMessage) return true;
+    if (m.protocolMessage?.editedMessage || m.protocolMessage?.type === 14) return true;
+    const nextKey = CONTAINER_KEYS.find((k) => m[k] && m[k].message);
+    if (!nextKey) break;
+    m = m[nextKey].message;
+  }
+  return false;
+};
 
 const getMessageContent = (msg) => {
   if (!msg || !msg.message) return null;
@@ -48,8 +60,12 @@ const isOwner = (ids) => {
 // Owner/admin or whitelisted user — everyone else gets no response at all
 const isAllowedSender = (ids) => {
   if (isOwner(ids)) return true;
-  // enabled:false (dashboard "Disallow") = present but blocked
-  return findAllowedUserIndex(readWL().users, ids) !== -1;
+  try {
+    // enabled:false (dashboard "Disallow") = present but blocked
+    return findAllowedUserIndex(readWL().users, ids) !== -1;
+  } catch {
+    return false;
+  }
 };
 
 // System JID filter - checks if JID is from broadcast/status/newsletter
@@ -62,9 +78,10 @@ const isSystemJid = (jid) => {
 };
 
 // Every command receives this bag of helpers.
-const buildExtra = (sock, msg, { from, sender, senderIds }) => ({
+const buildExtra = (sock, msg, { from, sender, senderIds, commandName = '' }) => ({
   from,
   sender,
+  commandName,
   isOwner: isOwner(senderIds),
   reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
   // Send an initial status message, then edit it in place with the final
@@ -89,7 +106,8 @@ const buildExtra = (sock, msg, { from, sender, senderIds }) => ({
 
 // Execute an explicitly prefixed command. Unknown commands are ignored.
 async function runCommand(sock, msg, name, args, { from, sender, senderIds }) {
-  const command = commands.get(String(name || '').toLowerCase());
+  const invoked = String(name || '').toLowerCase();
+  const command = commands.get(invoked);
   if (!command) return false;
 
   if (command.ownerOnly && !isOwner(senderIds)) {
@@ -97,8 +115,13 @@ async function runCommand(sock, msg, name, args, { from, sender, senderIds }) {
     return true;
   }
 
-  console.log(`Executing command: ${String(name).toLowerCase()} from ${sender}`);
-  await command.execute(sock, msg, args || [], buildExtra(sock, msg, { from, sender, senderIds }));
+  console.log(`Executing command: ${invoked} from ${sender}`);
+  await command.execute(
+    sock,
+    msg,
+    args || [],
+    buildExtra(sock, msg, { from, sender, senderIds, commandName: invoked }),
+  );
   return true;
 }
 
@@ -141,6 +164,7 @@ async function handleSelection(sock, msg, body, { from, sender, senderIds }) {
 const handleMessage = async (sock, msg) => {
   try {
     if (!msg.message) return;
+    if (isEditedMessage(msg)) return;
 
     const from = msg.key.remoteJid;
     if (isSystemJid(from)) return;
@@ -217,4 +241,6 @@ const handleMessage = async (sock, msg) => {
 
 module.exports = {
   handleMessage,
+  isEditedMessage,
+  isSystemJid,
 };

@@ -145,8 +145,8 @@ module.exports = {
 
   // Set PAIR_NUMBER (full WhatsApp number, digits only, country code first,
   // e.g. 265991234567) to log in with a pairing code instead of scanning a
-  // QR — useful when the bot host and your WhatsApp phone are the same device.
-  pairNumber: env.PAIR_NUMBER || '265894016453',
+  // QR — or leave empty to pair interactively from the web dashboard.
+  pairNumber: env.PAIR_NUMBER || '',
 
   // ─── Dashboard control API ───────────────────────────────────────────────
   // The web dashboard (Cloudflare Pages app) links to this bot with a URL and

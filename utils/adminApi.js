@@ -239,7 +239,7 @@ function startAdminApi({ port, token, hooks = {} } = {}) {
 
       return send(res, 404, { error: `No route for ${req.method} ${pathname}` });
     } catch (e) {
-      const code = e.statusCode || (e.code === 'PAIR_BUSY' ? 409 : 500);
+      const code = e.statusCode || (e.code === 'PAIR_BUSY' ? 409 : e.code === 'WHITELIST_CORRUPT' ? 503 : 500);
       log.warn(`${req.method} ${pathname} → ${code} · ${e.message}`);
       return send(res, code, { error: e.message || 'Bot error' });
     } finally {

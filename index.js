@@ -1,48 +1,6 @@
 /**
  * WhatsApp MD Bot - Main Entry Point
  */
-// ── heap sizing ──────────────────────────────────────────────────────────────
-// The panel starts us as a bare `node index.js`, so V8 picks a default old
-// space of roughly half of RAM (~2 GB on a 4 GB box, ~2.2 GB on a 4.5 GB box)
-// and the bot OOMs long before the machine is actually full.
-// Re-exec ONCE with an explicit heap; the env guard prevents a loop.
-// (Top-level `return` is legal in CommonJS: the parent then just waits for the
-// child and mirrors its exit code, so the bot never runs twice.)
-//
-// The numbers live in utils/heapPlan.js: RAM − reserve, capped at 4200 MB,
-// which budgets ~4160 MB of heap on a 4.5 GB plan.
-const { computeHeapMB } = require('./utils/heapPlan');
-
-function respawnWithBiggerHeap() {
-  if (process.env.ZAFAR_HEAP_SIZED === '1') return false;
-
-  const totalMB = Math.round(require('os').totalmem() / 1048576);
-  const askedMB = Number(process.env.HEAP_MB) || Number(process.env.MEMORY_LIMIT_MB) || 0;
-  const { heapMB: wantMB, capped } = computeHeapMB({ totalMB, askedMB });
-  if (!Number.isFinite(wantMB) || wantMB < 512) return false;
-  if (capped) {
-    console.warn(`[BOOT] heap ${askedMB} MB is more than this ${totalMB} MB box can give — using ${wantMB} MB`);
-  }
-  if (process.execArgv.some(a => a.startsWith('--max-old-space-size'))) return false;
-
-  let currentMB = 0;
-  try { currentMB = require('v8').getHeapStatistics().heap_size_limit / 1048576; } catch { /* ignore */ }
-  if (currentMB >= wantMB * 0.9) return false;
-
-  const { spawn } = require('child_process');
-  const args = ['--expose-gc', `--max-old-space-size=${wantMB}`, __filename, ...process.argv.slice(2)];
-  console.log(`[BOOT] heap ${Math.round(currentMB)} MB → ${wantMB} MB (restarting once)`);
-
-  const child = spawn(process.execPath, args, {
-    stdio: 'inherit',
-    env: { ...process.env, ZAFAR_HEAP_SIZED: '1' },
-  });
-  child.on('exit', (code, signal) => process.exit(code == null ? (signal ? 1 : 0) : code));
-  child.on('error', (e) => { console.error('[BOOT] could not resize heap:', e.message); process.exit(1); });
-  return true;
-}
-
-if (respawnWithBiggerHeap()) return;
 
 // A fresh install (or a panel reinstall) has no node_modules yet. Say that in
 // one line instead of letting the first require() throw a 40-line stack.
@@ -125,7 +83,7 @@ const {
 const qrcode = require('qrcode-terminal');
 const config = require('./config');
 const handler = require('./handler');
-const { startAdminServer } = require('./admin-server');
+const { createReconnector } = require('./utils/reconnect');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
@@ -311,15 +269,20 @@ const connectedNumber = () => {
     return id ? String(id).split(':')[0].split('@')[0] : null;
   } catch { return null; }
 };
-let restartScheduled = false;
 
-function scheduleRestart(delayMs = 3000) {
-  if (restartScheduled) return;
-  restartScheduled = true;
-  setTimeout(() => {
-    restartScheduled = false;
-    startBot().catch(err => console.error('Error restarting bot:', err.message));
-  }, delayMs);
+const reconnector = createReconnector({
+  baseMs: 3000,
+  maxMs: 60_000,
+  start: () => startBot(),
+  onError: (err, attempt, nextDelayMs) => {
+    console.error(
+      `⚠️ Reconnect attempt #${attempt} failed (${err?.message || err}) — retrying in ${Math.round(nextDelayMs / 1000)}s...`
+    );
+  },
+});
+
+function scheduleRestart(delayMs) {
+  reconnector.schedule(delayMs);
 }
 
 // Main connection function
@@ -440,11 +403,20 @@ async function startBot() {
       }
 
       if (shouldReconnect) {
-        scheduleRestart(3000);
+        const delayMs = reconnector.schedule();
+        if (typeof delayMs === 'number') {
+          console.log(`🔄 Reconnect scheduled in ${Math.round(delayMs / 1000)}s (attempt #${reconnector.attempts}).`);
+        }
       } else {
-        console.error(`❌ Logged out of WhatsApp. Delete ./${config.sessionName} and restart to link the bot again.`);
+        reconnector.cancel();
+        if (currentSock === sock) currentSock = null;
+        console.error(
+          `❌ Logged out of WhatsApp. Session files in ./${config.sessionName} were NOT deleted — ` +
+          `waiting for pairing from the web dashboard (or remove ./${config.sessionName} manually and restart).`
+        );
       }
     } else if (connection === 'open') {
+      reconnector.reset();
       console.log('\n✅ Bot connected successfully!');
       console.log(`📱 Bot Number: ${sock.user.id.split(':')[0]}`);
       console.log(`Bot Name: ${config.botName}`);
@@ -552,8 +524,6 @@ async function startBot() {
   currentSock = sock;
   return sock;
 }
-// Start the admin surface alongside the bot. It never receives auth/session files.
-startAdminServer({ getSocket: () => currentSock });
 
 // Start the bot — one aligned block instead of loose lines
 const ownerNames = Array.isArray(config.ownerName) ? config.ownerName.join(',') : config.ownerName;
@@ -629,6 +599,7 @@ cleanupPuppeteerCache();
         pairing.at = 0;
         pairing.error = null;
         config.pairNumber = number;
+        reconnector.reset();
 
         await startBot();
         return waitForPairingCode();
@@ -641,8 +612,8 @@ cleanupPuppeteerCache();
 })();
 
 startBot().catch(err => {
-  console.error('Error starting bot:', err);
-  process.exit(1);
+  console.error('⚠️ Initial bot connection failed:', err.message || err);
+  scheduleRestart();
 });
 // Handle process termination
 process.on('uncaughtException', (err) => {

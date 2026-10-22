@@ -18,16 +18,17 @@ const config = require('../config');
 const { readWL, writeWL, cleanNumber } = require('./accessControl');
 const log = require('./logger')('sync');
 
+const { writeJsonAtomic, readJsonSafe } = require('./jsonStore');
 const STATE_FILE = require('path').join(__dirname, '..', 'database', 'dashboard_sync.json');
 
 function readState() {
-  try { return JSON.parse(require('fs').readFileSync(STATE_FILE, 'utf8')) || {}; } catch { return {}; }
+  const res = readJsonSafe(STATE_FILE, { defaultValue: {}, validate: (v) => Boolean(v && typeof v === 'object' && !Array.isArray(v)) });
+  return res.ok ? res.data : {};
 }
 
 function writeState(next) {
   try {
-    const fs = require('fs');
-    fs.writeFileSync(STATE_FILE, JSON.stringify(next, null, 2));
+    writeJsonAtomic(STATE_FILE, next);
   } catch { /* non-fatal */ }
 }
 
