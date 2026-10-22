@@ -62,13 +62,12 @@ function applyConfig() {
   setIfEmpty('JOB_DIR', movieTemp);
   // bookkeeping stays inside temp/movies/: the bot's own cleanup only deletes
   // loose files in temp/, so nothing of the engine's can be swept away
-  setIfEmpty('CACHE_FILE', abs(m.cacheFile || path.join(movieTemp, 'cache.json')));
+  setIfEmpty('CACHE_FILE', abs(path.join(movieTemp, 'cache.json')));
   setIfEmpty('DATA_DIR', abs(m.dataDir || path.join(movieTemp, 'data')));
 
   // behaviour
-  // disk: after-send deletion (default) vs. the old keep-everything cache
-  setIfEmpty('CACHE_MAX_MB', m.cacheMaxMB);
-  setIfEmpty('CACHE_TTL_HOURS', m.cacheTTLHours);
+  // no media caching: the LRU only remembers URLs / negative results now
+  setIfEmpty('CACHE_MAX_MB', 0);
 
   setIfEmpty('MAX_SEND_MB', m.maxSendMB);
   setIfEmpty('MAX_DOWNLOAD_MB', m.maxDownloadMB);
@@ -176,15 +175,6 @@ module.exports = {
    * Subtitle file for a title (MovieBox BFF). Returns null when there is none.
    * @returns {Promise<{file:string, language:string}|null>}
    */
-  /**
-   * Drop a finished file from the disk cache (and delete it).
-   * Called right after a successful WhatsApp send when caching is off, so a
-   * 2 GB movie does not sit on the panel disk for another 24 hours.
-   */
-  async forget(meta, quality, season = null, episode = null) {
-    const { forgetFile } = await load();
-    try { return forgetFile(meta, quality, season, episode); } catch { return false; }
-  },
 
   async subtitles(meta, { season = null, episode = null, lang = 'en', dest = null } = {}) {
     const { subtitles } = await load();
@@ -237,6 +227,14 @@ module.exports = {
     const { resolveEpisode } = await load();
     return resolveEpisode(opts);
   },
+  /**
+   * Which qualities the sources offer for this title, with sizes — used by the
+   * .movie/.series quality picker before anything is downloaded.
+   */
+  async qualityOptions(opts) {
+    const { qualityOptions } = await load();
+    return qualityOptions(opts);
+  },
   async resolveSeason(opts) {
     const { resolveSeason } = await load();
     return resolveSeason(opts);
@@ -251,10 +249,6 @@ module.exports = {
   async targetFile(...args) {
     const { targetFile } = await load();
     return targetFile(...args);
-  },
-  async rememberFile(...args) {
-    const { rememberFile } = await load();
-    return rememberFile(...args);
   },
   /** stream a resolved source to disk (stall guard + resume + retries) */
   /** @returns {Promise<{bytes:number, file:string}>} file = what actually landed on disk */

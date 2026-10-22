@@ -19,11 +19,9 @@ const config = require('../config');
 const YT = require('./youtubedl');
 const settings = require('./mediaSettings');
 const providers = require('./downloadProviders');
-const sendCache = require('./sendCache');
 const jobQueue = require('./jobQueue');
-const { createProgress } = require('./progressCard');
 const {
-  downloadToFile, sniffFile, audioToMp3, tagMp3, ensureWhatsAppMp4, safeName, fmtMB,
+  downloadToFile, sniffFile, audioToMp3, tagMp3, ensureWhatsAppMp4, probeMedia, safeName, fmtMB,
 } = require('./mediaTransfer');
 const { getTempDir, deleteTempFile, holdTemp } = require('./tempManager');
 const diskSpace = require('./diskSpace');
@@ -70,16 +68,6 @@ async function downloadDirect(url, dest, maxMB, onProgress) {
   return null;
 }
 
-function normalizedUrl(url) {
-  try {
-    const parsed = new URL(String(url));
-    parsed.hash = '';
-    return parsed.toString();
-  } catch {
-    return String(url || '').trim();
-  }
-}
-
 /**
  * Download `url` and send it to the chat. Never throws for "unsupported"
  * reasons without explaining them; always cleans up its temp files.
@@ -95,22 +83,16 @@ function normalizedUrl(url) {
  */
 async function downloadAndSend(sock, msg, extra, {
   url, kind = 'video', height = 720, title = '', author = '', attempts = [],
-  lane = null, cache = true, skipCache = false, waited = false,
+  lane = null, waited = false,
 } = {}) {
   const chatId = extra?.from || msg.key.remoteJid;
   const say = (text) => sock.sendMessage(chatId, { text }, { quoted: msg });
   const react = (emoji) => sock.sendMessage(chatId, { react: { text: emoji, key: msg.key } }).catch(() => {});
-  const cacheKey = cache ? `dl:${normalizedUrl(url)}:${kind}` : null;
-
-  if (!skipCache && cacheKey && await sendCache.replay(sock, chatId, msg, cacheKey)) {
-    await react('✅');
-    return { sent: true, kind, via: 'cache' };
-  }
 
   if (lane) {
     let queued = false;
     return jobQueue.runInLane(lane, () => downloadAndSend(sock, msg, extra, {
-      url, kind, height, title, author, attempts, cache, skipCache: true, waited: queued,
+      url, kind, height, title, author, attempts, waited: queued,
     }), async () => {
       queued = true;
       await react('⏳');
@@ -121,9 +103,6 @@ async function downloadAndSend(sock, msg, extra, {
   const outBase = path.join(getTempDir(), stamp);
   const files = [];
   const release = holdTemp(stamp);
-  const progress = config.media?.progressCard !== false
-    ? createProgress(sock, chatId, msg, { label: 'Downloading' })
-    : null;
 
   try {
     if (!waited) await react('⏳');
@@ -153,17 +132,16 @@ async function downloadAndSend(sock, msg, extra, {
         console.log(`[media] yt-dlp profile "${name}" failed (${info.code})`);
         attempts.push({ engine: `yt-dlp:${name}`, code: info.code });
       };
-      const onProgress = progress ? (p) => progress.update({ pct: p.percent, speed: p.speed, stage: 'downloading' }) : undefined;
       if (kind === 'audio') {
         const res = await YT.downloadAudio(url, {
-          outBase, maxMB: MAX_AUDIO_MB, onAttempt, onProgress,
+          outBase, maxMB: MAX_AUDIO_MB, onAttempt,
           deadlineMs: Math.max(20000, deadlineAt - Date.now()),
         });
         file = res.file;
       } else {
         const res = await YT.downloadVideo(url, {
           height, outBase, maxMB: MAX_VIDEO_MB, maxSeconds: MAX_MINUTES * 60,
-          onAttempt, onProgress, deadlineMs: Math.max(20000, deadlineAt - Date.now()),
+          onAttempt, deadlineMs: Math.max(20000, deadlineAt - Date.now()),
         });
         file = res.file;
       }
@@ -175,7 +153,7 @@ async function downloadAndSend(sock, msg, extra, {
 
       const direct = ['UNSUPPORTED_URL', 'NO_FORMATS', 'UNKNOWN'].includes(info.code)
         ? await downloadDirect(url, `${outBase}_direct.bin`, kind === 'audio' ? MAX_AUDIO_MB : MAX_VIDEO_MB,
-          progress ? (p) => progress.update({ pct: p.percent, stage: 'downloading' }) : undefined)
+          undefined)
         : null;
       if (direct) {
         files.push(direct);
@@ -209,7 +187,6 @@ async function downloadAndSend(sock, msg, extra, {
         const got = await downloadToFile(remoteHit.url, dest, {
           maxBytes: (kind === 'audio' ? MAX_AUDIO_MB : MAX_VIDEO_MB) * 1024 * 1024,
           headers: remoteHit.headers,
-          onProgress: progress ? (p) => progress.update({ pct: p.percent, stage: 'downloading' }) : undefined,
         });
         files.push(dest);
         file = dest;
@@ -232,13 +209,11 @@ async function downloadAndSend(sock, msg, extra, {
     if (sniffed.kind === 'image') {
       const size = fs.statSync(file).size;
       if (size > MAX_VIDEO_MB * 1024 * 1024) throw Object.assign(new Error('image too large'), { code: 'TOO_BIG' });
-      progress?.update({ stage: 'uploading' });
       const sent = await sock.sendMessage(chatId, {
         image: { url: file },
         mimetype: sniffed.mime,
         caption: `🖼️ *${safeName(title, 'image')}*${author ? `\n👤 ${author}` : ''}\n📦 ${fmtMB(size)}${viaText}`,
       }, { quoted: msg });
-      if (cacheKey) sendCache.remember(cacheKey, sent);
       await react('✅');
       return { sent: true, kind: 'image', via };
     }
@@ -269,13 +244,9 @@ async function downloadAndSend(sock, msg, extra, {
 
       // Documents by default — the filename is where the artist/song name live.
       if (String(config.song?.sendAs || 'document').toLowerCase() === 'audio') {
-        progress?.update({ stage: 'uploading' });
         const sent = await sock.sendMessage(chatId, { audio: { url: finalFile }, mimetype: mime, ptt: false, fileName }, { quoted: msg });
-        if (cacheKey) sendCache.remember(cacheKey, sent);
       } else {
-        progress?.update({ stage: 'uploading' });
         const sent = await sock.sendMessage(chatId, { document: { url: finalFile }, mimetype: mime, fileName, caption }, { quoted: msg });
-        if (cacheKey) sendCache.remember(cacheKey, sent);
       }
       await react('✅');
       return { sent: true, kind: 'audio', via };
@@ -285,6 +256,14 @@ async function downloadAndSend(sock, msg, extra, {
     const ready = await ensureWhatsAppMp4(file, path.join(getTempDir(), `${stamp}_wa.mp4`));
     files.push(ready);
     if (ready !== file) deleteTempFile(file);   // a 2 GB source must not sit on disk twice
+
+    // A silent video is worse than an error: verify the audio track survived the
+    // download and the remux before anything is sent.
+    const audioCheck = await probeMedia(ready);
+    if (audioCheck.probed && !audioCheck.hasAudio) {
+      throw Object.assign(new Error('the downloaded video has no audio track'), { code: 'NO_AUDIO' });
+    }
+
     const size = fs.statSync(ready).size;
     if (size > MAX_VIDEO_MB * 1024 * 1024) throw Object.assign(new Error('video too large'), { code: 'TOO_BIG' });
 
@@ -292,13 +271,9 @@ async function downloadAndSend(sock, msg, extra, {
     const caption = `🎬 *${title || name}*${author ? `\n👤 ${author}` : ''}\n📦 ${fmtMB(size)} • ${height}p${viaText}`;
 
     if (size > AS_DOC_ABOVE) {
-      progress?.update({ stage: 'uploading' });
       const sent = await sock.sendMessage(chatId, { document: { url: ready }, mimetype: 'video/mp4', fileName: `${name}.mp4`, caption }, { quoted: msg });
-      if (cacheKey) sendCache.remember(cacheKey, sent);
     } else {
-      progress?.update({ stage: 'uploading' });
       const sent = await sock.sendMessage(chatId, { video: { url: ready }, mimetype: 'video/mp4', caption }, { quoted: msg });
-      if (cacheKey) sendCache.remember(cacheKey, sent);
     }
     await react('✅');
     return { sent: true, kind: 'video', via };
@@ -308,6 +283,8 @@ async function downloadAndSend(sock, msg, extra, {
     // One short line, never a wall of engine detail.
     if (info.code === 'TOO_BIG') {
       await say(`❌ Too big (video ${MAX_VIDEO_MB} MB / audio ${MAX_AUDIO_MB} MB) — try a lower quality or a shorter clip.`);
+    } else if (info.code === 'NO_AUDIO') {
+      await say('❌ That video has no audio track — I did not send it silently. Try another link.');
     } else if (err.code === 'NOT_ENOUGH_DISK') {
       await say(`❌ ${err.message}`);
     } else {
@@ -319,7 +296,6 @@ async function downloadAndSend(sock, msg, extra, {
     // (callers would only end up printing the same thing twice).
     return { sent: false, kind, via: 'none', code: info.code, error: err };
   } finally {
-    await progress?.done();
     release();
     for (const f of files) deleteTempFile(f);
     try {

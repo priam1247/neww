@@ -33,9 +33,10 @@ function parseArgs(args) {
   const rest = [];
   // default quality follows the bot: config.movies → media settings → config.video
   let quality = MOVIES().defaultQuality || host.defaultQuality();
+  let explicitQuality = false;
 
   for (const a of args) {
-    if (QUALITY_RX.test(a)) { quality = qualityOf(a); continue; }
+    if (QUALITY_RX.test(a)) { quality = qualityOf(a); explicitQuality = true; continue; }
     rest.push(a);
   }
 
@@ -55,7 +56,7 @@ function parseArgs(args) {
     }
   }
 
-  return { title, year, quality };
+  return { title, year, quality, explicitQuality };
 }
 
 const help = (P) =>
@@ -130,8 +131,6 @@ async function fetchSource(meta, quality, attempts = 3) {
       const file = downloadedFile = (saved && saved.file) || dest;
       const full = resolved.meta || meta;
       await assertFullLength(file, full.runtime, 'movie');
-      // indexed files are never swept as orphans while they upload
-      await engine.rememberFile(full, quality, null, null, file, fs.statSync(file).size / 1048576);
       return { res: resolved, file };
     } catch (e) {
       lastErr = e;
@@ -146,22 +145,100 @@ async function fetchSource(meta, quality, attempts = 3) {
   throw lastErr || new Error('no downloadable source found');
 }
 
-/** Render the match list and offer a numbered pick. */
+/**
+ * Render EVERY match in one message and offer a numbered pick.
+ * A vague title ("spiderman") returns a dozen films — showing all of them beats
+ * silently downloading the first hit, and beats several messages.
+ */
 async function offerChoices(sock, msg, extra, matches, job, kind) {
-  const list = matches.slice(0, 6);
-  const lines = list.map((m, i) => `*${i + 1}.* ${m.title} (${m.year || '—'})`);
-  const text = `🎬 *${list.length} matches* — reply with a number\n\n${lines.join('\n')}`;
+  const lines = matches.map((m, i) => {
+    const year = m.year ? ` (${m.year})` : '';
+    const rating = Number(m.rating) ? ` ⭐${m.rating}` : '';
+    return `*${i + 1}.* ${m.title}${year}${rating}`;
+  });
+  const text = `🎬 *${matches.length} ${kind === 'series' ? 'series' : 'movies'}* for *${job.title}*`
+    + `\n\n${lines.join('\n')}\n\n_reply with a number_`;
 
   await sock.sendMessage(extra.from, { text }, { quoted: msg });
 
   selections.offer({
     chatId: extra.from,
     sender: extra.sender || msg.key.participant || extra.from,
-    items: list,
+    items: matches,
     label: kind,
     ttlMs: 5 * 60 * 1000,
-    run: (sock2, msg2, extra2, item) => deliver(sock2, msg2, extra2, item, job),
+    run: (sock2, msg2, extra2, item) => askQuality(sock2, msg2, extra2, item, { ...job }),
   });
+}
+
+const fmtSize = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`);
+
+/**
+ * Ask which quality to fetch, with the real size of each source.
+ *
+ * Sends a WhatsApp list (tap a row); when that message type is not accepted by
+ * the connected client it falls back to the same options as a numbered text.
+ * Both paths land in utils/selections, so a tap and a typed number are the same.
+ */
+async function askQuality(sock, msg, extra, meta, job) {
+  const react = (emoji) => sock.sendMessage(extra.from, { react: { text: emoji, key: msg.key } }).catch(() => {});
+  const say = (text) => sock.sendMessage(extra.from, { text }, { quoted: msg });
+
+  if (job.explicitQuality) return deliver(sock, msg, extra, meta, job);
+
+  await react('🔎');
+  let options = [];
+  try {
+    const found = await engine.qualityOptions({
+      item: meta, season: job.season ?? null, episode: job.episode ?? null,
+    });
+    options = found.options || [];
+  } catch (e) {
+    log.debug(`${meta.title} · quality probe failed · ${e.message}`);
+  }
+
+  if (!options.length) return deliver(sock, msg, extra, meta, job);   // nothing to choose from
+  if (options.length === 1) { job.quality = options[0].quality; return deliver(sock, msg, extra, meta, job); }
+
+  const ids = options.map((o) => `q${o.quality}`);
+  const items = options.map((o) => ({ ...o, meta }));
+  const title = `${meta.title}${meta.year ? ` (${meta.year})` : ''}`;
+  const header = `🎬 *${title}*\nChoose the quality:`;
+
+  selections.offer({
+    chatId: extra.from,
+    sender: extra.sender || msg.key.participant || extra.from,
+    items,
+    ids,
+    label: 'quality',
+    ttlMs: 5 * 60 * 1000,
+    run: (sock2, msg2, extra2, item) => {
+      job.quality = item.quality;
+      return deliver(sock2, msg2, extra2, meta, job);
+    },
+  });
+
+  const rows = options.map((o, i) => ({
+    title: `${o.quality}p`,
+    description: `${o.sizeMB ? `~${fmtSize(o.sizeMB)}` : 'size unknown'} · ${o.candidates} source${o.candidates > 1 ? 's' : ''}`,
+    rowId: ids[i],
+  }));
+
+  try {
+    await sock.sendMessage(extra.from, {
+      text: header,
+      footer: 'Tap a quality, or reply with its number',
+      title: 'Quality',
+      buttonText: 'Choose quality',
+      sections: [{ title, rows }],
+    }, { quoted: msg });
+    return;
+  } catch (e) {
+    log.debug(`list message rejected (${e.message}) — using a numbered list`);
+  }
+
+  const lines = options.map((o, i) => `*${i + 1}.* ${o.quality}p${o.sizeMB ? ` · ~${fmtSize(o.sizeMB)}` : ''}`);
+  await say(`${header}\n\n${lines.join('\n')}\n\n_reply with a number_`);
 }
 
 /**
@@ -223,9 +300,6 @@ async function deliver(sock, msg, extra, meta, job) {
     log.info(`${meta.title} · ${res.provider} · ${res.quality || quality}p · ` +
       `${host.fmtMB(fs.statSync(file).size)} · ${Math.round((Date.now() - t0) / 1000)}s`);
 
-    if (host.shouldUploadDrime(fs.statSync(file).size) && host.drimeReady()) await react('☁️');
-
-    try { (await engine.load()).cache?.markActive?.(file); } catch { /* best effort */ }
     const shownQuality = res.quality || quality;
     const note = res.downgraded ? ` (${shownQuality}p)` : '';
     await host.deliver(sock, chatId, msg, {
@@ -235,11 +309,9 @@ async function deliver(sock, msg, extra, meta, job) {
     });
 
     await trySubtitles(sock, chatId, msg, meta);
-    // The chat has the file now — free the disk (MOVIE_KEEP_CACHE=1 keeps it).
-    const freed = await host.release(file, { meta, quality: shownQuality }).catch(() => false);
-    log.debug(freed ? `released ${path.basename(file)}` : `kept ${path.basename(file)} (cache on)`);
+    // The chat has the file now — delete it, nothing is cached.
+    await host.release(file).catch(() => false);
     await react('✅');
-    try { (await engine.load()).cache?.unmarkActive?.(file); } catch { /* ignore */ }
   } catch (e) {
     // full message: the logger collapses the bullets onto one line, so the
     // reason (dead host, quality mismatch, no candidates) stays visible
@@ -279,14 +351,14 @@ module.exports = {
       const matches = await engine.searchMovie(job.title, job.year || undefined);
       if (!matches.length) return extra.reply(`❌ No movie found for *${job.title}*.`);
 
-      // exact single hit (or an explicit year) → go straight to the download
+      // Exact single hit (or an explicit year) → choose the quality next.
       if (matches.length === 1 || job.year) {
         const best = (job.year && matches.find(m => String(m.year) === String(job.year))) || matches[0];
         job.matches = matches;
-        return deliver(sock, msg, extra, best, job);
+        return askQuality(sock, msg, extra, best, job);
       }
 
-      // otherwise let the user pick instead of silently grabbing results[0]
+      // A vague title matches many films: show them all instead of grabbing #1.
       job.matches = matches;
       return offerChoices(sock, msg, extra, matches, job, 'movie');
     } catch (e) {
@@ -301,4 +373,5 @@ module.exports = {
   _assertFullLength: assertFullLength,
   _deliver: deliver,
   _offerChoices: offerChoices,
+  _askQuality: askQuality,
 };

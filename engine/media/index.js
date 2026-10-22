@@ -18,7 +18,7 @@ import resolver from '../core/resolver.js';
 import debrid from '../providers/debrid/index.js';
 import registry from '../core/registry.js';
 import queue from '../core/queue.js';
-import { isOld } from '../core/ranker.js';
+import { isOld, rank } from '../core/ranker.js';
 import { metrics } from '../core/metrics.js';
 import metadata from '../metadata/index.js';
 import * as tmdb from '../metadata/tmdb.js';
@@ -60,19 +60,6 @@ async function boot() {
 
 const cacheId = (meta) => meta?.imdbId || meta?.tmdbId || meta?.malId || null;
 
-function cachedFile(meta, quality, season, episode) {
-  const id = cacheId(meta);
-  if (!id) return null;
-  const hit = cache.fget(cache.keyOf(id, season ?? null, episode ?? null, quality));
-  if (!hit) return null;
-  metrics.bump('cache.disk');
-  return {
-    kind: 'cache', provider: 'disk-cache', tier: 0,
-    url: null, file: hit.file, sizeMB: hit.sizeMB,
-    title: hit.title, quality: Number(quality), cached: true, headers: {}
-  };
-}
-
 // ── title → full metadata ──────────────────────────────────────────────────
 /**
  * Resolve a user's title to one metadata item with ids.
@@ -106,6 +93,54 @@ export async function identify({ item = null, title, year, type = 'movie', tmdbI
   // exact year (when given) wins, otherwise the best-ranked hit
   const best = (year && hits.find(h => String(h.year) === String(year))) || hits[0];
   return metadata.details(best);
+}
+
+// ── quality picker (what the source actually offers, with sizes) ──────────
+const PICK_QUALITIES = [2160, 1080, 720, 480];
+
+/**
+ * Ask the sources once and report which qualities exist and how big they are.
+ * No download happens here, so the chat can be shown a menu with real sizes.
+ *
+ * @returns {Promise<{meta:object, options:Array<{quality:number,sizeMB:number,provider:string,candidates:number}>}>}
+ */
+export async function qualityOptions({
+  title, year, type = 'movie', tmdbId = null, imdbId = null, item = null,
+  season = null, episode = null, exclude = null,
+} = {}) {
+  await boot();
+  const meta = await identify({ item, title, year, type, tmdbId, imdbId });
+  const media = { ...meta, type };
+  const opts = {
+    season, episode, year: meta.year, old: isOld(meta.year),
+    anime: metadata.looksAnime(meta), maxMB: config.maxDownloadMB, exclude,
+  };
+
+  const tiers = debrid.active().length ? [[1], [2], [3]] : [[2], [3]];
+  const cands = [];
+  for (const tier of tiers) {
+    // sequential on purpose: three tiers at once would hammer every indexer
+    // eslint-disable-next-line no-await-in-loop
+    const raw = await resolver.searchTier(tier, media, opts).catch(() => []);
+    cands.push(...raw);
+  }
+
+  const ranked = rank(cands, opts);
+  const byQuality = new Map();
+  for (const c of ranked) {
+    const q = Number(c.quality) || 0;
+    if (!PICK_QUALITIES.includes(q)) continue;
+    const sizeMB = Number(c.sizeMB) || 0;
+    const seen = byQuality.get(q);
+    if (!seen) {
+      byQuality.set(q, { quality: q, sizeMB, provider: c.provider, candidates: 1 });
+    } else {
+      seen.candidates += 1;
+      if (sizeMB > seen.sizeMB) { seen.sizeMB = sizeMB; seen.provider = c.provider; }
+    }
+  }
+
+  return { meta, options: [...byQuality.values()].sort((a, b) => b.quality - a.quality) };
 }
 
 // ── quality ladder ─────────────────────────────────────────────────────────
@@ -160,9 +195,6 @@ export async function resolveMovie({ title, year, quality = 720, tmdbId = null, 
 
   const meta = await identify({ item, title, year, type: 'movie', tmdbId, imdbId });
 
-  const hit = cachedFile(meta, quality, null, null);
-  if (hit) return { ...hit, meta };
-
   const media = { ...meta, type: 'movie' };
   const res = await resolveWithLadder(media, quality, (q) => ({
     quality: q, want: q, year: meta.year,
@@ -181,9 +213,6 @@ export async function resolveEpisode({ title, year, season, episode, quality = 7
   await boot();
 
   const meta = await identify({ item, title, year, type: 'series', tmdbId, imdbId });
-
-  const hit = cachedFile(meta, quality, season, episode);
-  if (hit) return { ...hit, meta, season, episode };
 
   const media = { ...meta, type: 'series' };
   const anime = metadata.looksAnime(meta);
@@ -252,31 +281,9 @@ export function targetFile(title, year, quality, season = null, episode = null) 
   return path.join(config.tempDir, sanitize(`${title}.${year || ''}`, quality, season, episode));
 }
 
-/**
- * Forget a delivered file: remove its cache entry and delete it from disk.
- * The bot calls this after WhatsApp has accepted the upload (unless the owner
- * asked for MOVIE_KEEP_CACHE=1).
- */
-export function forgetFile(meta, quality, season = null, episode = null) {
-  const id = cacheId(meta);
-  if (!id) return false;
-  return cache.fdel(cache.keyOf(id, season ?? null, episode ?? null, quality));
-}
-
-/** write a finished download into the LRU index */
-export function rememberFile(meta, quality, season, episode, file, sizeMB) {
-  const id = cacheId(meta);
-  if (!id) return false;
-  cache.fset(cache.keyOf(id, season ?? null, episode ?? null, quality), {
-    file, sizeMB, quality: Number(quality),
-    title: `${meta.title}${season != null ? ` S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}` : ''}`
-  });
-  return true;
-}
-
 export { boot, cache, config, tv, parseRelease, matchesEpisode, tmdb, metadata, debrid, resolver, registry, queue, mlog };
 export default {
-  boot, identify, resolveMovie, resolveEpisode, resolveSeason,
-  targetFile, rememberFile, forgetFile, qualityLadder, subtitles,
-  cache, config, tmdb, metadata, resolver, debrid, registry, queue, mirrorReport, subtitles
+  boot, identify, resolveMovie, resolveEpisode, resolveSeason, qualityOptions,
+  targetFile, qualityLadder, subtitles,
+  cache, config, tmdb, metadata, resolver, debrid, registry, queue, mirrorReport
 };

@@ -19,6 +19,12 @@ The bot lives at the repository root and must stay there — the panel runs
 Without step 1 Vercel reads the repository's root `package.json`, which is the
 WhatsApp bot (no Next.js), and the build fails with `NEXT_NO_VERSION`.
 
+The portal is completely standalone: `dashboard/package.json` +
+`dashboard/package-lock.json` are its only dependencies, `next.config.mjs` only
+sets the image/headers policy, and nothing outside `dashboard/` is imported. A
+clean `cd dashboard && npm ci && npm run build` succeeds without the bot's
+`node_modules` (verified: 21 routes).
+
 Different portal on the same repo? Nothing else is required — the bot's
 dependencies and the portal's are separate (`dashboard/package-lock.json`), and
 neither deploy touches the other's files.
@@ -38,14 +44,29 @@ saves them into D1 at runtime, so nobody needs to see them in Vercel.
 
 ## Linking the bot
 
-1. Bot host: set `ADMIN_DASHBOARD_TOKEN` (same value you paste here) and
-   `ADMIN_API_PORT` (a port allocated in the panel), then restart — the console
-   prints `🌐 Dashboard API: on (port …)`.
-2. Portal → `/admin` → **Bot Connection** → Bot Server URL
-   `http://<node-ip>:<port>`, same token → **Test connection**.
-3. If the bot is not reachable inbound (NAT), set `DASHBOARD_URL` on the bot
+The portal never talks to WhatsApp directly — every screen is served by the
+bot's `/admin/api/*` (`utils/adminApi.js`, started from `index.js`).
+
+1. **On the panel** (bot side): set two startup variables and restart.
+   * `ADMIN_DASHBOARD_TOKEN` — a long random string (this is the shared secret).
+   * `ADMIN_API_PORT` — the **Allocated Port** from the panel's *Network* tab.
+     The API listens on `0.0.0.0`, so the node IP can reach it.
+   The console prints `🌐 Dashboard API: on (port …)` once it is up.
+2. **Check it from outside**: `curl http://<node-ip>:<port>/admin/api/status -H
+   "Authorization: Bearer <token>"` must answer `{"connected":…}`.
+   *No answer?* The panel firewall/NAT is blocking the port, or the port was
+   not allocated. Open it, or put a Cloudflare Tunnel in front of
+   `http://127.0.0.1:<port>` and use the tunnel's `https://` URL.
+3. **In the portal**: `/admin` → **Bot Connection** → Bot Server URL
+   `http://<node-ip>:<port>` (or the tunnel URL) + the same token →
+   **Test connection**. These are stored in D1, not in Vercel env vars.
+4. If the bot cannot be reached inbound at all, set `DASHBOARD_URL` on the bot
    instead: it pulls `/api/bot/whitelist` every few minutes, so member
-   Allow/Disallow still applies; only live status and pairing need the port.
+   Allow/Disallow still applies. Only live status and pairing need the port.
+
+Why server-side: the browser calls this Next.js app (`/api/admin/*`), which
+proxies to the bot (`lib/bot-proxy.ts`). The bot token never reaches the
+browser, and no CORS setup is needed on the panel.
 
 ## Local development
 

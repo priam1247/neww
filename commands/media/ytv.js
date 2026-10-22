@@ -10,7 +10,7 @@
  *           cookie/proxy aware, streamed to disk (RAM stays flat).
  * Engine 2: remote providers (Gifted / cobalt) when the host IP is refused.
  *
- * Quiet by design: ⏳ → file → ✅ (or ❌ + one short line); long jobs get a progress card.
+ * Quiet by design: reactions only (⏳ → ✅ / ❌), one short line only on failure.
  *
  * Upgrades over the old build:
  *   • automatic quality fallback when the requested size is too big,
@@ -26,11 +26,9 @@ const settings = require('../../utils/mediaSettings');
 const providers = require('../../utils/downloadProviders');
 const youtubeSearch = require('../../utils/youtubeSearch');
 const selections = require('../../utils/selections');
-const sendCache = require('../../utils/sendCache');
 const jobQueue = require('../../utils/jobQueue');
-const { createProgress } = require('../../utils/progressCard');
 const {
-  downloadToFile, ensureWhatsAppMp4, safeName, fmtMB,
+  downloadToFile, ensureWhatsAppMp4, probeMedia, safeName, fmtMB,
 } = require('../../utils/mediaTransfer');
 const { getTempDir, deleteTempFile } = require('../../utils/tempManager');
 const diskSpace = require('../../utils/diskSpace');
@@ -132,13 +130,6 @@ const execute = async (sock, msg, args, extra) => {
     query = YT.normalizeYouTubeUrl(query);
   }
 
-  const videoId = YT.youtubeId(query);
-  const cacheKey = videoId ? `ytv:${videoId}:${requestedHeight}` : null;
-  if (cacheKey && await sendCache.replay(sock, chatId, msg, cacheKey)) {
-    await react('✅');
-    return;
-  }
-
   // ── Metadata (best effort) ───────────────────────────────────────────────
   if (!title || !duration) {
     try {
@@ -152,13 +143,10 @@ const execute = async (sock, msg, args, extra) => {
   }
 
   let waited = false;
-  return await jobQueue.runInLane('heavy', async () => {
+  return await jobQueue.runInLane('light', async () => {
     const stamp = `ytv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const outBase = path.join(getTempDir(), stamp);
     const release = require('../../utils/tempManager').holdTemp(stamp);
-    const progress = config.media?.progressCard !== false
-      ? createProgress(sock, chatId, msg, { label: 'Downloading' })
-      : null;
 
     try {
     if (!waited) await react('⏳');
@@ -184,8 +172,7 @@ const execute = async (sock, msg, args, extra) => {
           onAttempt: (name, err, info) => {
             log.debug(`yt-dlp profile ${name} failed · ${info.code}`);
             attempts.push({ engine: `yt-dlp:${name}`, code: info.code });
-          },
-          onProgress: progress ? (p) => progress.update({ pct: p.percent, speed: p.speed, stage: 'downloading' }) : undefined,
+          }
         });
         file = res.file;
         height = q;
@@ -229,8 +216,7 @@ const execute = async (sock, msg, args, extra) => {
       const dest = path.join(getTempDir(), `${stamp}_remote.${remoteHit.ext || 'mp4'}`);
       const got = await downloadToFile(remoteHit.url, dest, {
         maxBytes: MAX_VIDEO_MB * 1024 * 1024,
-        headers: remoteHit.headers,
-        onProgress: progress ? (p) => progress.update({ pct: p.percent, stage: 'downloading' }) : undefined,
+        headers: remoteHit.headers
       });
       file = dest;
       title = title || remoteHit.title;
@@ -247,19 +233,20 @@ const execute = async (sock, msg, args, extra) => {
     diskSpace.requireMediaCopySpace(getTempDir(), fs.statSync(file).size / 1048576, config.media || {});
     // ── Make it playable in WhatsApp (no-op without ffmpeg) ────────────────
     const ready = await ensureWhatsAppMp4(file, path.join(getTempDir(), `${stamp}_wa.mp4`));
+    // Never deliver a silent video: check the audio track survived.
+    const audioCheck = await probeMedia(ready);
+    if (audioCheck.probed && !audioCheck.hasAudio) {
+      throw Object.assign(new Error('the downloaded video has no audio track'), { code: 'NO_AUDIO' });
+    }
     const size = fs.statSync(ready).size;
     const name = safeName(title, 'video');
     const caption = `🎬 *${title || name}*${author ? `\n👤 ${author}` : ''}\n📦 ${fmtMB(size)} • ${height}p${via !== 'yt-dlp' ? ` • via ${via}` : ''}`;
 
     // Send from disk — Baileys streams it, no big Buffer in RAM.
     if (size > AS_DOC_ABOVE) {
-      progress?.update({ stage: 'uploading' });
       const sent = await sock.sendMessage(chatId, { document: { url: ready }, mimetype: 'video/mp4', fileName: `${name}.mp4`, caption }, { quoted: msg });
-      if (cacheKey) sendCache.remember(cacheKey, sent);
     } else {
-      progress?.update({ stage: 'uploading' });
       const sent = await sock.sendMessage(chatId, { video: { url: ready }, mimetype: 'video/mp4', caption }, { quoted: msg });
-      if (cacheKey) sendCache.remember(cacheKey, sent);
     }
     await react('✅');
   } catch (err) {
@@ -277,7 +264,6 @@ const execute = async (sock, msg, args, extra) => {
     }
     await react('❌');
   } finally {
-    if (progress) await progress.done();
     release();
     sweep(stamp);
     if (typeof global.gc === 'function') global.gc();

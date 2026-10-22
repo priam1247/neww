@@ -40,9 +40,10 @@ const help = (P) =>
 function parseArgs(args) {
   const rest = [];
   let quality = MOVIES().defaultQuality || host.defaultQuality();
+  let explicitQuality = false;
 
   for (const a of args) {
-    if (QUALITY_RX.test(a)) { quality = /^4k$/i.test(a) ? 2160 : Number(a); continue; }
+    if (QUALITY_RX.test(a)) { quality = /^4k$/i.test(a) ? 2160 : Number(a); explicitQuality = true; continue; }
     rest.push(a);
   }
 
@@ -99,17 +100,19 @@ function parseArgs(args) {
     .replace(/\s+/g, ' ')
     .trim();
 
-  return { title, year, season, from, to, pack, quality };
+  return { title, year, season, from, to, pack, quality, explicitQuality };
 }
 
 async function offerChoices(sock, msg, extra, matches, job) {
-  const list = matches.slice(0, 6);
-  const text = `📺 *${list.length} matches* — reply with a number\n\n` +
-    list.map((m, i) => `*${i + 1}.* ${m.title} (${m.year || '—'})`).join('\n') +
-    `\n\n_or reply *cancel*_`;
+  const lines = matches.map((m, i) => {
+    const year = m.year ? ` (${m.year})` : '';
+    const rating = Number(m.rating) ? ` ⭐${m.rating}` : '';
+    return `*${i + 1}.* ${m.title}${year}${rating}`;
+  });
+  const text = `📺 *${matches.length} series* for *${job.title}*\n\n${lines.join('\n')}\n\n_reply with a number_`;
 
-  if (list[0]?.poster) {
-    await sock.sendMessage(extra.from, { image: { url: list[0].poster }, caption: text }, { quoted: msg })
+  if (matches[0]?.poster) {
+    await sock.sendMessage(extra.from, { image: { url: matches[0].poster }, caption: text }, { quoted: msg })
       .catch(() => sock.sendMessage(extra.from, { text }, { quoted: msg }));
   } else {
     await sock.sendMessage(extra.from, { text }, { quoted: msg });
@@ -118,11 +121,69 @@ async function offerChoices(sock, msg, extra, matches, job) {
   selections.offer({
     chatId: extra.from,
     sender: extra.sender || msg.key.participant || extra.from,
-    items: list,
+    items: matches,
     label: 'series',
     ttlMs: 5 * 60 * 1000,
-    run: (sock2, msg2, extra2, item) => deliver(sock2, msg2, extra2, item, job),
+    run: (sock2, msg2, extra2, item) => askQuality(sock2, msg2, extra2, item, { ...job }),
   });
+}
+
+const fmtSize = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`);
+
+/** Same quality menu as .movie, scoped to one episode. */
+async function askQuality(sock, msg, extra, meta, job) {
+  const react = (emoji) => sock.sendMessage(extra.from, { react: { text: emoji, key: msg.key } }).catch(() => {});
+  if (job.explicitQuality) return deliver(sock, msg, extra, meta, job);
+
+  await react('🔎');
+  const season = job.season || 1;
+  const episode = job.pack ? null : (job.from || 1);
+  let options = [];
+  try {
+    const found = await engine.qualityOptions({ item: meta, type: 'series', season, episode });
+    options = found.options || [];
+  } catch (e) {
+    log.debug(`${meta.title} · quality probe failed · ${e.message}`);
+  }
+
+  if (!options.length) return deliver(sock, msg, extra, meta, job);
+  if (options.length === 1) { job.quality = options[0].quality; return deliver(sock, msg, extra, meta, job); }
+
+  const ids = options.map((o) => `q${o.quality}`);
+  const title = `${meta.title} S${pad(season)}${job.pack ? ' (pack)' : `E${pad(episode)}`}`;
+  const header = `📺 *${title}*\nChoose the quality:`;
+
+  selections.offer({
+    chatId: extra.from,
+    sender: extra.sender || msg.key.participant || extra.from,
+    items: options.map((o) => ({ ...o, meta })),
+    ids,
+    label: 'quality',
+    ttlMs: 5 * 60 * 1000,
+    run: (sock2, msg2, extra2, item) => { job.quality = item.quality; return deliver(sock2, msg2, extra2, meta, job); },
+  });
+
+  const rows = options.map((o, i) => ({
+    title: `${o.quality}p`,
+    description: `${o.sizeMB ? `~${fmtSize(o.sizeMB)}` : 'size unknown'} · ${o.candidates} source${o.candidates > 1 ? 's' : ''}`,
+    rowId: ids[i],
+  }));
+
+  try {
+    await sock.sendMessage(extra.from, {
+      text: header,
+      footer: 'Tap a quality, or reply with its number',
+      title: 'Quality',
+      buttonText: 'Choose quality',
+      sections: [{ title, rows }],
+    }, { quoted: msg });
+    return;
+  } catch (e) {
+    log.debug(`list message rejected (${e.message}) — using a numbered list`);
+  }
+
+  const lines = options.map((o, i) => `*${i + 1}.* ${o.quality}p${o.sizeMB ? ` · ~${fmtSize(o.sizeMB)}` : ''}`);
+  await sock.sendMessage(extra.from, { text: `${header}\n\n${lines.join('\n')}\n\n_reply with a number_` }, { quoted: msg });
 }
 
 /** Send one finished file through the bot's delivery path (document, like .song). */
@@ -158,7 +219,7 @@ async function sendEpisode(sock, msg, chatId, file, meta, season, episode, quali
 
   await trySubtitles(sock, msg, chatId, meta, season, episode);
   // delivered → delete, unless the owner turned the disk cache back on
-  await host.release(file, { meta, quality: shownQuality, season, episode }).catch(() => false);
+  await host.release(file).catch(() => false);
 
   return stat.size;
 }
@@ -221,7 +282,7 @@ async function deliverSeasonPack(sock, msg, extra, meta, job) {
       caption: `📺 *${meta.title}* — S${pad(season)} pack`,
     });
 
-    await host.release(file, { meta, quality: job.quality, season }).catch(() => false);
+    await host.release(file).catch(() => false);
     return react('✅');
   } catch (e) {
     log.error(`${meta.title} S${pad(season)} pack · ${e.code || 'FAIL'} · ${String(e.message || '').split('\n')[0]}`);
@@ -263,7 +324,6 @@ async function fetchEpisodeSource(meta, season, ep, quality, attempts = 3) {
       if (!size) throw new Error('download produced an empty file');
       const epRuntime = resolved.episodeRuntime || (resolved.meta || meta).episodeRuntime || (resolved.meta || meta).runtime;
       await require('./movie')._assertFullLength(realFile, epRuntime, 'episode');
-      await engine.rememberFile(resolved.meta || meta, quality, season, ep, realFile, size / 1048576);
       return { res: resolved, file: realFile };
     } catch (e) {
       lastErr = e;
@@ -394,7 +454,7 @@ module.exports = {
       if (!matches.length) return extra.reply(`❌ No series found for *${job.title}*.`);
       job.matches = matches;
 
-      if (matches.length === 1) return deliver(sock, msg, extra, matches[0], job);
+      if (matches.length === 1) return askQuality(sock, msg, extra, matches[0], job);
       return offerChoices(sock, msg, extra, matches, job);
     } catch (e) {
       log.error(`${job.title || 'search'} · ${e.code || 'FAIL'} · ${String(e.message || '').split('\n')[0]}`);
@@ -403,5 +463,6 @@ module.exports = {
   },
 
   _parseArgs: parseArgs,
+  _askQuality: askQuality,
   _deliver: deliver,
 };

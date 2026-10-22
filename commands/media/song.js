@@ -28,9 +28,7 @@ const settings = require('../../utils/mediaSettings');
 const providers = require('../../utils/downloadProviders');
 const youtubeSearch = require('../../utils/youtubeSearch');
 const selections = require('../../utils/selections');
-const sendCache = require('../../utils/sendCache');
 const jobQueue = require('../../utils/jobQueue');
-const { createProgress } = require('../../utils/progressCard');
 const {
   downloadToFile, sniffFile, audioToMp3, tagMp3, safeName, fmtMB,
 } = require('../../utils/mediaTransfer');
@@ -148,12 +146,6 @@ const execute = async (sock, msg, args, extra) => {
         });
       }
 
-      const videoId = YT.youtubeId(url);
-      const cacheKey = videoId ? `song:${videoId}:${sendAs}` : null;
-      if (cacheKey && await sendCache.replay(sock, chatId, msg, cacheKey)) {
-        await react('✅');
-        return;
-      }
 
       if (!title || !duration) {
         try {
@@ -174,11 +166,7 @@ const execute = async (sock, msg, args, extra) => {
 
       return await jobQueue.runInLane('light', async () => {
       await react('📥');
-      progress = config.media?.progressCard !== false
-        ? createProgress(sock, chatId, msg, { label: 'Downloading' })
-        : null;
 
-      // ── 2. Download (a delayed card shows progress on longer jobs) ────────
       // ── 3. Engine 1: yt-dlp ───────────────────────────────────────────────
       let file = null;
       let ext = 'mp3';
@@ -193,7 +181,6 @@ const execute = async (sock, msg, args, extra) => {
             log.debug(`yt-dlp profile ${name} failed · ${info.code}`);
             attempts.push({ engine: `yt-dlp:${name}`, code: info.code });
           },
-          onProgress: progress ? (p) => progress.update({ pct: p.percent, speed: p.speed, stage: 'downloading' }) : undefined,
           deadlineMs: Number(config.ytdlp?.deadlineMs) || ENGINE_TIMEOUT,
         });
         file = res.file;
@@ -229,8 +216,7 @@ const execute = async (sock, msg, args, extra) => {
         const dest = `${outBase}_remote.${remoteHit.ext || 'mp3'}`;
         const got = await downloadToFile(remoteHit.url, dest, {
           maxBytes: MAX_AUDIO_MB * 1024 * 1024,
-          headers: remoteHit.headers,
-          onProgress: progress ? (p) => progress.update({ pct: p.percent, stage: 'downloading' }) : undefined,
+          headers: remoteHit.headers
         });
         files.push(dest);
         file = dest;
@@ -296,18 +282,14 @@ const execute = async (sock, msg, args, extra) => {
         + `\n📦 ${fmtMB(size)}${via !== 'yt-dlp' ? ` • via ${via}` : ''}`;
 
       if (sendAs === 'audio') {
-        progress?.update({ stage: 'uploading' });
         const sent = await sock.sendMessage(chatId, {
           audio: { url: finalFile }, mimetype: mime, ptt: false, fileName,
         }, { quoted: msg });
-        if (cacheKey) sendCache.remember(cacheKey, sent);
       } else {
         // 'document' keeps the exact "Title - Artist.mp3" filename.
-        progress?.update({ stage: 'uploading' });
         const sent = await sock.sendMessage(chatId, {
           document: { url: finalFile }, mimetype: mime, fileName, caption,
         }, { quoted: msg });
-        if (cacheKey) sendCache.remember(cacheKey, sent);
       }
       await react('✅');
       }, async () => {
@@ -324,7 +306,6 @@ const execute = async (sock, msg, args, extra) => {
       await reply(lines.slice(0, 3).join('\n'));
       await react('❌');
     } finally {
-      if (progress) await progress.done();
       for (const f of files) deleteTempFile(f);
       // yt-dlp may leave .part / .ytdl files or a differently-named stream.
       try {

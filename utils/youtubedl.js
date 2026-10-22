@@ -670,6 +670,7 @@ const RULES = [
   { code: 'FFMPEG_MISSING', re: /ffmpeg (?:is )?not (?:installed|found)|ffprobe and ffmpeg not found|postprocessing.*ffmpeg|requested merging of multiple formats|you have requested merging|\b(?:won['’]t|will not) be merged\b/i },
   { code: 'IMPERSONATE',    re: /impersonat\w+ (?:target|request)|curl_cffi|impersonate.*not (?:available|supported)/i },
   { code: 'UNSUPPORTED_URL', re: /unsupported url|no suitable extractor|unknown extractor|is not a valid url|no video formats found for this url/i },
+  { code: 'NO_AUDIO',       re: /no audio track|has no audio/i },
   { code: 'NO_FORMATS',     re: /requested format (?:is )?not available|no video formats found|only images are available|no video formats|unable to extract (?:any )?(?:video|data)|no formats? found for|some formats may be missing/i },
   { code: 'NETWORK',        re: /unable to download (?:webpage|api page|video data|json)|timed out|timeout|temporary failure|connection (?:refused|reset|aborted)|getaddrinfo|ssl|certificate|EOF occurred|HTTP Error 5\d\d|network is unreachable|remote end closed|tls\/ssl connection has been closed/i },
   { code: 'NO_YTDLP',       re: /yt-dlp is not installed|ENOENT|not recognized as an internal or external command/i },
@@ -719,6 +720,7 @@ const isRetryable = (code) => RETRY_CODES.has(code);
 // ─── USER-FACING MESSAGES ─────────────────────────────────────────────────────
 
 const HINTS = {
+  NO_AUDIO: '❌ The download carries no audio track — refusing to send a silent video. Try another link or quality.',
   NO_YTDLP: '❌ *yt-dlp* is not installed and could not be auto-installed on this host.\nFix: `pip install -U yt-dlp`, or run `.ytdl repair`.',
   BOT_CHECK: '❌ YouTube asked this server to prove it is *not a bot* — this is the normal wall for VPS/hosting IPs, **not** a region block.\nFix: `.cookies set` (add a YouTube cookies.txt) — that cures it in ~95% of cases. Or set a proxy: `.ytdl proxy <url>`.',
   AGE_RESTRICTED: '❌ This video is age-restricted, so YouTube wants a signed-in session.\nFix: add cookies with `.cookies set` and try again.',
@@ -991,6 +993,8 @@ function assertProduced(outBase, stdout, what) {
 let _autoUpdated = false;
 let _autoUpdateScheduled = false;
 
+let _healedThisRun = false;
+
 function scheduleAutoUpdate() {
   if (_autoUpdateScheduled) return false;
   const hours = Number(config.ytdlp?.autoUpdateHours ?? 24);
@@ -1012,6 +1016,72 @@ function scheduleAutoUpdate() {
     interval.unref?.();
   }, 5 * 60 * 1000);
   timer.unref?.();
+  return true;
+}
+
+let _repairPromise = null;
+let _lastRepairAt = 0;
+const REPAIR_COOLDOWN_MS = 5 * 60 * 1000;
+
+/**
+ * Put a working yt-dlp back on the host.
+ *
+ * The standalone binary is deleted first (a half-written download, a bad
+ * chmod or a corrupted file is the usual reason a previously working binary
+ * stops running), then `ensureInstalled()` re-downloads it and falls back to
+ * pip. Concurrent callers share one attempt and a 5-minute cooldown stops a
+ * broken network from turning every command into a reinstall.
+ *
+ * @returns {Promise<string[]|null>} the working command, or null
+ */
+async function selfHeal(reason = '') {
+  if (_repairPromise) return _repairPromise;
+  if (Date.now() - _lastRepairAt < REPAIR_COOLDOWN_MS) return resolveCommand({ force: true });
+  _lastRepairAt = Date.now();
+
+  _repairPromise = (async () => {
+    console.warn(`[ytdlp] self-repair${reason ? ` · ${reason}` : ''}`);
+    try { if (fs.existsSync(LOCAL_BIN)) fs.unlinkSync(LOCAL_BIN); } catch { /* ignore */ }
+    _cmd = undefined;
+    let cmd = null;
+    try { cmd = await ensureInstalled(); } catch (e) { _installError = e.message; }
+    if (!cmd) { _cmd = undefined; cmd = resolveCommand({ force: true }); }
+    capabilities({ force: true });
+    if (cmd) console.log(`[ytdlp] self-repair OK · ${probeCommand(cmd) || 'runnable'}`);
+    else console.warn(`[ytdlp] self-repair failed · ${_installError || 'no working binary'}`);
+    return cmd;
+  })().finally(() => { _repairPromise = null; });
+
+  return _repairPromise;
+}
+
+/**
+ * Is yt-dlp actually runnable? Repairs it when it is not.
+ * Called at boot and by the watchdog below, so a host whose binary disappears
+ * (image rebuild, disk cleanup, failed auto-update) heals itself.
+ */
+async function healthCheck({ heal = true } = {}) {
+  const cmd = resolveCommand({ force: true });
+  if (cmd && probeCommand(cmd)) return cmd;
+  if (!heal) return null;
+  return selfHeal(cmd ? 'binary is not runnable' : 'binary is missing');
+}
+
+let _watchdog = null;
+
+/** Re-check yt-dlp in the background (default: every 30 minutes). */
+function startWatchdog({ everyMinutes = 30 } = {}) {
+  if (_watchdog) return false;
+  const minutes = Math.max(5, Number(everyMinutes) || 30);
+  _watchdog = setInterval(() => { void healthCheck(); }, minutes * 60 * 1000);
+  _watchdog.unref?.();
+  return true;
+}
+
+function stopWatchdog() {
+  if (!_watchdog) return false;
+  clearInterval(_watchdog);
+  _watchdog = null;
   return true;
 }
 
@@ -1061,6 +1131,13 @@ async function runWithProfiles(url, buildArgs, {
 
       // A build that cannot impersonate will not learn to: drop that profile.
       if (info.code === 'IMPERSONATE' && profile.name === 'impersonate') disableImpersonation();
+
+      // Broken/missing binary mid-flight: repair it once and retry the profile.
+      if (info.code === 'NO_YTDLP' && !_healedThisRun) {
+        _healedThisRun = true;
+        const repaired = await selfHeal(`download failed with ${info.code}`);
+        if (repaired) { i--; continue; }
+      }
 
       // Some builds reject one of the optional flags (usually because they are
       // much older than expected). Drop them and retry the same profile once
@@ -1199,8 +1276,10 @@ async function downloadVideo(url, { height = 720, outBase, maxMB = 300, maxSecon
     'b[vcodec!=none][acodec!=none]',
   ].join('/');
 
+  // Audio is not optional: AAC first (WhatsApp plays it everywhere), then any
+  // m4a, then whatever audio stream exists. A video-only pick is never offered.
   const merged = [
-    `bv*[vcodec^=avc1][height<=${h}]+ba[ext=m4a]/bv*[height<=${h}]+ba`,
+    `bv*[vcodec^=avc1][height<=${h}]+ba[acodec^=mp4a]/bv*[vcodec^=avc1][height<=${h}]+ba[ext=m4a]/bv*[height<=${h}]+ba`,
     `b[ext=mp4][height<=${h}][vcodec!=none][acodec!=none]`,
     `b[height<=${h}][vcodec!=none][acodec!=none]`,
   ].join('/');
@@ -1289,6 +1368,7 @@ module.exports = {
   getInfo, probeRaw, searchVideos, downloadAudio, downloadVideo, runWithProfiles, findProduced,
   ffmpegLocationArgs, assertProduced,
   capabilities, disableImpersonation, setMinimalBaseArgs, usingMinimalBaseArgs,
+  selfHeal, healthCheck, startWatchdog, stopWatchdog,
   // cookies
   setCookies, clearCookies, cookieInfo, cookieFile, hasCookies, normaliseCookieText,
   // errors
