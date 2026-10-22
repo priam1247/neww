@@ -48,11 +48,6 @@ export function PairingCodeBanner({ activePair, onDismiss }: PairingCodeBannerPr
           <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-mint">
             <Smartphone className="h-3.5 w-3.5" />
             WhatsApp Linking Code · +{activePair.number}
-            {activePair.mode === 'sandbox' && (
-              <span className="rounded bg-obsidian-900/90 px-1.5 py-0.5 font-mono text-[10px] normal-case text-amber-300">
-                preview code
-              </span>
-            )}
           </div>
           <p className="text-xs text-[#9fb0c5]">
             Open WhatsApp → <strong>Linked Devices</strong> →{' '}

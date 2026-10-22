@@ -1,24 +1,32 @@
-# ZaFar Control Room (Web Frontend)
+# ZaFar Control Room
 
-Standalone **Next.js (App Router) + TypeScript + Tailwind CSS** web frontend for **ZaFar Bot**, isolated on its own branch so it deploys directly on **Vercel** with zero configuration.
+Production **Next.js 16 (App Router) + TypeScript + Tailwind CSS** web frontend for **ZaFar**, integrated with real email verification, **Cloudflare D1** persistence, and your **Koyeb `zafar-backend`** service.
 
-## Features
+## Architecture
 
-- **Approved Access Control Room** — View live connection state, approve international WhatsApp numbers (`8–15` digits), revoke/re-enable access, and remove users.
-- **Short-Lived Linking Codes** — Issue 60-second WhatsApp pairing codes with a live expiry countdown and one-click copy.
-- **Server-Side Bot Proxy (`/api/admin/*`)** — Proxies requests from Vercel's HTTPS edge/runtime directly to your bot host's `admin-server.js` (`http://<ip>:<port>/admin/api/...`), avoiding browser CORS and Mixed-Content errors while keeping `ADMIN_DASHBOARD_TOKEN` timing-safe verified.
-- **Interactive Sandbox Mode** — Works immediately out of the box on Vercel previews and local development even before `BOT_API_URL` is linked.
-- **Command Directory & Vault Desk** — Searchable reference for all 21 ZaFar Bot commands, the 10,924-paper Mzuzu University vault index, and the 6 primary public metadata catalogs.
+- **Real Email Authentication (`/api/auth/*`)**
+  - Requires email registration, 6-digit OTP inbox verification, sign-in, password reset via 6-digit email code, HS256 JWT sessions (`HttpOnly` cookie + Bearer header), and profile updates.
+  - Bridges directly to your live Koyeb service (`ZAFAR_AUTH_API_URL`) out of the box **and** supports direct STARTTLS email delivery via **Nodemailer (`smtp.gmail.com:587`)** when `SMTP_USER` and `SMTP_PASS` are configured in Vercel Environment Variables.
+- **Zero Sample / Mock Data**
+  - All fake/sample phone numbers and sandbox badges are completely removed.
+  - Approved WhatsApp numbers persist in **Cloudflare D1** (`portal_whatsapp_access`) when D1 credentials are configured, and proxy live to `${BOT_API_URL}/admin/api/*` when connected to a running `admin-server.js` instance.
 
-## Deploying on Vercel
+## Vercel Environment Variables
 
-1. Import this repository into **Vercel** and select branch **`arena/f0030ea7-neww`**.
-2. Leave **Framework Preset** as **Next.js** and **Root Directory** as `./` (no custom build settings needed).
-3. Add Environment Variables in Vercel Project Settings:
-   - `BOT_API_URL` — Public URL of your running bot admin server (e.g. `http://203.0.113.10:3000`)
-   - `ADMIN_DASHBOARD_TOKEN` — Strong shared secret matching `ADMIN_DASHBOARD_TOKEN` in your bot `.env`
-   - `NEXT_PUBLIC_ADMIN_EMAIL` *(optional)* — Operator badge email shown in the header
-4. Click **Deploy**. You can also enter or override `BOT_API_URL` and `ADMIN_DASHBOARD_TOKEN` live at runtime from the **Connection** drawer in the top navigation bar.
+Add your secrets in **Vercel → Project Settings → Environment Variables** (never commit credentials into Git):
+
+- `ZAFAR_AUTH_API_URL` — Public URL of your Koyeb `zafar-backend` service
+- `SMTP_HOST` — `smtp.gmail.com`
+- `SMTP_PORT` — `587`
+- `SMTP_USER` — Gmail address sending verification codes
+- `SMTP_PASS` — 16-character Google App Password
+- `JWT_SECRET_KEY` — Shared 64-hex HS256 secret key
+- `CLOUDFLARE_ACCOUNT_ID` — Cloudflare Account ID for D1
+- `D1_DATABASE_ID` — Cloudflare D1 Database UUID
+- `CLOUDFLARE_API_TOKEN` — Cloudflare D1 Read/Write API Token
+- `ADMIN_EMAIL` — Primary administrator email
+- `BOT_API_URL` *(optional)* — Running WhatsApp bot `admin-server.js` URL
+- `ADMIN_DASHBOARD_TOKEN` *(optional)* — Shared token for `admin-server.js`
 
 ## Local Development
 
@@ -26,5 +34,3 @@ Standalone **Next.js (App Router) + TypeScript + Tailwind CSS** web frontend for
 npm install
 npm run dev
 ```
-
-Open `http://localhost:3000`.

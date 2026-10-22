@@ -2,12 +2,10 @@
 
 import { useEffect, useState } from 'react';
 import { Eye, EyeOff, PlugZap, Server, ShieldAlert, X } from 'lucide-react';
-import { ConnectionMode } from '@/lib/types';
 
 export interface ConnectionSettings {
   botApiUrl: string;
   token: string;
-  useSandbox: boolean;
 }
 
 interface ConnectionDrawerProps {
@@ -15,7 +13,7 @@ interface ConnectionDrawerProps {
   onClose: () => void;
   settings: ConnectionSettings;
   defaultBotApiConfigured: boolean;
-  currentMode: ConnectionMode;
+  botServerLinked: boolean;
   onSave: (next: ConnectionSettings) => Promise<void>;
 }
 
@@ -24,12 +22,11 @@ export function ConnectionDrawer({
   onClose,
   settings,
   defaultBotApiConfigured,
-  currentMode,
+  botServerLinked,
   onSave,
 }: ConnectionDrawerProps) {
   const [botApiUrl, setBotApiUrl] = useState(settings.botApiUrl);
   const [token, setToken] = useState(settings.token);
-  const [useSandbox, setUseSandbox] = useState(settings.useSandbox);
   const [showToken, setShowToken] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -37,7 +34,6 @@ export function ConnectionDrawer({
     if (open) {
       setBotApiUrl(settings.botApiUrl);
       setToken(settings.token);
-      setUseSandbox(settings.useSandbox);
     }
   }, [open, settings]);
 
@@ -50,7 +46,6 @@ export function ConnectionDrawer({
       await onSave({
         botApiUrl: botApiUrl.trim(),
         token: token.trim(),
-        useSandbox,
       });
       onClose();
     } finally {
@@ -73,11 +68,11 @@ export function ConnectionDrawer({
             </div>
             <div>
               <h2 id="conn-modal-title" className="text-base font-semibold text-[#f4f7fb]">
-                Bot Server & Token Connection
+                WhatsApp Bot Server Connection
               </h2>
               <p className="text-xs text-[#8d98aa]">
-                Connect this Vercel frontend to your running ZaFar Bot{' '}
-                <code className="font-mono text-[#c8d2e3]">admin-server.js</code>
+                Link this portal to your live ZaFar Bot{' '}
+                <code className="font-mono text-[#c8d2e3]">admin-server.js</code> endpoint
               </p>
             </div>
           </div>
@@ -91,42 +86,14 @@ export function ConnectionDrawer({
         </div>
 
         <form onSubmit={handleSubmit} className="mt-5 space-y-4">
-          <div className="flex items-center justify-between rounded-xl border border-line bg-obsidian-850 px-3.5 py-3">
-            <div>
-              <div className="text-xs font-medium text-[#f4f7fb]">
-                Interactive Sandbox Mode
-              </div>
-              <div className="text-[11px] text-[#8d98aa]">
-                Test approving numbers & pairing codes before linking a live VPS
-              </div>
-            </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={useSandbox}
-              onClick={() => setUseSandbox((v) => !v)}
-              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border transition-colors ${
-                useSandbox
-                  ? 'border-mint/50 bg-mint-dim'
-                  : 'border-line bg-obsidian-900'
-              }`}
-            >
-              <span
-                className={`pointer-events-none inline-block h-4 w-4 translate-y-0.5 rounded-full transition-transform ${
-                  useSandbox ? 'translate-x-5 bg-mint' : 'translate-x-1 bg-[#8d98aa]'
-                }`}
-              />
-            </button>
-          </div>
-
-          <div className={useSandbox ? 'opacity-50 pointer-events-none' : ''}>
+          <div>
             <label
               htmlFor="botApiUrlInput"
               className="mb-1.5 flex items-center justify-between text-xs font-medium text-[#8d98aa]"
             >
               <span className="flex items-center gap-1.5">
                 <Server className="h-3.5 w-3.5 text-mint" />
-                Bot Server URL
+                Live Bot Server URL
               </span>
               {defaultBotApiConfigured && (
                 <span className="rounded bg-mint-dim px-1.5 py-0.5 font-mono text-[10px] text-mint">
@@ -147,17 +114,17 @@ export function ConnectionDrawer({
               className="w-full rounded-xl border border-line bg-obsidian-900 px-3.5 py-2.5 font-mono text-xs text-[#f4f7fb] placeholder:text-[#5d6778] focus:border-mint focus:outline-none"
             />
             <p className="mt-1 text-[11px] text-[#8d98aa]">
-              Proxied server-side via Next.js <code className="font-mono">/api/admin/*</code> —
-              works with plain <code className="font-mono">http://ip:port</code> panels without CORS errors.
+              Proxied server-side via Next.js <code className="font-mono">/api/admin/*</code> so plain{' '}
+              <code className="font-mono">http://ip:port</code> servers work cleanly from HTTPS Vercel.
             </p>
           </div>
 
-          <div className={useSandbox ? 'opacity-50 pointer-events-none' : ''}>
+          <div>
             <label
               htmlFor="adminTokenInput"
               className="mb-1.5 block text-xs font-medium text-[#8d98aa]"
             >
-              Admin Dashboard Token (<code className="font-mono">ADMIN_DASHBOARD_TOKEN</code>)
+              Bot Admin Token (<code className="font-mono">ADMIN_DASHBOARD_TOKEN</code>)
             </label>
             <div className="relative">
               <input
@@ -165,7 +132,7 @@ export function ConnectionDrawer({
                 type={showToken ? 'text' : 'password'}
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
-                placeholder="Paste your shared bearer token"
+                placeholder="Shared bearer token from bot .env"
                 className="w-full rounded-xl border border-line bg-obsidian-900 py-2.5 pl-3.5 pr-10 font-mono text-xs text-[#f4f7fb] placeholder:text-[#5d6778] focus:border-mint focus:outline-none"
               />
               <button
@@ -182,12 +149,11 @@ export function ConnectionDrawer({
           <div className="flex items-start gap-2.5 rounded-xl border border-line bg-obsidian-900/70 p-3 text-[11px] text-[#8d98aa]">
             <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-mint" />
             <span>
-              Current mode:{' '}
+              Status:{' '}
               <strong className="text-[#f4f7fb]">
-                {currentMode === 'live' ? 'Live Bot Proxy' : 'Sandbox Preview'}
+                {botServerLinked ? 'Connected to live bot API' : 'Storing approved numbers in database'}
               </strong>
-              . Session credentials stay in your browser storage and are verified with{' '}
-              <code className="font-mono">crypto.timingSafeEqual</code>.
+              . Leave blank to manage approved numbers directly in Cloudflare D1 until your bot host is online.
             </span>
           </div>
 
@@ -197,18 +163,17 @@ export function ConnectionDrawer({
               onClick={() => {
                 setBotApiUrl('');
                 setToken('');
-                setUseSandbox(!defaultBotApiConfigured);
               }}
               className="rounded-xl bg-obsidian-700 px-3.5 py-2 text-xs font-semibold text-[#d8e0ee] transition hover:bg-obsidian-750"
             >
-              Reset
+              Clear Override
             </button>
             <button
               type="submit"
               disabled={saving}
               className="rounded-xl bg-mint px-4 py-2 text-xs font-bold text-[#071510] transition hover:brightness-110 disabled:opacity-60"
             >
-              {saving ? 'Applying…' : 'Save & Sync'}
+              {saving ? 'Saving…' : 'Save & Connect'}
             </button>
           </div>
         </form>
