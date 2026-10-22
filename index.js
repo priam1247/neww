@@ -113,6 +113,7 @@ const {
 const qrcode = require('qrcode-terminal');
 const config = require('./config');
 const handler = require('./handler');
+const { startAdminServer } = require('./admin-server');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
@@ -487,6 +488,9 @@ async function startBot() {
   currentSock = sock;
   return sock;
 }
+// Start the admin surface alongside the bot. It never receives auth/session files.
+startAdminServer({ getSocket: () => currentSock });
+
 // Start the bot — one aligned block instead of loose lines
 const ownerNames = Array.isArray(config.ownerName) ? config.ownerName.join(',') : config.ownerName;
 require('./utils/logger').banner([

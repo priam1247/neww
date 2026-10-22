@@ -6,6 +6,7 @@
     "type": "commonjs",
     "scripts": {
         "start": "node --expose-gc --max-old-space-size=3072 index.js",
+        "admin": "node -e \"require('./admin-server').startAdminServer({getSocket:()=>null})\"", 
         "dev": "nodemon index.js",
         "install:no-puppeteer": "PUPPETEER_SKIP_DOWNLOAD=true PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm install",
         "ytdlp:install": "bash scripts/install-ytdlp.sh",
