@@ -2,8 +2,7 @@
  * ZaFar Bot — Hydrodactyl / Pterodactyl HTTPS Panel Client
  *
  * Supports `hydro_…` (XS Systems Hydrodactyl) and `ptlc_…` (Pterodactyl)
- * Account Client API keys. If `PANEL_SERVER_ID` and `P_SERVER_UUID` are not
- * set, automatically discovers the server identifier via `GET /api/client`.
+ * Account Client API keys across both Pterodactyl and Hydrodactyl route layouts.
  */
 
 'use strict';
@@ -14,7 +13,9 @@ function normalizePanelBase(rawUrl) {
   const cleaned = String(rawUrl || PANEL_URL_DEFAULT)
     .trim()
     .replace(/\/server\/.*$/i, '')
-    .replace(/\/api\/client.*$/i, '')
+    .replace(/\/servers\/.*$/i, '')
+    .replace(/\/account\/.*$/i, '')
+    .replace(/\/api\/.*$/i, '')
     .replace(/\/+$/, '');
   try {
     const parsed = new URL(cleaned);
@@ -36,39 +37,56 @@ function getPanelConfig(env = process.env) {
   return { key, base, baseError: error, ids };
 }
 
-async function discoverPanelServerIds(base, key, fetchImpl = fetch) {
-  try {
-    const res = await fetchImpl(`${base}/api/client`, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${key}`,
-        Accept: 'application/json',
-      },
-      signal: AbortSignal.timeout(12_000),
-    });
-    if (!res.ok) {
-      return {
-        ok: false,
-        status: res.status,
-        ids: [],
-        reason:
-          res.status === 401 || res.status === 403
-            ? `panel refused PANEL_API_KEY (HTTP ${res.status})`
-            : `panel answered HTTP ${res.status}`,
-      };
-    }
-    const json = await res.json().catch(() => ({}));
-    const list = Array.isArray(json?.data) ? json.data : [];
-    const ids = [];
-    for (const item of list) {
-      const a = item?.attributes || {};
-      if (a.identifier) ids.push(String(a.identifier));
-      if (a.uuid) ids.push(String(a.uuid).split('-')[0]);
-    }
-    return { ok: true, status: 200, ids: [...new Set(ids.filter(Boolean))] };
-  } catch (e) {
-    return { ok: false, status: 0, ids: [], reason: e.message || 'panel unreachable' };
+function parseServerIdsFromBody(json) {
+  const list = Array.isArray(json)
+    ? json
+    : Array.isArray(json?.data)
+      ? json.data
+      : Array.isArray(json?.servers)
+        ? json.servers
+        : [];
+  const ids = [];
+  for (const item of list) {
+    const a = item?.attributes && typeof item.attributes === 'object' ? item.attributes : item || {};
+    const id = a.identifier || a.shortId || a.server_id || a.id;
+    if (id) ids.push(String(id));
+    if (a.uuid) ids.push(String(a.uuid).split('-')[0]);
   }
+  return [...new Set(ids.filter(Boolean))];
+}
+
+async function discoverPanelServerIds(base, key, fetchImpl = fetch) {
+  const paths = ['/api/client', '/api/v1/client', '/api/v1/servers', '/api/servers'];
+  for (const p of paths) {
+    try {
+      const res = await fetchImpl(`${base}${p}`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${key}`,
+          'X-API-Key': key,
+          Accept: 'application/json',
+        },
+        signal: AbortSignal.timeout(12_000),
+      });
+      if (res.status === 401 || res.status === 403) {
+        return {
+          ok: false,
+          status: res.status,
+          ids: [],
+          reason: `panel refused PANEL_API_KEY (HTTP ${res.status})`,
+        };
+      }
+      if (!res.ok) continue;
+      const ct = res.headers?.get?.('content-type') || 'application/json';
+      if (ct.includes('text/html')) continue;
+      const json = await res.json().catch(() => null);
+      if (!json) continue;
+      return { ok: true, status: 200, ids: parseServerIdsFromBody(json) };
+    } catch (e) {
+      return { ok: false, status: 0, ids: [], reason: e.message || 'panel unreachable' };
+    }
+  }
+  return { ok: false, status: 404, ids: [], reason: 'panel API endpoint returned 404' };
 }
 
 async function panelPowerSignal(signal = 'restart', opts = {}) {
@@ -77,44 +95,58 @@ async function panelPowerSignal(signal = 'restart', opts = {}) {
   if (!key) return { ok: false, reason: 'PANEL_API_KEY is not set' };
   if (baseError || !base) return { ok: false, reason: baseError || 'Invalid PANEL_URL' };
 
-  let ids = [...initialIds];
-  if (!ids.length) {
+  const candidateIds = [...initialIds];
+  if (!candidateIds.length) {
     const disc = await discoverPanelServerIds(base, key, fetchImpl);
     if (!disc.ok) return { ok: false, reason: disc.reason };
-    ids = disc.ids;
-    if (!ids.length) {
-      return { ok: false, reason: 'No servers visible to this PANEL_API_KEY (set PANEL_SERVER_ID)' };
+    candidateIds.push(...disc.ids);
+    if (!candidateIds.length) {
+      return {
+        ok: false,
+        reason: '0 servers found on this PANEL_API_KEY account (verify key belongs to the account owning this server)',
+      };
     }
   }
 
+  const ids = [...new Set(candidateIds.filter(Boolean))];
+  const routeTemplates = [
+    (id) => ({ path: `/api/client/servers/${encodeURIComponent(id)}/power`, body: { signal } }),
+    (id) => ({ path: `/api/v1/client/servers/${encodeURIComponent(id)}/power`, body: { signal } }),
+    (id) => ({ path: `/api/v1/servers/${encodeURIComponent(id)}/power`, body: { signal, action: signal } }),
+    (id) => ({ path: `/api/servers/${encodeURIComponent(id)}/power`, body: { signal, action: signal } }),
+    (id) => ({ path: `/api/server/${encodeURIComponent(id)}/power`, body: { signal, action: signal } }),
+  ];
+
   let reason = 'no answer';
   for (const id of ids) {
-    try {
-      const res = await fetchImpl(
-        `${base}/api/client/servers/${encodeURIComponent(id)}/power`,
-        {
+    for (const makeRoute of routeTemplates) {
+      const route = makeRoute(id);
+      try {
+        const res = await fetchImpl(`${base}${route.path}`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${key}`,
+            'X-API-Key': key,
             Accept: 'application/json',
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ signal }),
+          body: JSON.stringify(route.body),
           signal: AbortSignal.timeout(15_000),
-        },
-      );
-      if (res.status === 204 || res.status === 200) {
-        return { ok: true, serverId: id };
+        });
+        if (res.status === 204 || res.status === 200 || res.status === 202) {
+          const ct = res.headers?.get?.('content-type') || '';
+          if (res.status === 200 && ct.includes('text/html')) continue;
+          return { ok: true, serverId: id };
+        }
+        if (res.status === 401 || res.status === 403) {
+          return { ok: false, reason: `panel refused the key (HTTP ${res.status})` };
+        }
+        reason = `panel answered HTTP ${res.status}`;
+        if (res.status === 404 || res.status === 405) continue;
+        break;
+      } catch (e) {
+        return { ok: false, reason: e.message || 'panel unreachable' };
       }
-      reason =
-        res.status === 401 || res.status === 403
-          ? `panel refused the key (HTTP ${res.status})`
-          : `panel answered HTTP ${res.status}`;
-      if (res.status === 404) continue;
-      break;
-    } catch (e) {
-      reason = e.message || 'panel unreachable';
-      break;
     }
   }
   return { ok: false, reason };

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getAdminEmail } from '@/lib/auth-engine';
 import { verifyBotSyncRequest } from '@/lib/bot-sync-auth';
 import {
   checkRateLimit,
@@ -10,7 +11,9 @@ import {
   completeBotCommand,
   computeWhitelistSnapshot,
   getNextBotPollMs,
+  getStoredWhatsAppUser,
   saveBotHeartbeat,
+  saveStoredWhatsAppUser,
 } from '@/lib/storage';
 
 export const dynamic = 'force-dynamic';
@@ -48,7 +51,25 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // 1. Record completed command results reported by the bot
+  // 1. Import any unsynced WhatsApp `.allow` numbers from the bot into D1
+  let importedAnyLocal = false;
+  if (Array.isArray(body.localUsers)) {
+    const adminOwner = getAdminEmail();
+    for (const raw of body.localUsers.slice(0, 200)) {
+      if (!raw || typeof raw !== 'object') continue;
+      const item = raw as Record<string, unknown>;
+      const num = String(item.number || '').replace(/[^0-9]/g, '');
+      if (num.length < 7 || num.length > 15) continue;
+      const existing = await getStoredWhatsAppUser(num);
+      if (!existing) {
+        const label = String(item.label || 'Added via WhatsApp .allow').slice(0, 60);
+        await saveStoredWhatsAppUser(num, label, adminOwner);
+        importedAnyLocal = true;
+      }
+    }
+  }
+
+  // 2. Record completed command results reported by the bot
   if (Array.isArray(body.completedResults)) {
     for (const item of body.completedResults) {
       if (item && typeof item === 'object' && typeof item.id === 'string') {
@@ -65,7 +86,7 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // 2. Store fresh bot heartbeat
+  // 3. Store fresh bot heartbeat
   await saveBotHeartbeat({
     lastSeenAt: Date.now(),
     connected: Boolean(body.connected),
@@ -84,7 +105,7 @@ export async function POST(req: NextRequest) {
       typeof body.queueHeavy === 'number' ? body.queueHeavy : undefined,
   });
 
-  // 3. Compute versioned whitelist delta + claim queued commands + poll interval
+  // 4. Compute versioned whitelist delta + claim queued commands + poll interval
   const [snapshot, commands, nextPollMs] = await Promise.all([
     computeWhitelistSnapshot(),
     claimPendingBotCommands(),
@@ -93,7 +114,7 @@ export async function POST(req: NextRequest) {
 
   const clientVersion =
     typeof body.whitelistVersion === 'string' ? body.whitelistVersion.trim() : '';
-  const whitelistChanged = clientVersion !== snapshot.version;
+  const whitelistChanged = importedAnyLocal || clientVersion !== snapshot.version;
 
   return NextResponse.json({
     ok: true,

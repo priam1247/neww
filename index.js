@@ -499,6 +499,14 @@ require('./utils/logger').banner([
       return { connected: Boolean(number), botNumber: number };
     },
     requestPairing: requestPairForDashboard,
+    requestRestart: async () => {
+      console.log('🔄 Dashboard requested bot reconnect/restart...');
+      if (currentSock) {
+        try { currentSock.end(new Error('dashboard restart requested')); } catch { /* ignore */ }
+      } else {
+        await startBot();
+      }
+    },
   });
 
   if (admin.apiEnabled && admin.token) {
