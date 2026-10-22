@@ -1,72 +1,82 @@
 /**
  * ZaFar Bot — Menu
  *
- * One clean, aligned card. Grouped by what the user is trying to do, not by
- * folder layout, and without emoji noise: a command list should be scannable
- * on a phone in a group chat.
+ * One clean, aligned card. Grouped by what the user is trying to do, honouring
+ * configured `config.prefix` and `config.botName`, and hiding admin-only
+ * commands from regular users.
  *
- *   .menu          everything
+ *   .menu          everything permitted for the caller
  *   .menu media    only the media section
  */
 
 const config = require('../../config');
+const { safeErrorMessage } = require('../../utils/userErrors');
 
-const GROUPS = [
-  {
-    key: 'media',
-    title: 'MEDIA',
-    rows: [
-      ['.movie <title> [year] [720]', 'film → document'],
-      ['.series <title> s01e03', 'one episode (or s01 1-6 / s01 full)'],
-      ['.song <name or link>', 'audio → MP3 document'],
-      ['.ytv <name or link> [720]', 'video → MP4'],
-      ['.dl <link> [audio|720]', 'any supported site'],
-      ['.tiktok  .x  .pinterest', 'social video grabs'],
-      ['.instagram  .fb', 'social video grabs'],
-      ['.spotify <url | title>', 'track or album'],
-      ['.sticker  .viewonce', 'reply to a message'],
-    ],
-  },
-  {
-    key: 'papers',
-    title: 'PAPERS',
-    rows: [
-      ['.paper [code] [module] [year]', 'find a paper'],
-      ['.paper browse', 'walk the archive'],
-      ['.countpapers', 'how much is there'],
-      ['.refreshpapers', 're-index (owner)'],
-    ],
-  },
-  {
-    key: 'engine',
-    title: 'ENGINE',
-    rows: [
-      ['.providers', 'source health'],
-      ['.moviestatus', 'cache · queue · counters'],
-      ['.debrid', 'torrent account check'],
-      ['.info <title>', 'what the sources return'],
-    ],
-  },
-  {
-    key: 'admin',
-    title: 'ADMIN',
-    rows: [
-      ['.allow  .disallow  .listusers', 'who may use the bot'],
-      ['.on  .off', 'enable/disable a chat'],
-      ['.cookies  .ytdl', 'YouTube bot-check tools'],
-      ['.health', 'runtime and media health'],
-      ['.restart  .update  .broadcast', 'maintenance'],
-    ],
-  },
-  {
+function buildGroups(prefix = '.', { isOwner = false } = {}) {
+  const p = prefix || '.';
+  const groups = [
+    {
+      key: 'media',
+      title: 'MEDIA',
+      rows: [
+        [`${p}movie <title> [year] [720]`, 'film → document'],
+        [`${p}series <title> s01e03`, 'episode, s01 1-6, or season'],
+        [`${p}song <name or link>`, 'audio → MP3 document'],
+        [`${p}ytv <name or link> [720]`, 'video → MP4'],
+        [`${p}dl <link> [audio|720]`, 'any supported site'],
+        [`${p}tiktok  ${p}x  ${p}pinterest`, 'social video grabs'],
+        [`${p}instagram  ${p}fb`, 'social video grabs'],
+        [`${p}spotify <url | title>`, 'track → MP3'],
+        [`${p}sticker  ${p}viewonce`, 'reply to a message'],
+      ],
+    },
+    {
+      key: 'papers',
+      title: 'PAPERS',
+      rows: [
+        [`${p}paper [code] [module] [year]`, 'find past papers'],
+        [`${p}paper browse [page]`, 'walk the archive'],
+        [`${p}countpapers`, 'how much is there'],
+        ...(isOwner ? [[`${p}refreshpapers`, 're-index vault (owner)']] : []),
+      ],
+    },
+    {
+      key: 'engine',
+      title: 'ENGINE',
+      rows: [
+        [`${p}providers`, 'source health'],
+        [`${p}moviestatus`, 'cache · queue · counters'],
+        [`${p}debrid`, 'torrent account check'],
+        [`${p}info <title>`, 'what the sources return'],
+      ],
+    },
+  ];
+
+  if (isOwner) {
+    groups.push({
+      key: 'admin',
+      title: 'ADMIN',
+      rows: [
+        [`${p}allow  ${p}disallow  ${p}listusers`, 'who may use the bot'],
+        [`${p}on  ${p}off`, 'enable/disable the bot globally'],
+        [`${p}cookies  ${p}ytdl`, 'YouTube bot-check tools'],
+        [`${p}restart  ${p}status  ${p}broadcast`, 'maintenance'],
+      ],
+    });
+  }
+
+  const sectionsHint = isOwner ? 'media|papers|engine|admin' : 'media|papers|engine';
+  groups.push({
     key: 'general',
     title: 'GENERAL',
     rows: [
-      ['.ping', 'latency'],
-      ['.menu [media|papers|engine|admin]', 'this card'],
+      [`${p}ping`, 'latency'],
+      [`${p}menu [${sectionsHint}]`, 'this card'],
     ],
-  },
-];
+  });
+
+  return groups;
+}
 
 const timeNow = () => {
   try {
@@ -84,21 +94,19 @@ const SECTION_ALIASES = {
   admin: 'admin', all: null, help: null,
 };
 
-function buildCard(groups, user) {
+function buildCard(groups, user, { prefix = config.prefix || '.', botName = config.botName || 'ZaFar Bot' } = {}) {
   const width = 34;
   const line = '─'.repeat(width);
   const out = [];
 
   out.push(`╭${line}╮`);
-  out.push(`│ 🎬 *${config.botName}*`);
+  out.push(`│ 🎬 *${botName}*`);
   out.push(`│ 👤 ${user || 'user'}  ·  🕒 ${timeNow()}`);
   out.push(`╰${line}╯`);
 
   for (const g of groups) {
     out.push('');
     out.push(`▸ *${g.title}*`);
-    // plain text (not backticks): one monospace run per line would break the
-    // columns on WhatsApp, and a wrapped hint reads worse than a second line
     const pad = Math.min(30, Math.max(...g.rows.map(([cmd]) => cmd.length)) + 2);
     for (const [cmd, hint] of g.rows) {
       if (cmd.length >= pad) {
@@ -111,7 +119,7 @@ function buildCard(groups, user) {
   }
 
   out.push('');
-  out.push('_prefix . · pick a result by replying with its number · reply cancel to abort_');
+  out.push(`_prefix ${prefix} · tap a poll option or reply with its number · reply cancel to abort_`);
   return out.join('\n');
 }
 
@@ -124,22 +132,31 @@ module.exports = {
 
   async execute(sock, msg, args, extra) {
     try {
-      const senderJid = extra.sender || '';
+      const isOwner = Boolean(extra?.isOwner);
+      const prefix = config.prefix || '.';
+      const botName = config.botName || 'ZaFar Bot';
+      const senderJid = extra?.sender || '';
       const user = String(senderJid).split('@')[0].split(':')[0];
 
       const wanted = String(args[0] || '').toLowerCase();
       const section = wanted in SECTION_ALIASES ? SECTION_ALIASES[wanted] : null;
-      const groups = section ? GROUPS.filter(g => g.key === section) : GROUPS;
+      if (section === 'admin' && !isOwner) {
+        return extra.reply(config.messages?.ownerOnly || '❌ Only the bot owner can view admin commands.');
+      }
+
+      const allGroups = buildGroups(prefix, { isOwner });
+      const groups = section ? allGroups.filter((g) => g.key === section) : allGroups;
 
       await sock.sendMessage(extra.from, {
-        text: buildCard(groups.length ? groups : GROUPS, user),
+        text: buildCard(groups.length ? groups : allGroups, user, { prefix, botName }),
         mentions: senderJid ? [senderJid] : [],
       }, { quoted: msg });
     } catch (err) {
-      await extra.reply(`❌ ${err.message}`);
+      console.error('[menu] error:', err.message);
+      await extra.reply(safeErrorMessage(err, { isOwner: Boolean(extra?.isOwner) }));
     }
   },
 
   _buildCard: buildCard,
-  _GROUPS: GROUPS,
+  _buildGroups: buildGroups,
 };

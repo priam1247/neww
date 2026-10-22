@@ -145,7 +145,7 @@ module.exports = {
         const detail = pasted || diag?.lastError?.detail || diag?.lastError?.code || '';
         if (!detail) return extra.reply('⬜ Nothing to explain yet — try `.ytdl raw <link>` first.');
         const verdict = YT.classify({ message: detail, stderr: detail });
-        return extra.reply(`🔎 Error: *${verdict.code}*\n${YT.friendlyError({ ...verdict, message: detail, stderr: detail })}`);
+        return extra.reply(`🔎 Error: *${verdict.code}*\n${YT.friendlyError({ ...verdict, message: detail, stderr: detail }, { isOwner: true })}`);
       }
 
       // ── Probes ────────────────────────────────────────────────────────────
@@ -175,7 +175,7 @@ module.exports = {
           );
         } catch (e) {
           const info = YT.classify(e);
-          return status.update(`❌ Probe failed → *${info.code}*\n${YT.friendlyError(e)}`);
+          return status.update(`❌ Probe failed → *${info.code}*\n${YT.friendlyError(e, { isOwner: true })}`);
         }
       }
 

@@ -43,6 +43,7 @@ module.exports = {
 
   botName: env.BOT_NAME || 'ZaFar Bot',
   prefix: env.PREFIX || '.',
+  cooldownMs: Math.max(0, Number(env.COMMAND_COOLDOWN_MS ?? 2000)),
   sessionName: env.SESSION_NAME || 'session',
   // Katabump has no environment-variable panel — set the real value here.
   // ZaFarBot! session string from your pairing/auth step.

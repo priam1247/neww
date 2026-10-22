@@ -405,14 +405,31 @@ function cleanName(filename) {
   return filename.replace(/\.pdf$/i, '').replace(/[_-]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+const NON_COURSE_WORDS = new Set([
+  'JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE',
+  'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER',
+  'JAN', 'FEB', 'MAR', 'APR', 'JUN', 'JUL', 'AUG', 'SEP', 'SEPT', 'OCT', 'NOV', 'DEC',
+  'ALL', 'YEAR', 'EXAM', 'EXAMS', 'PAPER', 'PAPERS', 'PART', 'SEM', 'SEMESTER',
+  'PAGE', 'LEVEL', 'BATCH', 'COHORT', 'FINAL', 'END', 'SUPP', 'DEFER', 'DEFERRED',
+  'MZUNI', 'UNIVERSITY', 'DEGREE', 'DIPLOMA',
+]);
+
 function parsePaper(filename) {
   const name  = filename.toLowerCase();
   const clean = cleanName(filename);
 
-  const codeMatch    = clean.match(/\b([A-Z]{2,6})\s*(\d{3,4})\b/i);
-  const courseCode   = codeMatch ? codeMatch[1].toUpperCase() : '';
-  const moduleNumber = codeMatch ? codeMatch[2] : '';
-  const subjectName  = SUBJECT_MAP[courseCode] || '';
+  let courseCode = '';
+  let moduleNumber = '';
+  const allMatches = [...clean.matchAll(/\b([A-Z]{2,6})\s*(\d{3,4})\b/gi)];
+  for (const m of allMatches) {
+    const candCode = m[1].toUpperCase();
+    const candNum = m[2];
+    if (NON_COURSE_WORDS.has(candCode)) continue;
+    courseCode = candCode;
+    moduleNumber = candNum;
+    break;
+  }
+  const subjectName = SUBJECT_MAP[courseCode] || '';
 
   let type = 'Examination';
   if (/supp|supplementary/i.test(name)) type = 'Supplementary';
@@ -510,18 +527,22 @@ async function browseAll() {
 async function browseCode(courseCode) {
   const files   = await searchFiles(courseCode, null, null);
   const modules = new Map();
+  const sc = courseCode.toUpperCase();
   for (const file of files) {
     const parsedP = parsed(file);
-    const sc = courseCode.toUpperCase();
     const pc = parsedP.courseCode;
-    // Only include files that actually match (prefix-aware)
-    if (pc !== sc && !pc.startsWith(sc) && !sc.startsWith(pc)) continue;
+    if (!pc) continue;
+    if (pc !== sc && !pc.startsWith(sc)) continue;
     const key = `${pc}:${parsedP.moduleNumber || 'Unknown'}`;
     if (!modules.has(key)) modules.set(key, []);
     modules.get(key).push(file);
   }
   return new Map([...modules.entries()].sort());
 }
+
+const BROWSE_CODES_PER_PAGE = 40;
+const BROWSE_MODULES_PER_PAGE = 25;
+const MAX_PAPERS_PER_QUERY = Math.max(1, Math.min(10, Number(process.env.PAPER_MAX_PER_QUERY) || 5));
 
 // ─── .paper COMMAND ───────────────────────────────────────────────────────────
 module.exports = {
@@ -532,80 +553,99 @@ module.exports = {
   usage: '.paper <code> [module] [year]',
 
   async execute(sock, msg, args, extra) {
+    const P = config.prefix || '.';
+    const botName = config.botName || 'ZaFar Bot';
     try {
 
       // ── HELP ────────────────────────────────────────────────────────────────
       if (!args.length) {
         return extra.reply(
           `📚 *Past Papers — Mzuzu University*\n\n` +
-          `*.paper <code>* — all papers for a subject\n` +
-          `*.paper <code> <module>* — specific module\n` +
-          `*.paper <code> <module> <year>* — specific year\n` +
-          `*.paper browse* — see all course codes\n` +
-          `*.paper browse <code>* — see all modules\n\n` +
+          `*${P}paper <code>* — recent papers for a subject\n` +
+          `*${P}paper <code> <module>* — specific module\n` +
+          `*${P}paper <code> <module> <year>* — specific year\n` +
+          `*${P}paper browse [page]* — see course codes\n` +
+          `*${P}paper browse <code> [page]* — see modules\n\n` +
           `*Examples*\n` +
-          `  .paper nurs 2201 2024\n` +
-          `  .paper chem 3601\n` +
-          `  .paper browse geog\n\n` +
-          `_Use .countpapers to see how many papers are in the vault_ 🎓`
+          `  ${P}paper nurs 2201 2024\n` +
+          `  ${P}paper chem 3601\n` +
+          `  ${P}paper browse geog\n\n` +
+          `_Use ${P}countpapers to see how many papers are in the vault_ 🎓`
         );
       }
 
       const mode = args[0].toLowerCase();
 
-      // ── BROWSE ──────────────────────────────────────────────────────────────
+      // ── BROWSE (paginated so replies never blow up into 60k–98k char walls) ─
       if (mode === 'browse') {
         const status = await extra.status('🔍 Searching...');
+        const arg1 = args[1] ? String(args[1]).trim() : '';
+        const arg1IsPage = /^\d+$/.test(arg1);
 
-        if (args[1]) {
-          const code    = args[1].toUpperCase();
+        if (arg1 && !arg1IsPage) {
+          const code    = arg1.toUpperCase();
+          const reqPage = Math.max(1, parseInt(args[2], 10) || 1);
           const modules = await browseCode(code);
 
           if (modules.size === 0) {
             const hint = await nearbyHint(code, null);
             return status.update(
               `😔 Sorry, no papers found for *${code}*\n` +
-              `Try *.paper browse* to see all available codes.\n` +
+              `Try *${P}paper browse* to see all available codes.\n` +
               `${hint ? `\n${hint}\n` : ''}\n` +
               `🙏 If anyone has that, please send it to help our friend!`
             );
           }
 
-          // Header uses first actual parsed code found
-          const firstKey  = [...modules.keys()][0];
-          const firstCode = firstKey.split(':')[0];
-          const subjectName = SUBJECT_MAP[firstCode] || SUBJECT_MAP[code] || '';
-          let text = `📂 *${firstCode}${subjectName ? ` — ${subjectName}` : ''}*\n`;
-          text    += `_${modules.size} module(s) in vault_\n\n`;
+          const entries = [...modules.entries()];
+          const totalPages = Math.max(1, Math.ceil(entries.length / BROWSE_MODULES_PER_PAGE));
+          const page = Math.min(reqPage, totalPages);
+          const slice = entries.slice((page - 1) * BROWSE_MODULES_PER_PAGE, page * BROWSE_MODULES_PER_PAGE);
 
-          for (const [key, modFiles] of modules) {
+          const uniqueCodes = new Set(entries.map(([k]) => k.split(':')[0]));
+          const headerCode = uniqueCodes.size === 1 ? [...uniqueCodes][0] : `${code}*`;
+          const subjectName = SUBJECT_MAP[headerCode] || SUBJECT_MAP[code] || '';
+          let text = `📂 *${headerCode}${subjectName ? ` — ${subjectName}` : ''}*\n`;
+          text    += `_${modules.size} module(s) in vault · page ${page}/${totalPages}_\n\n`;
+
+          for (const [key, modFiles] of slice) {
             const [actualCode, mod] = key.split(':');
             const sorted = sortPapers(modFiles);
             const years  = [...new Set(sorted.map(f => parsed(f).year).filter(Boolean))];
             text += `*${actualCode} ${mod}* — ${sorted.length} paper(s)  📅 ${years.join(', ') || 'various'}\n`;
-            // Hint uses the REAL code from the file, not the user's abbreviation
-            text += `  ↳ .paper ${actualCode.toLowerCase()} ${mod}\n\n`;
+            text += `  ↳ ${P}paper ${actualCode.toLowerCase()} ${mod}\n\n`;
           }
 
-          text += `_Use the command shown to download_`;
-          return status.update(`📚 Found *${modules.size} module(s)* for *${firstCode}*.\n\n${text}`);
+          if (totalPages > 1 && page < totalPages) {
+            text += `_Next page: ${P}paper browse ${code.toLowerCase()} ${page + 1}_`;
+          } else {
+            text += `_Use the command shown to download_`;
+          }
+          return status.update(`📚 Found *${modules.size} module(s)* for *${code}*.\n\n${text}`);
 
         } else {
+          const reqPage = arg1IsPage ? Math.max(1, parseInt(arg1, 10) || 1) : 1;
           const codes = await browseAll();
 
           if (codes.size === 0) {
             return status.update('❌ No papers in the vault yet.');
           }
 
-          let text = `╭─ 📚 *ZaFar Bot — Paper Vault*\n`;
-          text    += `│ ${codes.size} course code(s) available\n│\n`;
+          const entries = [...codes.entries()];
+          const totalPages = Math.max(1, Math.ceil(entries.length / BROWSE_CODES_PER_PAGE));
+          const page = Math.min(reqPage, totalPages);
+          const slice = entries.slice((page - 1) * BROWSE_CODES_PER_PAGE, page * BROWSE_CODES_PER_PAGE);
 
-          for (const [code, count] of codes) {
+          let text = `╭─ 📚 *${botName} — Paper Vault*\n`;
+          text    += `│ ${codes.size} course code(s) · page ${page}/${totalPages}\n│\n`;
+
+          for (const [code, count] of slice) {
             const name = SUBJECT_MAP[code] ? ` — ${SUBJECT_MAP[code]}` : '';
             text += `*${code}*${name}  _(${count} paper${count !== 1 ? 's' : ''})_\n`;
           }
 
-          text += `╰─ _.paper browse <code> to see modules_`;
+          const nextHint = page < totalPages ? `${P}paper browse ${page + 1} for next · ` : '';
+          text += `╰─ _${nextHint}${P}paper browse <code> for modules_`;
           return status.update(`📚 Found *${codes.size} course code(s)*.\n\n${text}`);
         }
       }
@@ -646,11 +686,11 @@ module.exports = {
       const label      = [courseCode, moduleNumber].filter(Boolean).join(' ');
       const summary    = `📚 Found *${sorted.length} paper${sorted.length !== 1 ? 's' : ''}* for *${label}*${yearsFound.length ? ` (${yearsFound.join(', ')})` : ''}.`;
 
-      if (sorted.length > 10) {
+      if (sorted.length > 15 && !moduleNumber && !yearArgs.length) {
         return status.update(
-          `${summary}\n\n_Too many to send — narrow your search:_\n` +
-          `  .paper ${courseCode.toLowerCase()} ${moduleNumber || '[module]'} [year]\n` +
-          `  .paper browse ${courseCode.toLowerCase()}`
+          `${summary}\n\n_Too many to send at once — narrow your search:_\n` +
+          `  ${P}paper ${courseCode.toLowerCase()} ${moduleNumber || '[module]'} [year]\n` +
+          `  ${P}paper browse ${courseCode.toLowerCase()}`
         );
       }
 
@@ -667,12 +707,13 @@ module.exports = {
         return status.update('♻️ These papers were already sent in this chat within the last 3 days — check earlier messages.');
       }
 
-      // No size cap (PAPER_MAX_SEND_MB=0): every paper is sent, streamed to
-      // disk first so RAM stays flat whatever the PDF size.
-      const sendable = [], tooLarge = [];
+      const allSendable = [], tooLarge = [];
       for (const file of toSend) {
-        (MAX_SEND_BYTES && (file.size || 0) > MAX_SEND_BYTES ? tooLarge : sendable).push(file);
+        (MAX_SEND_BYTES && (file.size || 0) > MAX_SEND_BYTES ? tooLarge : allSendable).push(file);
       }
+      // Cap papers sent per query (newest first: `sortPapers` sorts ascending by year, so take the latest N)
+      const cappedCount = allSendable.length > MAX_PAPERS_PER_QUERY ? allSendable.length - MAX_PAPERS_PER_QUERY : 0;
+      const sendable = cappedCount > 0 ? allSendable.slice(-MAX_PAPERS_PER_QUERY) : allSendable;
 
       await status.update(summary);
 
@@ -683,55 +724,64 @@ module.exports = {
         const names = tooLarge.map(f => `*${cleanName(f.name)}* (${formatSize(f.size)})`).join(', ');
         await extra.reply(`_⚠️ ${tooLarge.length} paper(s) skipped — over ${Math.round(MAX_SEND_BYTES / 1048576)} MB:_ ${names}`);
       }
+      if (cappedCount > 0) {
+        await extra.reply(
+          `_📎 Sending the ${sendable.length} most recent paper(s) (${cappedCount} older match(es) omitted — specify a year like \`${P}paper ${courseCode.toLowerCase()}${moduleNumber ? ` ${moduleNumber}` : ''} 2022\` for older papers)._`
+        );
+      }
       if (sendable.length === 0) {
         return extra.reply('❌ Nothing sent — every match exceeds the configured send limit.');
       }
 
-      // Download everything first (parallel, streamed to disk), then send in order.
-      const jobs = await Promise.all(sendable.map(async (file) => {
-        try {
-          const tmp = await downloadFileToDisk(file);
-          return { file, tmp };
-        } catch (e) {
-          return { file, error: e };
-        }
-      }));
+      // Download & send sequentially in small batches (2 at a time) so temp disk stays tiny.
+      for (let i = 0; i < sendable.length; i += 2) {
+        const chunk = sendable.slice(i, i + 2);
+        const jobs = await Promise.all(chunk.map(async (file) => {
+          try {
+            const tmp = await downloadFileToDisk(file);
+            return { file, tmp };
+          } catch (e) {
+            return { file, error: e };
+          }
+        }));
 
-      for (const job of jobs) {
-        if (job.error) {
-          await extra.reply(`⚠️ Could not download *${cleanName(job.file.name)}*: ${job.error.message}`);
-          continue;
-        }
-        try {
-          const { type, year: fileYear, monthDisplay, subjectName: sn } = parsed(job.file);
+        for (const job of jobs) {
+          if (job.error) {
+            console.warn('[paper] download failed:', job.file.name, job.error.message);
+            await extra.reply(`⚠️ Could not download *${cleanName(job.file.name)}* right now.`);
+            continue;
+          }
+          try {
+            const { type, year: fileYear, monthDisplay, subjectName: sn } = parsed(job.file);
 
-          const metaLine = [sn, type, [monthDisplay, fileYear].filter(Boolean).join(' ')].filter(Boolean).join(' · ');
-          let caption = metaLine ? `╭─ ${metaLine}\n` : '';
-          caption += `╰─ ZaFar Bot`;
+            const metaLine = [sn, type, [monthDisplay, fileYear].filter(Boolean).join(' ')].filter(Boolean).join(' · ');
+            let caption = metaLine ? `╭─ ${metaLine}\n` : '';
+            caption += `╰─ ${botName}`;
 
-          // Stream from disk: a 30 MB PDF never has to sit in RAM (the old
-          // readFileSync doubled the memory cost of every paper sent).
-          await sock.sendMessage(extra.from, {
-            document: { url: job.tmp },
-            fileName: job.file.name,
-            mimetype: 'application/pdf',
-            caption,
-          }, { quoted: msg });
+            await sock.sendMessage(extra.from, {
+              document: { url: job.tmp },
+              fileName: job.file.name,
+              mimetype: 'application/pdf',
+              caption,
+            }, { quoted: msg });
 
-          database.logPaperSent(extra.from, job.file.id);
-        } catch (fileErr) {
-          await extra.reply(`⚠️ Could not send *${cleanName(job.file.name)}*: ${fileErr.message}`);
-        } finally {
-          deleteTempFile(job.tmp);
+            database.logPaperSent(extra.from, job.file.id);
+          } catch (fileErr) {
+            console.warn('[paper] send failed:', job.file.name, fileErr.message);
+            await extra.reply(`⚠️ Could not send *${cleanName(job.file.name)}* right now.`);
+          } finally {
+            deleteTempFile(job.tmp);
+          }
         }
       }
 
     } catch (error) {
+      console.error('[paper] command error:', error.message);
       await react(sock, msg, '❌');
-      if (error.message.includes('not configured') || error.message.includes('not set')) {
-        return extra.reply('⚙️ *Papers feature not configured.* Ask the bot owner to set the DRIME_API_TOKEN env var.');
+      if (error.message && (error.message.includes('not configured') || error.message.includes('not set'))) {
+        return extra.reply('⚙️ *Papers feature not configured.* Ask the bot owner to configure the paper vault.');
       }
-      return extra.reply(`❌ Error: ${error.message}`);
+      return extra.reply('❌ Could not access the paper vault right now. Please try again in a moment.');
     }
   },
 };
@@ -747,6 +797,8 @@ const countpapersCmd = {
   usage: '.countpapers',
 
   async execute(sock, msg, args, extra) {
+    const P = config.prefix || '.';
+    const botName = config.botName || 'ZaFar Bot';
     try {
       const status = await extra.status('🔍 Counting papers...');
       const client = drimeClient();
@@ -762,16 +814,17 @@ const countpapersCmd = {
 
       return status.update(
         `📚 Found *${count} paper${count !== 1 ? 's' : ''}* in the vault.\n\n` +
-        `╭─ 🗄️ *ZaFar Bot — Paper Vault*\n` +
+        `╭─ 🗄️ *${botName} — Paper Vault*\n` +
         `│ ${count} paper${count !== 1 ? 's' : ''} in the vault\n` +
-        `╰─ _.paper browse to explore them_`
+        `╰─ _${P}paper browse to explore them_`
       );
     } catch (error) {
+      console.error('[countpapers] error:', error.message);
       await react(sock, msg, '❌');
-      if (error.message.includes('not configured') || error.message.includes('not set')) {
-        return extra.reply('⚙️ *Papers feature not configured.* Ask the bot owner to set the DRIME_API_TOKEN env var.');
+      if (error.message && (error.message.includes('not configured') || error.message.includes('not set'))) {
+        return extra.reply('⚙️ *Papers feature not configured.* Ask the bot owner to configure the paper vault.');
       }
-      return extra.reply(`❌ Error: ${error.message}`);
+      return extra.reply('❌ Could not count vault papers right now. Please try again shortly.');
     }
   },
 };
@@ -796,16 +849,21 @@ const refreshpapersCmd = {
         `✅ Vault refreshed in ${secs}s — *${files.length} papers* (${source}).`
       );
     } catch (error) {
+      console.error('[refreshpapers] error:', error.message);
       await react(sock, msg, '❌');
-      if (error.message.includes('not configured') || error.message.includes('not set')) {
-        return extra.reply('⚙️ *Papers feature not configured.* Ask the bot owner to set the DRIME_API_TOKEN env var.');
+      if (error.message && (error.message.includes('not configured') || error.message.includes('not set'))) {
+        return extra.reply('⚙️ *Papers feature not configured.* Set DRIME_API_TOKEN in .env.');
       }
-      return extra.reply(`❌ Error: ${error.message}`);
+      return extra.reply('❌ Could not refresh the paper vault right now. Check server logs for details.');
     }
   },
 };
 
-module.exports = [module.exports, countpapersCmd, refreshpapersCmd];
+module.exports = [
+  Object.assign(module.exports, { _parsePaper: parsePaper, _browseAll: browseAll, _browseCode: browseCode, MAX_PAPERS_PER_QUERY }),
+  countpapersCmd,
+  refreshpapersCmd,
+];
 
 // ─── BOOT PREFETCH ────────────────────────────────────────────────────────────
 // Index any on-disk snapshot instantly at load, then refresh in the background

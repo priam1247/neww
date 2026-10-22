@@ -89,7 +89,7 @@ const execute = async (sock, msg, args, extra) => {
 
     if (!results.length) {
       const engine = YT.resolveCommand() || await YT.ensureInstalled();
-      if (!engine) return say(YT.friendlyError({ code: 'NO_YTDLP' }));
+      if (!engine) return say(YT.friendlyError({ code: 'NO_YTDLP' }, { isOwner: Boolean(extra?.isOwner) }));
       return say('❌ No results found for that search.');
     }
 
@@ -100,16 +100,9 @@ const execute = async (sock, msg, args, extra) => {
         header: `🔎 *Results for "${query}"*`,
         note: `Reply with a number (1-${results.length}) to download in ${height}p, or *cancel*.\n_Next time, add --first to skip this step._`,
       });
-      if (results[0].thumbnail) {
-        await sock.sendMessage(chatId, { image: { url: results[0].thumbnail }, caption: listText }, { quoted: msg })
-          .catch(() => say(listText));
-      } else {
-        await say(listText);
-      }
-
-      selections.offer({
-        chatId,
-        sender: extra?.sender || msg.key.participant || chatId,
+      await selections.sendTextPrompt(sock, msg, extra, {
+        text: listText,
+        image: results[0].thumbnail || null,
         items: results,
         label: 'ytv',
         ttlMs: Math.max(1, Number(config.search?.ttlMinutes) || 5) * 60 * 1000,
@@ -260,11 +253,14 @@ const execute = async (sock, msg, args, extra) => {
     const merged = attempts.length ? attempts : (err.attempts || info.attempts);
     // one short line on failure, never a wall of engine detail
     if (err.code === 'TOO_BIG') {
-      await say(`❌ Too large even at the lowest quality — try \`.ytv <link> 360\` or a shorter video.`);
+      await say(`❌ Too large even at the lowest quality — try \`${config.prefix}ytv <link> 360\` or a shorter video.`);
     } else if (err.code === 'NOT_ENOUGH_DISK') {
-      await say(`❌ ${err.message}`);
+      const { safeErrorMessage } = require('../../utils/userErrors');
+      await say(safeErrorMessage(err, { isOwner: Boolean(extra?.isOwner) }));
     } else {
-      const lines = String(YT.friendlyError(err) + YT.attemptsSummary(merged)).split('\n').filter(Boolean);
+      const isOwner = Boolean(extra?.isOwner);
+      const tail = isOwner ? YT.attemptsSummary(merged) : '';
+      const lines = String(YT.friendlyError(err, { isOwner }) + tail).split('\n').filter(Boolean);
       await say(lines.slice(0, 3).join('\n'));
     }
     await react('❌');

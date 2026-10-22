@@ -77,11 +77,11 @@ async function react(sock, msg, emoji) {
 module.exports = [
 
   {
-    name: 'update',
-    aliases: ['status', 'botstatus'],
+    name: 'status',
+    aliases: ['update', 'botstatus'],
     category: 'admin',
     description: 'Show bot stats',
-    usage: '.update',
+    usage: '.status',
     ownerOnly: true,
     async execute(sock, msg, args, extra) {
       await react(sock, msg, '🔄');

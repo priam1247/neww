@@ -21,10 +21,11 @@ const selections = require('../../utils/selections');
 const host = require('../../utils/movieHost');
 const { getTempDir } = require('../../utils/tempManager');
 const diskSpace = require('../../utils/diskSpace');
+const { safeErrorMessage } = require('../../utils/userErrors');
 const logger = require('../../utils/logger');
 const log = logger('series');
 
-const QUALITY_RX = /^(480|720|1080|2160|4k)$/i;
+const QUALITY_RX = /^(?:(480|720|1080|2160)p?|4k)$/i;
 const MOVIES = () => config.movies || {};
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -32,105 +33,225 @@ const help = (P) =>
   `📺 *Series*\n\n` +
   `*${P}series <title> s01e03 [quality]*  — one episode\n` +
   `*${P}series <title> s01 1-6 [quality]*  — episode range\n` +
-  `*${P}series <title> s01 full [quality]* — season pack\n\n` +
-  `e.g.  ${P}series breaking bad s01e03 720\n` +
-  `      ${P}series the boys s02 1-4\n\n` +
+  `*${P}series <title> s01 full [quality]* — season pack\n` +
+  `*${P}series <title> 2 [quality]*        — season 2 options\n\n` +
+  `e.g.  ${P}series Full House s01e03 720\n` +
+  `      ${P}series 9-1-1 s02 1-4\n` +
+  `      ${P}series the boys 2\n\n` +
   `qualities: 480 · 720 · 1080 · 2160 (4k)`;
 
 function parseArgs(args) {
-  const rest = [];
-  let quality = MOVIES().defaultQuality || host.defaultQuality();
-  let explicitQuality = false;
-
-  for (const a of args) {
-    if (QUALITY_RX.test(a)) { quality = /^4k$/i.test(a) ? 2160 : Number(a); explicitQuality = true; continue; }
-    rest.push(a);
-  }
-
-  const text = rest.join(' ').trim();
-
-  const ep = (/\bs(\d{1,2})[\s._-]?e(\d{1,3})\b/i.exec(text))
-    || (/\b(\d{1,2})x(\d{2,3})\b/.exec(text));
-  const range = /\b(\d{1,3})\s*-\s*(\d{1,3})\b/.exec(text);
-  const seasonOnly = /\bs(?:eason)?\s*(\d{1,2})\b/i.exec(text);
-  const full = /\bfull\b/i.test(text);
-
-  let season = null;
-  let from = 1;
-  let to = 1;
-  let pack = false;
-
-  if (ep) {
-    season = Number(ep[1]);
-    from = to = Number(ep[2]);
-  } else if (seasonOnly) {
-    season = Number(seasonOnly[1]);
-    if (range) { from = Number(range[1]); to = Number(range[2]); }
-    else { pack = true; }
-  } else if (range) {
-    season = 1;
-    from = Number(range[1]);
-    to = Number(range[2]);
-  } else {
-    season = 1;
-    from = to = 1;
-  }
-
-  if (from > to) { const t = from; from = to; to = t; }
-  if (full) pack = true;
-
-  // optional year, same rule as .movie (keep a title-only year like "1923")
-  let year = null;
-  let cleaned = text;
-  for (const y of [...text.matchAll(/\b((?:19|20)\d{2})\b/g)].map(m => m[1]).reverse()) {
-    const without = text.replace(new RegExp(`\\b${y}\\b`), '').replace(/\s+/g, ' ').trim();
-    if (without && !/^s\d{1,2}/i.test(without) && without.replace(/\b\d{1,3}\s*-\s*\d{1,3}\b/g, '').trim()) {
-      year = y;
-      cleaned = without;
-      break;
+  const rawTokens = (args || []).map((a) => String(a || '').trim()).filter(Boolean);
+  const tokens = [];
+  for (let i = 0; i < rawTokens.length; i++) {
+    if (
+      /^\d{1,3}$/.test(rawTokens[i]) &&
+      rawTokens[i + 1] === '-' &&
+      /^\d{1,3}$/.test(rawTokens[i + 2] || '')
+    ) {
+      tokens.push(`${rawTokens[i]}-${rawTokens[i + 2]}`);
+      i += 2;
+    } else {
+      tokens.push(rawTokens[i]);
     }
   }
 
-  const title = cleaned
-    .replace(/\bs\d{1,2}[\s._-]?e\d{1,3}\b/gi, '')
-    .replace(/\b\d{1,2}x\d{2,3}\b/gi, '')
-    .replace(/\b\d{1,3}\s*-\s*\d{1,3}\b/g, '')
-    .replace(/\bs(?:eason)?\s*\d{1,2}\b/gi, '')
-    .replace(/\b(full|season|pack)\b/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  let quality = MOVIES().defaultQuality || host.defaultQuality();
+  let explicitQuality = false;
 
-  return { title, year, season, from, to, pack, quality, explicitQuality };
+  if (tokens.length >= 2 && QUALITY_RX.test(tokens[tokens.length - 1])) {
+    const qTok = tokens.pop();
+    quality = /^4k$/i.test(qTok) ? 2160 : Number(qTok.replace(/p$/i, ''));
+    explicitQuality = true;
+  }
+
+  let season = 1;
+  let from = 1;
+  let to = 1;
+  let pack = false;
+  let explicitPack = false;
+  let bareNumber = null;
+  let hasTarget = false;
+
+  const consumeTailSeason = ({ allowBare = true } = {}) => {
+    if (tokens.length < 2) return null;
+    const last = tokens[tokens.length - 1];
+    const mS = /^s(\d{1,2})$/i.exec(last);
+    if (mS) {
+      tokens.pop();
+      return { season: Number(mS[1]), bare: false };
+    }
+    if (tokens.length >= 3 && /^season$/i.test(tokens[tokens.length - 2]) && /^\d{1,2}$/.test(last)) {
+      const n = Number(tokens.pop());
+      tokens.pop();
+      return { season: n, bare: false };
+    }
+    const mSeasonJoined = /^season(\d{1,2})$/i.exec(last);
+    if (mSeasonJoined) {
+      tokens.pop();
+      return { season: Number(mSeasonJoined[1]), bare: false };
+    }
+    if (allowBare && /^\d{1,2}$/.test(last)) {
+      const n = Number(last);
+      if (n >= 1 && n <= 35) {
+        tokens.pop();
+        return { season: n, bare: true };
+      }
+    }
+    return null;
+  };
+
+  if (tokens.length >= 3 && /^(?:full|pack)$/i.test(tokens[tokens.length - 1])) {
+    const saved = tokens.pop();
+    const s = consumeTailSeason({ allowBare: true });
+    if (s) {
+      season = s.season;
+      pack = true;
+      explicitPack = true;
+      hasTarget = true;
+    } else {
+      tokens.push(saved);
+    }
+  }
+
+  if (!hasTarget && tokens.length >= 2) {
+    const last = tokens[tokens.length - 1];
+    const mSE = /^s(\d{1,2})[\s._-]?e(\d{1,3})(?:-e?(\d{1,3}))?$/i.exec(last)
+      || /^(\d{1,2})x(\d{1,3})(?:-(\d{1,3}))?$/i.exec(last);
+    if (mSE) {
+      tokens.pop();
+      season = Number(mSE[1]);
+      from = Number(mSE[2]);
+      to = mSE[3] ? Number(mSE[3]) : from;
+      hasTarget = true;
+    }
+  }
+
+  if (!hasTarget && tokens.length >= 2) {
+    const last = tokens[tokens.length - 1];
+    const mEp = /^e(?:p(?:isode)?)?(\d{1,3})$/i.exec(last);
+    if (mEp) {
+      tokens.pop();
+      from = to = Number(mEp[1]);
+      const s = consumeTailSeason({ allowBare: true });
+      if (s) season = s.season;
+      hasTarget = true;
+    } else if (
+      tokens.length >= 3 &&
+      /^ep(?:isode)?$/i.test(tokens[tokens.length - 2]) &&
+      /^\d{1,3}$/.test(last)
+    ) {
+      from = to = Number(tokens.pop());
+      tokens.pop();
+      const s = consumeTailSeason({ allowBare: true });
+      if (s) season = s.season;
+      hasTarget = true;
+    }
+  }
+
+  if (!hasTarget && tokens.length >= 2) {
+    const mRange = /^(\d{1,3})-(\d{1,3})$/.exec(tokens[tokens.length - 1]);
+    if (mRange) {
+      tokens.pop();
+      from = Number(mRange[1]);
+      to = Number(mRange[2]);
+      const s = consumeTailSeason({ allowBare: true });
+      if (s) season = s.season;
+      hasTarget = true;
+    }
+  }
+
+  if (!hasTarget && tokens.length >= 2) {
+    const s = consumeTailSeason({ allowBare: true });
+    if (s) {
+      season = s.season;
+      pack = true;
+      hasTarget = true;
+      if (s.bare) bareNumber = s.season;
+    }
+  }
+
+  if (from > to) { const t = from; from = to; to = t; }
+
+  let year = null;
+  if (tokens.length >= 2) {
+    const last = tokens[tokens.length - 1].replace(/^[([ ]+|[)\]]+$/g, '');
+    if (/^(?:19|20)\d{2}$/.test(last)) {
+      year = last;
+      tokens.pop();
+    }
+  }
+
+  const title = tokens.join(' ').replace(/\s+/g, ' ').trim();
+
+  return {
+    title,
+    year,
+    season,
+    from,
+    to,
+    pack,
+    explicitPack,
+    bareNumber,
+    hasTarget,
+    quality,
+    explicitQuality,
+  };
+}
+
+async function resolveTargetAndQuality(sock, msg, extra, meta, job) {
+  if (!job.bareNumber) {
+    return askQuality(sock, msg, extra, meta, job);
+  }
+  const n = job.bareNumber;
+  const showTitle = `${meta.title}${meta.year ? ` (${meta.year})` : ''}`;
+  const choices = [
+    { label: `Season ${n} · Episode 1 (S${pad(n)}E01)`, patch: { season: n, from: 1, to: 1, pack: false, bareNumber: null } },
+    { label: `Season ${n} · Episodes 1–4`, patch: { season: n, from: 1, to: 4, pack: false, bareNumber: null } },
+    { label: `Season ${n} · Full season pack`, patch: { season: n, from: 1, to: 1, pack: true, explicitPack: true, bareNumber: null } },
+    { label: `Season 1 · Episode ${n} (S01E${pad(n)})`, patch: { season: 1, from: n, to: n, pack: false, bareNumber: null } },
+  ];
+  const header = `📺 *${showTitle}*\nWhat would you like to download?`;
+  const optionLabels = choices.map((c) => c.label);
+  const lines = optionLabels.map((lbl, i) => `*${i + 1}.* ${lbl}`);
+
+  return selections.sendPollOrText(sock, msg, extra, {
+    pollName: header,
+    optionLabels,
+    fallbackText: `${header}\n\n${lines.join('\n')}\n\n_reply with a number_`,
+    items: choices,
+    label: 'series-target',
+    ttlMs: 5 * 60 * 1000,
+    run: (sock2, msg2, extra2, chosen) =>
+      askQuality(sock2, msg2, extra2, meta, { ...job, ...chosen.patch }),
+  });
 }
 
 async function offerChoices(sock, msg, extra, matches, job) {
-  const lines = matches.map((m, i) => {
+  const optionLabels = matches.map((m) => {
     const year = m.year ? ` (${m.year})` : '';
     const rating = Number(m.rating) ? ` ⭐${m.rating}` : '';
-    return `*${i + 1}.* ${m.title}${year}${rating}`;
+    return `${m.title}${year}${rating}`;
   });
-  const text = `📺 *${matches.length} series* for *${job.title}*\n\n${lines.join('\n')}\n\n_reply with a number_`;
+  const lines = optionLabels.map((lbl, i) => `*${i + 1}.* ${lbl}`);
+  const header = `📺 *${matches.length} series* for *${job.title}*`;
+  const fallbackText = `${header}\n\n${lines.join('\n')}\n\n_reply with a number_`;
 
-  if (matches[0]?.poster) {
-    await sock.sendMessage(extra.from, { image: { url: matches[0].poster }, caption: text }, { quoted: msg })
-      .catch(() => sock.sendMessage(extra.from, { text }, { quoted: msg }));
-  } else {
-    await sock.sendMessage(extra.from, { text }, { quoted: msg });
-  }
-
-  selections.offer({
-    chatId: extra.from,
-    sender: extra.sender || msg.key.participant || extra.from,
+  await selections.sendPollOrText(sock, msg, extra, {
+    pollName: `${header}\nTap a series (or reply with its number):`,
+    optionLabels,
+    fallbackText,
+    fallbackImage: matches[0]?.poster || null,
     items: matches,
     label: 'series',
     ttlMs: 5 * 60 * 1000,
-    run: (sock2, msg2, extra2, item) => askQuality(sock2, msg2, extra2, item, { ...job }),
+    run: (sock2, msg2, extra2, item) => resolveTargetAndQuality(sock2, msg2, extra2, item, { ...job }),
   });
 }
 
 const fmtSize = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`);
 
-/** Same quality menu as .movie, scoped to one episode. */
+/** Same poll + numbered fallback quality menu as .movie, scoped to one episode/season. */
 async function askQuality(sock, msg, extra, meta, job) {
   const react = (emoji) => sock.sendMessage(extra.from, { react: { text: emoji, key: msg.key } }).catch(() => {});
   if (job.explicitQuality) return deliver(sock, msg, extra, meta, job);
@@ -150,21 +271,25 @@ async function askQuality(sock, msg, extra, meta, job) {
   if (options.length === 1) { job.quality = options[0].quality; return deliver(sock, msg, extra, meta, job); }
 
   const ids = options.map((o) => `q${o.quality}`);
+  const items = options.map((o) => ({ ...o, meta }));
   const title = `${meta.title} S${pad(season)}${job.pack ? ' (pack)' : `E${pad(episode)}`}`;
   const header = `📺 *${title}*\nChoose the quality:`;
+  const optionLabels = options.map((o) => `${o.quality}p${o.sizeMB ? ` · ~${fmtSize(o.sizeMB)}` : ''}`);
+  const lines = optionLabels.map((lbl, i) => `*${i + 1}.* ${lbl}`);
 
-  selections.offer({
-    chatId: extra.from,
-    sender: extra.sender || msg.key.participant || extra.from,
-    items: options.map((o) => ({ ...o, meta })),
+  await selections.sendPollOrText(sock, msg, extra, {
+    pollName: header,
+    optionLabels,
+    fallbackText: `${header}\n\n${lines.join('\n')}\n\n_reply with a number_`,
+    items,
     ids,
     label: 'quality',
     ttlMs: 5 * 60 * 1000,
-    run: (sock2, msg2, extra2, item) => { job.quality = item.quality; return deliver(sock2, msg2, extra2, meta, job); },
+    run: (sock2, msg2, extra2, item) => {
+      job.quality = item.quality;
+      return deliver(sock2, msg2, extra2, meta, job);
+    },
   });
-
-  const lines = options.map((o, i) => `*${i + 1}.* ${o.quality}p${o.sizeMB ? ` · ~${fmtSize(o.sizeMB)}` : ''}`);
-  await sock.sendMessage(extra.from, { text: `${header}\n\n${lines.join('\n')}\n\n_reply with a number_` }, { quoted: msg });
 }
 
 /** Send one finished file through the bot's delivery path (document, like .song). */
@@ -282,7 +407,13 @@ async function deliverSeasonPack(sock, msg, extra, meta, job) {
   } catch (e) {
     log.error(`${meta.title} S${pad(season)} pack · ${e.code || 'FAIL'} · ${String(e.message || '').split('\n')[0]}`);
     await react('❌');
-    return say(`❌ *${meta.title}* S${pad(season)} pack\n${String(e.message || '').split('\n')[0]}`);
+    if (e.code === 'NOT_ENOUGH_DISK') {
+      return say(safeErrorMessage(e, { isOwner: Boolean(extra?.isOwner) }));
+    }
+    return say(
+      `❌ No full season pack found for *${meta.title}* S${pad(season)}.\n` +
+      `💡 Try downloading episodes instead: \`${config.prefix}series ${meta.title.toLowerCase()} s${pad(season)} 1-4\``
+    );
   } finally {
     if (packFile) await host.release(packFile).catch(() => false);
     packReservation?.release?.();
@@ -415,7 +546,10 @@ async function deliver(sock, msg, extra, meta, job) {
       sent++;
     } catch (e) {
       log.error(`${meta.title} ${tag} · ${e.code || 'FAIL'} · ${e.message}`);
-      failures.push(`${tag}: ${String(e.message || '').split('\n')[0]}`);
+      const reason = e.code === 'NOT_ENOUGH_DISK'
+        ? 'server storage busy'
+        : (e.code === 'SHORT' ? 'only trailer/clip available' : 'no playable source');
+      failures.push(`${tag}: ${reason}`);
     } finally {
       if (epFile) await host.release(epFile).catch(() => false);
       epReservation?.release?.();
@@ -451,13 +585,15 @@ module.exports = {
     const job = parseArgs(args);
     if (!job.title) return extra.reply(help(P));
 
-    // no episode/season marker at all → explain instead of guessing
-    if (!/\bs\d{1,2}/i.test(args.join(' ')) && !/\d{1,3}\s*-\s*\d{1,3}/.test(args.join(' '))) {
-      return extra.reply(`❓ Which episode?\n\n${help(P)}`);
-    }
-
-    if (!MOVIES().tmdbKey) {
-      return extra.reply('❌ Series need a TMDB API key — set TMDB_API_KEY in config.js / the environment.');
+    // No episode/season marker at all → ask clearly (preserving titles like "Full House" & "9-1-1")
+    if (!job.hasTarget) {
+      return extra.reply(
+        `❓ Which season or episode of *${job.title}*?\n\n` +
+        `Try:\n` +
+        `• \`${P}series ${job.title} s01e01\`\n` +
+        `• \`${P}series ${job.title} s01 1-4\`\n` +
+        `• \`${P}series ${job.title} 1\``
+      );
     }
 
     try {
@@ -465,15 +601,19 @@ module.exports = {
       if (!matches.length) return extra.reply(`❌ No series found for *${job.title}*.`);
       job.matches = matches;
 
-      if (matches.length === 1) return askQuality(sock, msg, extra, matches[0], job);
+      if (matches.length === 1) return resolveTargetAndQuality(sock, msg, extra, matches[0], job);
       return offerChoices(sock, msg, extra, matches, job);
     } catch (e) {
       log.error(`${job.title || 'search'} · ${e.code || 'FAIL'} · ${String(e.message || '').split('\n')[0]}`);
-      return extra.reply(`❌ ${String(e.message || '').split('\n')[0]}`);
+      return extra.reply(safeErrorMessage(e, {
+        isOwner: Boolean(extra?.isOwner),
+        fallback: '❌ Could not search series sources right now. Please try again shortly.',
+      }));
     }
   },
 
   _parseArgs: parseArgs,
   _askQuality: askQuality,
+  _resolveTargetAndQuality: resolveTargetAndQuality,
   _deliver: deliver,
 };

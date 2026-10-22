@@ -68,7 +68,8 @@ const providersCommand = {
 
       return extra.reply(text);
     } catch (e) {
-      return extra.reply(`❌ ${String(e.message || '').split('\n')[0]}`);
+      console.error('[providers] error:', e.message);
+      return extra.reply('❌ Could not read provider status right now.');
     }
   },
 };
@@ -118,7 +119,8 @@ const statusCommand = {
 
       return extra.reply(text);
     } catch (e) {
-      return extra.reply(`❌ ${String(e.message || '').split('\n')[0]}`);
+      console.error('[moviestatus] error:', e.message);
+      return extra.reply('❌ Could not read movie engine counters right now.');
     }
   },
 };

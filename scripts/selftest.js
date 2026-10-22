@@ -322,16 +322,23 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     catch (e) { caught = e; }
     assert.ok(caught, 'expected a failure');
     assert.strictEqual(YT.classify(caught).code, 'BOT_CHECK');
-    assert.ok(/cookies/i.test(YT.friendlyError(caught)), 'hint does not mention cookies');
-    assert.ok(!/not available in this server's country/i.test(YT.friendlyError(caught)), 'message blames the region');
+    // Regular users get a plain anti-bot explanation without owner-only commands;
+    // owners get the .cookies / .ytdl admin hints.
+    assert.ok(!/\.cookies|\.ytdl/i.test(YT.friendlyError(caught)), 'admin hint leaked to regular user');
+    assert.ok(/anti-bot|automated access/i.test(YT.friendlyError(caught)), 'missing plain anti-bot message');
+    assert.ok(/cookies/i.test(YT.friendlyError(caught, { isOwner: true })), 'owner hint missing cookies');
+    assert.ok(!/not available in the server's region/i.test(YT.friendlyError(caught)), 'message blames the region');
   });
 
-  await test('geo-block IS reported as a region block', async () => {
+  await test('geo-block IS reported as a plain region block without admin hints for users', async () => {
     process.env.FAKE_YTDLP = 'geo';
     let caught = null;
     try { await YT.downloadAudio('https://www.youtube.com/watch?v=dQw4w9WgXcQ', { maxMB: 100, outBase: path.join(sandbox, 'a3'), deadlineMs: 20000 }); }
     catch (e) { caught = e; }
     assert.strictEqual(YT.classify(caught).code, 'GEO_BLOCK');
+    assert.ok(/not available in the server's region/i.test(YT.friendlyError(caught)));
+    assert.ok(!/\.ytdl/i.test(YT.friendlyError(caught)), 'leaked .ytdl proxy hint to regular user');
+    assert.ok(/\.ytdl proxy/i.test(YT.friendlyError(caught, { isOwner: true })), 'owner geo-block hint missing');
   });
 
   await test('a dead network is reported as NETWORK', async () => {
@@ -560,11 +567,16 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     providersMod.resolveMedia = async () => { throw new Error('all providers failed'); };
 
     const sock = mockSock();
-    await songCmd.execute(sock, mockMsg('.song https://youtu.be/dQw4w9WgXcQ'), ['https://youtu.be/dQw4w9WgXcQ'], makeExtra(sock));
+    await songCmd.execute(sock, mockMsg('.song https://youtu.be/dQw4w9WgXcQ'), ['https://youtu.be/dQw4w9WgXcQ'], { ...makeExtra(sock), isOwner: false });
 
-    const error = sock.sent.map(textOf).find((t) => /cookies/i.test(t));
-    assert.ok(error, `no cookies hint in: ${JSON.stringify(sock.sent.map(textOf))}`);
-    assert.ok(!/not available in this server's country/i.test(error), 'blamed the region instead');
+    const error = sock.sent.map(textOf).find((t) => /anti-bot|automated access/i.test(t));
+    assert.ok(error, `no bot-check explanation in: ${JSON.stringify(sock.sent.map(textOf))}`);
+    assert.ok(!/\.cookies|\.ytdl/i.test(error), `leaked admin hint to regular user: ${error}`);
+    assert.ok(!/not available in the server's region/i.test(error), 'blamed the region instead');
+
+    const ownerSock = mockSock();
+    await songCmd.execute(ownerSock, mockMsg('.song https://youtu.be/dQw4w9WgXcQ'), ['https://youtu.be/dQw4w9WgXcQ'], makeExtra(ownerSock));
+    assert.ok(ownerSock.sent.map(textOf).some((t) => /cookies/i.test(t)), 'owner missing cookies hint');
   });
 
   await test('.ytv sends the video and honours the quality argument', async () => {
@@ -1968,13 +1980,14 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
         selections.clear('q@s.whatsapp.net', 'u@s.whatsapp.net');
       }
       assert.ok(!sent.some((m) => Array.isArray(m.sections)), 'broken WhatsApp sections list message was sent');
-      const body = sent.map((m) => m.text || m.poll?.name || (m.poll?.values || []).join('\n')).join('\n');
+      assert.ok(sent.some((m) => m.poll && Array.isArray(m.poll.values)), 'quality picker did not send a WhatsApp poll');
+      const body = sent.map((m) => m.text || [m.poll?.name, ...(m.poll?.values || [])].filter(Boolean).join('\n')).join('\n');
       assert.match(body, /1080p/);
       assert.match(body, /2\.1 GB/);
       assert.match(body, /720p/);
     });
 
-    await test('.movie falls back to a numbered list when the client rejects lists', async () => {
+    await test('.movie falls back to a numbered list when the client rejects polls', async () => {
       const original = engine.qualityOptions;
       engine.qualityOptions = async () => ({
         options: [
@@ -1985,7 +1998,7 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       const sent = [];
       const sock = {
         sendMessage: async (_jid, content) => {
-          if (Array.isArray(content.sections)) throw new Error('list messages unsupported');
+          if (content.poll) throw new Error('polls unsupported');
           sent.push(content);
           return { key: { id: 'k' } };
         },
@@ -2001,6 +2014,215 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       const text = sent.map((m) => m.text || '').join('\n');
       assert.match(text, /1\.\*?\s*1080p/);
       assert.match(text, /480p/);
+    });
+
+    await test('Phase 3: encrypted WhatsApp poll votes decrypt & trigger choice, while quoting unrelated messages is ignored', async () => {
+      const crypto = require('crypto');
+      const { proto } = require('@whiskeysockets/baileys');
+      const { hmacSign, aesEncryptGCM } = require('@whiskeysockets/baileys/lib/Utils/crypto');
+
+      let chosen = null;
+      let pollPayload = null;
+      const botJid = '265894016453@s.whatsapp.net';
+      const voterJid = '265997564836@s.whatsapp.net';
+      const sock = {
+        user: { id: '265894016453:12@s.whatsapp.net' },
+        sendMessage: async (_jid, content) => {
+          pollPayload = content.poll;
+          return { key: { id: 'POLL_MSG_1', remoteJid: 'grp@g.us' } };
+        },
+      };
+      const msg = { key: { id: 'REQ_1', remoteJid: 'grp@g.us', participant: voterJid } };
+      const extra = { from: 'grp@g.us', sender: voterJid };
+
+      await selections.sendPollOrText(sock, msg, extra, {
+        pollName: 'Choose quality',
+        optionLabels: ['1080p · ~2.0 GB', '720p · ~900 MB'],
+        fallbackText: 'fallback',
+        items: [{ quality: 1080 }, { quality: 720 }],
+        run: async (_s, _m, _e, item) => { chosen = item; },
+      });
+
+      // 1. Quoting a DIFFERENT message in the group with "2" must NOT hijack the picker
+      assert.strictEqual(
+        selections.match('grp@g.us', voterJid, '2', { quotedMessageId: 'FRIEND_MSG_999' }),
+        null,
+        'quoting a friend hijacked the pending picker',
+      );
+      // 2. Build a real WhatsApp AES-GCM encrypted pollUpdateMessage vote for option #2
+      const optHash = crypto.createHash('sha256').update(pollPayload.values[1], 'utf8').digest();
+      const votePlain = proto.Message.PollVoteMessage.encode({ selectedOptions: [optHash] }).finish();
+      const sign = Buffer.concat([
+        Buffer.from('POLL_MSG_1'),
+        Buffer.from(botJid),
+        Buffer.from(voterJid),
+        Buffer.from('Poll Vote'),
+        Buffer.from([1]),
+      ]);
+      const key0 = hmacSign(pollPayload.messageSecret, new Uint8Array(32), 'sha256');
+      const decKey = hmacSign(sign, key0, 'sha256');
+      const aad = Buffer.from(`POLL_MSG_1\u0000${voterJid}`);
+      const iv = crypto.randomBytes(12);
+      const encPayload = aesEncryptGCM(votePlain, decKey, iv, aad);
+
+      // Stranger voting on someone else's poll is ignored
+      assert.strictEqual(selections.resolvePollVote(sock, {
+        key: { id: 'V_STRANGER', remoteJid: 'grp@g.us', participant: '265111222333@s.whatsapp.net' },
+        message: {
+          pollUpdateMessage: {
+            pollCreationMessageKey: { id: 'POLL_MSG_1', remoteJid: 'grp@g.us' },
+            vote: { encPayload, encIv: iv },
+          },
+        },
+      }), null, 'stranger was allowed to vote on another user poll');
+
+      // Real requester's vote decrypts & resolves option #2, and clears typed fallback
+      const hit = selections.resolvePollVote(sock, {
+        key: { id: 'V_OWNER', remoteJid: 'grp@g.us', participant: voterJid },
+        message: {
+          pollUpdateMessage: {
+            pollCreationMessageKey: { id: 'POLL_MSG_1', remoteJid: 'grp@g.us' },
+            vote: { encPayload, encIv: iv },
+          },
+        },
+      });
+      assert.ok(hit && hit.item.quality === 720, 'encrypted poll vote did not resolve to 720p');
+      await hit.entry.run(sock, msg, extra, hit.item);
+      assert.deepStrictEqual(chosen, { quality: 720 });
+      assert.strictEqual(selections.peek('grp@g.us', voterJid), null, 'poll vote left typed fallback alive');
+
+      // 3. Send failure clears stale choices instead of leaving ghosts
+      selections.offer({ chatId: 'grp@g.us', sender: voterJid, items: [{ a: 1 }], run: () => {} });
+      await assert.rejects(() => selections.sendTextPrompt(
+        { sendMessage: async () => { throw new Error('socket closed'); } },
+        msg,
+        extra,
+        { text: 'hi', items: [{ a: 2 }], run: () => {} },
+      ));
+      assert.strictEqual(selections.peek('grp@g.us', voterJid), null, 'stale choice survived send failure');
+    });
+
+    await test('Phase 3: .series parses "Full House", "9-1-1", and "the boys 2" accurately', () => {
+      const series = require(path.join(REPO, 'commands', 'media', 'series'));
+
+      const fhBare = series._parseArgs(['Full', 'House']);
+      assert.strictEqual(fhBare.title, 'Full House');
+      assert.strictEqual(fhBare.pack, false);
+      assert.strictEqual(fhBare.hasTarget, false);
+
+      const fhEp = series._parseArgs(['Full', 'House', 's01e03', '720']);
+      assert.strictEqual(fhEp.title, 'Full House');
+      assert.strictEqual(fhEp.season, 1);
+      assert.strictEqual(fhEp.from, 3);
+      assert.strictEqual(fhEp.pack, false);
+      assert.strictEqual(fhEp.hasTarget, true);
+      assert.strictEqual(fhEp.quality, 720);
+
+      const n11Bare = series._parseArgs(['9-1-1']);
+      assert.strictEqual(n11Bare.title, '9-1-1');
+      assert.strictEqual(n11Bare.hasTarget, false);
+
+      const n11Range = series._parseArgs(['9-1-1', 's02', '1-5']);
+      assert.strictEqual(n11Range.title, '9-1-1');
+      assert.strictEqual(n11Range.season, 2);
+      assert.strictEqual(n11Range.from, 1);
+      assert.strictEqual(n11Range.to, 5);
+      assert.strictEqual(n11Range.hasTarget, true);
+
+      const boys2 = series._parseArgs(['the', 'boys', '2']);
+      assert.strictEqual(boys2.title, 'the boys');
+      assert.strictEqual(boys2.season, 2);
+      assert.strictEqual(boys2.bareNumber, 2);
+      assert.strictEqual(boys2.hasTarget, true);
+    });
+
+    await test('Phase 3: error sanitizer, per-user cooldown, .paper pagination, .menu/.status/.instagram/.fb/.viewonce, Gifted warning', async () => {
+      const { safeErrorMessage } = require(path.join(REPO, 'utils', 'userErrors'));
+      const handler = require(path.join(REPO, 'handler'));
+      const ac = require(path.join(REPO, 'utils', 'accessControl'));
+      const menu = require(path.join(REPO, 'commands', 'general', 'menu'));
+      const [paperCmd] = require(path.join(REPO, 'commands', 'general', 'paper'));
+      const { loadCommands } = require(path.join(REPO, 'utils', 'commandLoader'));
+      const APIs = require(path.join(REPO, 'utils', 'api'));
+
+      // 1. Raw internal error strings never leak to WhatsApp chat
+      const leaked = safeErrorMessage(new Error('ENOENT: no such file /home/user/neww/secret.json'));
+      assert.ok(!/ENOENT|\/home\/user|secret\.json/.test(leaked), `leaked path: ${leaked}`);
+
+      // 2. Per-user cooldown throttles rapid commands from regular allowed users
+      const wl = ac.readWL();
+      const testUser = '265888111222@s.whatsapp.net';
+      ac.writeWL({ users: [...wl.users, { number: '265888111222', enabled: true }] });
+      handler.resetCooldowns();
+      const sentMsgs = [];
+      const cdSock = {
+        user: { id: '265894016453:1@s.whatsapp.net' },
+        sendMessage: async (_jid, content) => { sentMsgs.push(content); return { key: { id: 'p' } }; },
+      };
+      try {
+        await handler.handleMessage(cdSock, {
+          key: { id: 'cd-1', remoteJid: testUser },
+          message: { conversation: '.ping' },
+        });
+        await handler.handleMessage(cdSock, {
+          key: { id: 'cd-2', remoteJid: testUser },
+          message: { conversation: '.ping' },
+        });
+      } finally {
+        ac.writeWL(wl);
+        handler.resetCooldowns();
+      }
+      const pongs = sentMsgs.filter((m) => /Pinging|Pong/.test(m.text || ''));
+      const waitReacts = sentMsgs.filter((m) => m.react?.text === '⏳');
+      assert.ok(pongs.length >= 1 && waitReacts.length === 1, 'second rapid command was not rate-limited by cooldown');
+
+      // 3. .paper filters false-positive month codes ("APRIL 2023") and paginates .paper browse
+      const parsedApril = paperCmd._parsePaper('APRIL 2023 NURS 2201 END OF SEMESTER.pdf');
+      assert.strictEqual(parsedApril.courseCode, 'NURS');
+      assert.strictEqual(parsedApril.moduleNumber, '2201');
+      assert.ok(paperCmd.MAX_PAPERS_PER_QUERY <= 5, 'papers per query not capped');
+
+      const browseSock = { sendMessage: async () => ({ key: { id: 'b' } }) };
+      let browseOut = '';
+      await paperCmd.execute(browseSock, { key: { remoteJid: 'c@s.whatsapp.net' } }, ['browse', 'b'], {
+        from: 'c@s.whatsapp.net',
+        reply: async (t) => { browseOut = t; },
+        status: async () => ({ update: async (t) => { browseOut = t; } }),
+      });
+      assert.ok(browseOut.length > 0 && browseOut.length < 4500, `.paper browse b too huge (${browseOut.length} chars)`);
+      assert.match(browseOut, /page 1\//i);
+
+      // 4. .menu hides admin + .health from non-owners, fixes .on/.off description, honours prefix & botName
+      const userCard = menu._buildCard(menu._buildGroups('!', { isOwner: false }), 'alice', { prefix: '!', botName: 'CustomBot' });
+      assert.ok(userCard.includes('CustomBot') && userCard.includes('!movie') && userCard.includes('prefix !'));
+      assert.ok(!userCard.includes('ADMIN') && !userCard.includes('.health') && !userCard.includes('!health') && !userCard.includes('refreshpapers'));
+
+      const ownerCard = menu._buildCard(menu._buildGroups('!', { isOwner: true }), 'boss', { prefix: '!', botName: 'CustomBot' });
+      assert.ok(ownerCard.includes('ADMIN') && ownerCard.includes('!status') && ownerCard.includes('enable/disable the bot globally'));
+      assert.ok(!ownerCard.includes('!health') && !ownerCard.includes('.health'));
+
+      // 5. .status is primary with .update alias; .instagram & .fb come from shortcuts; .viewonce is open to allowed users
+      const cmds = loadCommands();
+      assert.strictEqual(cmds.get('status')?.name, 'status');
+      assert.strictEqual(cmds.get('update')?.name, 'status');
+      assert.ok(cmds.get('instagram') && cmds.get('ig') && cmds.get('fb') && cmds.get('facebook'));
+      assert.ok(!cmds.get('viewonce')?.ownerOnly, '.viewonce must remain open to allowed users');
+
+      // 6. Gifted API warns visibly when key is missing/revoked without printing the key
+      const cfg = require(path.join(REPO, 'config'));
+      const savedKey = cfg.giftedApi.apiKey;
+      const warns = [];
+      const origWarn = console.warn;
+      console.warn = (...a) => warns.push(a.join(' '));
+      try {
+        APIs._resetKeyWarnForTests();
+        cfg.giftedApi.apiKey = '';
+        await assert.rejects(() => APIs.getGiftedAudioByUrl('https://youtu.be/dQw4w9WgXcQ'));
+      } finally {
+        cfg.giftedApi.apiKey = savedKey;
+        console.warn = origWarn;
+      }
+      assert.ok(warns.some((w) => /Gifted API fallback failed.*GIFTED_API_KEY/.test(w)), 'missing Gifted key warning');
     });
 
     await test('nothing is cached: a delivered movie file is deleted', async () => {

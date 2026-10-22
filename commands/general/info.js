@@ -88,7 +88,8 @@ module.exports = {
       }
       return extra.reply(text + more);
     } catch (e) {
-      return extra.reply(`❌ ${String(e.message || '').split('\n')[0]}`);
+      console.error('[info] error:', e.message);
+      return extra.reply('❌ Could not look up metadata right now. Please try again shortly.');
     }
   },
 

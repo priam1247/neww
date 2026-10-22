@@ -1,6 +1,8 @@
 /**
  * ZaFar Bot — Ping
  */
+const config = require('../../config');
+
 module.exports = {
   name: 'ping',
   aliases: ['p'],
@@ -14,11 +16,12 @@ module.exports = {
       const sent  = await extra.reply('🏓 Pinging...');
       const ms    = Date.now() - start;
       await sock.sendMessage(extra.from, {
-        text: `╭─ 🏓 *Pong!*\n│ ⚡ ${ms}ms response\n╰─ ZaFar Bot`,
+        text: `╭─ 🏓 *Pong!*\n│ ⚡ ${ms}ms response\n╰─ ${config.botName || 'ZaFar Bot'}`,
         edit: sent.key,
       });
     } catch (err) {
-      await extra.reply(`❌ ${err.message}`);
+      console.error('[ping] error:', err.message);
+      await extra.reply('❌ Could not measure latency right now.');
     }
   },
 };
