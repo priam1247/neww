@@ -210,7 +210,18 @@ async function resolveTargetAndQuality(sock, msg, extra, meta, job) {
   return selections.sendPollOrText(sock, msg, extra, {
     pollName: header,
     optionLabels,
-    fallbackText: `${header}\n\n${lines.join('\n')}\n\n_reply with a number_`,
+    fallbackText: `${header}\n\n${lines.join('\n')}\n\n_Reply 1–${choices.length}_`,
+    selector: {
+      headerTitle: `📺 ${showTitle}`,
+      bodyText: 'Select episodes to download:',
+      footerText: 'ZaFar Series',
+      buttonText: 'Select Episodes',
+      sectionTitle: 'Download Options',
+      rows: choices.map((c, idx) => ({
+        title: `${idx + 1}. ${c.label}`,
+        description: '',
+      })),
+    },
     items: choices,
     label: 'series-target',
     ttlMs: 5 * 60 * 1000,
@@ -227,13 +238,26 @@ async function offerChoices(sock, msg, extra, matches, job) {
   });
   const lines = optionLabels.map((lbl, i) => `*${i + 1}.* ${lbl}`);
   const header = `📺 *${matches.length} series* for *${job.title}*`;
-  const fallbackText = `${header}\n\n${lines.join('\n')}\n\n_reply with a number_`;
+  const fallbackText = `${header}\n\n${lines.join('\n')}\n\n_Reply 1–${matches.length}_`;
 
   await selections.sendPollOrText(sock, msg, extra, {
-    pollName: `${header}\nTap a series (or reply with its number):`,
+    pollName: `${header}\nTap a series:`,
     optionLabels,
     fallbackText,
     fallbackImage: matches[0]?.poster || null,
+    selector: {
+      headerTitle: `📺 ${job.title}`,
+      bodyText: `${matches.length} matches found — tap below to select:`,
+      footerText: 'ZaFar Series',
+      buttonText: 'Select Series',
+      sectionTitle: 'Matching Series',
+      rows: matches.map((m, idx) => ({
+        title: `${idx + 1}. ${m.title}`,
+        description: [m.year ? String(m.year) : null, Number(m.rating) ? `⭐ ${m.rating}` : null]
+          .filter(Boolean)
+          .join(' · '),
+      })),
+    },
     items: matches,
     label: 'series',
     ttlMs: 5 * 60 * 1000,
@@ -243,9 +267,10 @@ async function offerChoices(sock, msg, extra, matches, job) {
 
 const fmtSize = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`);
 
-/** Same poll + numbered fallback quality menu as .movie, scoped to one episode/season. */
+/** Native tap selector + fallback quality menu for .series. */
 async function askQuality(sock, msg, extra, meta, job) {
-  const react = (emoji) => sock.sendMessage(extra.from, { react: { text: emoji, key: msg.key } }).catch(() => {});
+  const react = (emoji) =>
+    msg?.key ? sock.sendMessage(extra.from, { react: { text: emoji, key: msg.key } }).catch(() => {}) : Promise.resolve();
   if (job.explicitQuality) return deliver(sock, msg, extra, meta, job);
 
   await react('🔎');
@@ -265,14 +290,27 @@ async function askQuality(sock, msg, extra, meta, job) {
   const ids = options.map((o) => `q${o.quality}`);
   const items = options.map((o) => ({ ...o, meta }));
   const title = `${meta.title} S${pad(season)}${job.pack ? ' (pack)' : `E${pad(episode)}`}`;
-  const header = `📺 *${title}*\nChoose the quality:`;
+  const header = `📺 *${title}*\nChoose quality:`;
   const optionLabels = options.map((o) => `${o.quality}p${o.sizeMB ? ` · ~${fmtSize(o.sizeMB)}` : ''}`);
   const lines = optionLabels.map((lbl, i) => `*${i + 1}.* ${lbl}`);
 
   await selections.sendPollOrText(sock, msg, extra, {
     pollName: header,
     optionLabels,
-    fallbackText: `${header}\n\n${lines.join('\n')}\n\n_reply with a number_`,
+    fallbackText: `${header}\n\n${lines.join('\n')}\n\n_Reply 1–${options.length}_`,
+    selector: {
+      headerTitle: `📺 ${title}`,
+      bodyText: 'Select download quality:',
+      footerText: 'ZaFar Series',
+      buttonText: 'Select Quality',
+      sectionTitle: 'Available Qualities',
+      rows: options.map((o) => ({
+        title: `${o.quality}p`,
+        description: [o.sizeMB ? `~${fmtSize(o.sizeMB)}` : null, o.provider || null]
+          .filter(Boolean)
+          .join(' · '),
+      })),
+    },
     items,
     ids,
     label: 'quality',
@@ -324,8 +362,9 @@ async function sendEpisode(sock, msg, chatId, file, meta, season, episode, quali
 async function deliverSeasonPack(sock, msg, extra, meta, job) {
   const chatId = extra.from;
   const season = job.season || 1;
-  const react = (emoji) => sock.sendMessage(chatId, { react: { text: emoji, key: msg.key } }).catch(() => {});
-  const say = (text) => sock.sendMessage(chatId, { text }, { quoted: msg });
+  const react = (emoji) =>
+    msg?.key ? sock.sendMessage(chatId, { react: { text: emoji, key: msg.key } }).catch(() => {}) : Promise.resolve();
+  const say = (text) => sock.sendMessage(chatId, { text }, selections.quoteOpts(msg));
 
   await react('⏳');
   let packReservation = null;
@@ -493,8 +532,9 @@ async function deliver(sock, msg, extra, meta, job) {
     }
   }
 
-  const react = (emoji) => sock.sendMessage(chatId, { react: { text: emoji, key: msg.key } }).catch(() => {});
-  const say = (text) => sock.sendMessage(chatId, { text }, { quoted: msg });
+  const react = (emoji) =>
+    msg?.key ? sock.sendMessage(chatId, { react: { text: emoji, key: msg.key } }).catch(() => {}) : Promise.resolve();
+  const say = (text) => sock.sendMessage(chatId, { text }, selections.quoteOpts(msg));
 
   await react('⏳');
 

@@ -4,6 +4,7 @@
 import { log } from './log.js';
 import { emit, EVENTS } from './events.js';
 import { metrics } from './metrics.js';
+import { reliabilityRank } from './reliability.js';
 
 const rlog = log.child('registry');
 
@@ -109,17 +110,20 @@ function liveProviders({ tier, type }) {
 }
 
 function table() {
-  return providers.map(p => {
-    const h = health.get(p.id) || {};
-    return {
-      id: p.id, tier: p.tier, kind: p.kinds[0],
-      wins: h.wins || 0, fails: h.fails || 0,
-      trust: trustOf(p.id).toFixed(2),
-      latency: h.emaMs ? `${Math.round(h.emaMs)}ms` : '-',
-      state: !h ? 'idle' : h.state === 'closed' ? 'live' : h.state === 'open' ? `open ${Math.max(0, Math.round((h.openUntil - Date.now()) / 1000))}s` : h.state,
-      lastErr: h.lastErr || null
-    };
-  });
+  return [...providers]
+    .sort((a, b) => reliabilityRank(a.id) - reliabilityRank(b.id))
+    .map((p, idx) => {
+      const h = health.get(p.id) || {};
+      return {
+        rank: idx + 1,
+        id: p.id, tier: p.tier, kind: p.kinds[0],
+        wins: h.wins || 0, fails: h.fails || 0,
+        trust: trustOf(p.id).toFixed(2),
+        latency: h.emaMs ? `${Math.round(h.emaMs)}ms` : '-',
+        state: !h ? 'idle' : h.state === 'closed' ? 'live' : h.state === 'open' ? `open ${Math.max(0, Math.round((h.openUntil - Date.now()) / 1000))}s` : h.state,
+        lastErr: h.lastErr || null
+      };
+    });
 }
 
 export const get = (id) => providers.find(p => p.id === id);

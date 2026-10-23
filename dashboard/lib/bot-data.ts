@@ -181,12 +181,12 @@ export const BOT_COMMANDS: CommandEntry[] = [
 ];
 
 export const METADATA_SOURCES: MetadataSourceEntry[] = [
-  { id: 'moviebox', label: 'moviebox', scope: 'Stream', keyless: true, note: 'MP4/SRT' },
-  { id: 'vidlink', label: 'vidlink', scope: 'Stream', keyless: true, note: 'MP4/HLS' },
-  { id: 'vixsrc', label: 'vixsrc', scope: 'Stream', keyless: true, note: 'HLS' },
-  { id: 'torrentio', label: 'torrentio', scope: 'Torrent', keyless: true, note: 'P2P' },
-  { id: 'yts', label: 'yts', scope: 'Movies', keyless: true, note: 'P2P' },
-  { id: 'eztv', label: 'eztv', scope: 'Series', keyless: true, note: 'P2P' },
-  { id: 'nyaa', label: 'nyaa', scope: 'Anime', keyless: true, note: 'P2P' },
-  { id: 'solidtorrents', label: 'solidtorrents', scope: 'Index', keyless: true, note: 'P2P' },
+  { id: 'moviebox', label: '#1 moviebox', scope: 'Fast CDN', keyless: true, note: 'MP4/SRT' },
+  { id: 'vixsrc', label: '#2 vixsrc', scope: 'Stream', keyless: true, note: 'HLS' },
+  { id: 'vidlink', label: '#3 vidlink', scope: 'Stream', keyless: true, note: 'MP4/HLS' },
+  { id: 'videasy', label: '#4 videasy', scope: 'Stream', keyless: true, note: 'HLS' },
+  { id: 'yts', label: '#5 yts', scope: 'Movies', keyless: true, note: 'P2P' },
+  { id: 'torrentio', label: '#6 torrentio', scope: 'Multi', keyless: true, note: 'P2P' },
+  { id: 'eztv', label: '#7 eztv', scope: 'Series', keyless: true, note: 'P2P' },
+  { id: 'nyaa', label: '#8 nyaa', scope: 'Anime', keyless: true, note: 'P2P' },
 ];

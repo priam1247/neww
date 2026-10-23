@@ -150,8 +150,8 @@ async function fetchSource(meta, quality, attempts = 3) {
 }
 
 /**
- * Offer title choices via a WhatsApp Poll (up to 12 matches), falling back
- * automatically to a numbered list when >12 matches or when polls fail.
+ * Offer title choices via WhatsApp's native tap-to-select drawer (`single_select`),
+ * falling back automatically to Poll or numbered text when needed.
  */
 async function offerChoices(sock, msg, extra, matches, job, kind) {
   const optionLabels = matches.map((m) => {
@@ -160,13 +160,27 @@ async function offerChoices(sock, msg, extra, matches, job, kind) {
     return `${m.title}${year}${rating}`;
   });
   const lines = optionLabels.map((lbl, i) => `*${i + 1}.* ${lbl}`);
-  const header = `🎬 *${matches.length} ${kind === 'series' ? 'series' : 'movies'}* for *${job.title}*`;
-  const fallbackText = `${header}\n\n${lines.join('\n')}\n\n_reply with a number_`;
+  const isSeries = kind === 'series';
+  const header = `🎬 *${matches.length} ${isSeries ? 'series' : 'movies'}* for *${job.title}*`;
+  const fallbackText = `${header}\n\n${lines.join('\n')}\n\n_Reply 1–${matches.length}_`;
 
   await selections.sendPollOrText(sock, msg, extra, {
-    pollName: `${header}\nTap a title (or reply with its number):`,
+    pollName: `${header}\nTap a title:`,
     optionLabels,
     fallbackText,
+    selector: {
+      headerTitle: `🎬 ${job.title}`,
+      bodyText: `${matches.length} matches found — tap below to select:`,
+      footerText: 'ZaFar Movies',
+      buttonText: isSeries ? 'Select Series' : 'Select Movie',
+      sectionTitle: isSeries ? 'Matching Series' : 'Matching Movies',
+      rows: matches.map((m, idx) => ({
+        title: `${idx + 1}. ${m.title}`,
+        description: [m.year ? String(m.year) : null, Number(m.rating) ? `⭐ ${m.rating}` : null]
+          .filter(Boolean)
+          .join(' · '),
+      })),
+    },
     items: matches,
     label: kind,
     ttlMs: 5 * 60 * 1000,
@@ -177,14 +191,11 @@ async function offerChoices(sock, msg, extra, matches, job, kind) {
 const fmtSize = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`);
 
 /**
- * Ask which quality to fetch, with the real size of each source.
- *
- * Sends a WhatsApp Poll (tap an option) and also registers a typed-number
- * fallback in `utils/selections` — if the client rejects polls it falls back
- * to a numbered text card automatically.
+ * Ask which quality to fetch via native tap selector (with real size & provider).
  */
 async function askQuality(sock, msg, extra, meta, job) {
-  const react = (emoji) => sock.sendMessage(extra.from, { react: { text: emoji, key: msg.key } }).catch(() => {});
+  const react = (emoji) =>
+    msg?.key ? sock.sendMessage(extra.from, { react: { text: emoji, key: msg.key } }).catch(() => {}) : Promise.resolve();
 
   if (job.explicitQuality) return deliver(sock, msg, extra, meta, job);
 
@@ -205,14 +216,27 @@ async function askQuality(sock, msg, extra, meta, job) {
   const ids = options.map((o) => `q${o.quality}`);
   const items = options.map((o) => ({ ...o, meta }));
   const title = `${meta.title}${meta.year ? ` (${meta.year})` : ''}`;
-  const header = `🎬 *${title}*\nChoose the quality:`;
+  const header = `🎬 *${title}*\nChoose quality:`;
   const optionLabels = options.map((o) => `${o.quality}p${o.sizeMB ? ` · ~${fmtSize(o.sizeMB)}` : ''}`);
   const lines = optionLabels.map((lbl, i) => `*${i + 1}.* ${lbl}`);
 
   await selections.sendPollOrText(sock, msg, extra, {
     pollName: header,
     optionLabels,
-    fallbackText: `${header}\n\n${lines.join('\n')}\n\n_reply with a number_`,
+    fallbackText: `${header}\n\n${lines.join('\n')}\n\n_Reply 1–${options.length}_`,
+    selector: {
+      headerTitle: `🎬 ${title}`,
+      bodyText: 'Select download quality:',
+      footerText: 'ZaFar Movies',
+      buttonText: 'Select Quality',
+      sectionTitle: 'Available Qualities',
+      rows: options.map((o) => ({
+        title: `${o.quality}p`,
+        description: [o.sizeMB ? `~${fmtSize(o.sizeMB)}` : null, o.provider || null]
+          .filter(Boolean)
+          .join(' · '),
+      })),
+    },
     items,
     ids,
     label: 'quality',
@@ -252,8 +276,9 @@ async function trySubtitles(sock, chatId, msg, meta, { season = null, episode = 
 async function deliver(sock, msg, extra, meta, job) {
   const chatId = extra.from;
   const quality = job.quality;
-  const react = (emoji) => sock.sendMessage(chatId, { react: { text: emoji, key: msg.key } }).catch(() => {});
-  const say = (text) => sock.sendMessage(chatId, { text }, { quoted: msg });
+  const react = (emoji) =>
+    msg?.key ? sock.sendMessage(chatId, { react: { text: emoji, key: msg.key } }).catch(() => {}) : Promise.resolve();
+  const say = (text) => sock.sendMessage(chatId, { text }, selections.quoteOpts(msg));
 
   await react('⏳');
   let activeReservation = null;

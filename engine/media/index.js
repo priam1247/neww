@@ -31,21 +31,21 @@ import { log } from '../core/log.js';
 
 const mlog = log.child('media');
 
-// provider registration (idempotent)
-import '../providers/torrent/knaben.js';
-import '../providers/torrent/torrentio.js';
-import '../providers/torrent/yts.js';
-import '../providers/torrent/eztv.js';
-import '../providers/torrent/nyaa.js';
-import '../providers/torrent/apibay.js';
-import '../providers/torrent/solidtorrents.js';
-import '../providers/torrent/torrentscsv.js';
-import '../providers/stream/vidlink.js';
-import '../providers/stream/vaplayer.js';
+// provider registration in strict reliability order (#1 moviebox first)
 import '../providers/stream/moviebox.js';
 import '../providers/stream/vixsrc.js';
-import '../providers/stream/vidsrc.js';
+import '../providers/stream/vidlink.js';
 import '../providers/stream/videasy.js';
+import '../providers/stream/vidsrc.js';
+import '../providers/stream/vaplayer.js';
+import '../providers/torrent/yts.js';
+import '../providers/torrent/torrentio.js';
+import '../providers/torrent/eztv.js';
+import '../providers/torrent/nyaa.js';
+import '../providers/torrent/knaben.js';
+import '../providers/torrent/solidtorrents.js';
+import '../providers/torrent/torrentscsv.js';
+import '../providers/torrent/apibay.js';
 
 let booted = false;
 async function boot() {
@@ -113,10 +113,16 @@ export async function qualityOptions({
     anime: metadata.looksAnime(meta), maxMB: config.maxDownloadMB, exclude,
   };
 
-  const tiers = debrid.active().length ? [[1], [2], [3]] : [[2], [3]];
+  const tiers = debrid.active().length
+    ? [[1], [3]]
+    : config.torrentDirect
+      ? [[3], [1]]
+      : [[3]];
   const cands = [];
   for (const tier of tiers) {
-    // sequential on purpose: three tiers at once would hammer every indexer
+    // When keyless, if Tier 3 (MovieBox / direct streams) already returned
+    // candidates, skip probing slow torrent indexers just to build the picker.
+    if (!debrid.active().length && tier[0] === 1 && cands.length > 0) break;
     // eslint-disable-next-line no-await-in-loop
     const raw = await resolver.searchTier(tier, media, opts).catch(() => []);
     cands.push(...raw);
@@ -133,7 +139,9 @@ export async function qualityOptions({
       byQuality.set(q, { quality: q, sizeMB, provider: c.provider, candidates: 1 });
     } else {
       seen.candidates += 1;
-      if (sizeMB > seen.sizeMB) { seen.sizeMB = sizeMB; seen.provider = c.provider; }
+      // Keep the highest-reliability provider (`ranked` is sorted with MovieBox #1);
+      // only backfill sizeMB if the top candidate was an unsized HLS manifest.
+      if (!seen.sizeMB && sizeMB > 0) seen.sizeMB = sizeMB;
     }
   }
 

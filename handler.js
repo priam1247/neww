@@ -107,21 +107,15 @@ const buildExtra = (sock, msg, { from, sender, senderIds, commandName = '' }) =>
   sender,
   commandName,
   isOwner: isOwner(senderIds),
-  reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
-  // Send an initial status message, then edit it in place with the final
-  // result. Usage:
-  //   const status = await extra.status('🔍 Searching...');
-  //   await status.update('📚 Found *3 papers* for *CHEM 3601*');
+  reply: (text) => sock.sendMessage(from, { text }, selections.quoteOpts(msg)),
   status: async (initialText) => {
-    const sent = await sock.sendMessage(from, { text: initialText }, { quoted: msg });
+    const sent = await sock.sendMessage(from, { text: initialText }, selections.quoteOpts(msg));
     return {
-      // Editing can fail (old WhatsApp version / rate limit) — fall back to
-      // a normal message so the user always gets the final result.
       update: async (finalText) => {
         try {
           return await sock.sendMessage(from, { text: finalText, edit: sent.key });
         } catch (e) {
-          return sock.sendMessage(from, { text: finalText }, { quoted: msg });
+          return sock.sendMessage(from, { text: finalText }, selections.quoteOpts(msg));
         }
       },
     };
@@ -131,6 +125,9 @@ const buildExtra = (sock, msg, { from, sender, senderIds, commandName = '' }) =>
 // Extract the stanzaId of any message quoted by `content`, if present.
 const getQuotedMessageId = (content) =>
   content?.extendedTextMessage?.contextInfo?.stanzaId ||
+  content?.interactiveResponseMessage?.contextInfo?.stanzaId ||
+  content?.buttonsResponseMessage?.contextInfo?.stanzaId ||
+  content?.listResponseMessage?.contextInfo?.stanzaId ||
   content?.imageMessage?.contextInfo?.stanzaId ||
   content?.videoMessage?.contextInfo?.stanzaId ||
   content?.documentMessage?.contextInfo?.stanzaId ||
@@ -169,15 +166,15 @@ async function runCommand(sock, msg, name, args, { from, sender, senderIds }) {
   return true;
 }
 
-// "Reply with a number" answers are not commands, so they are resolved here.
+// Tap-selector & "reply with a number" answers are resolved here.
 async function handleSelection(sock, msg, body, { from, sender, senderIds, quotedMessageId = null }) {
-  const opts = { quotedMessageId };
+  const opts = { quotedMessageId, rawText: body };
   const open = selections.peek(from, senderIds, opts);
   if (!open) return false;
 
   if (selections.isCancel(body)) {
     selections.clear(from, senderIds, opts);
-    await sock.sendMessage(from, { text: '👍 Cancelled.' }, { quoted: msg });
+    await sock.sendMessage(from, { text: '👍 Cancelled.' }, selections.quoteOpts(msg));
     return true;
   }
 
@@ -192,7 +189,7 @@ async function handleSelection(sock, msg, body, { from, sender, senderIds, quote
         await sock.sendMessage(
           from,
           { text: safeErrorMessage(e, { isOwner: isOwner(senderIds) }) },
-          { quoted: msg },
+          selections.quoteOpts(msg),
         );
       } catch { /* ignore */ }
     }
@@ -202,7 +199,7 @@ async function handleSelection(sock, msg, body, { from, sender, senderIds, quote
   if (selections.isOutOfRange(from, senderIds, body, opts)) {
     await sock.sendMessage(from, {
       text: `❌ Reply *1–${open.items.length}* or *cancel*.`,
-    }, { quoted: msg });
+    }, selections.quoteOpts(msg));
     return true;
   }
 
@@ -239,7 +236,10 @@ const handleMessage = async (sock, msg) => {
       const voteHit = selections.resolvePollVote(sock, msg);
       if (voteHit) {
         const pollKey = content.pollUpdateMessage.pollCreationMessageKey || msg.key;
-        const quoteMsg = { key: { ...pollKey, remoteJid: voteHit.chatId } };
+        const quoteMsg = voteHit.originMsg || {
+          key: { ...pollKey, remoteJid: voteHit.chatId },
+          message: { conversation: voteHit.entry?.label || 'Selected' },
+        };
         try {
           await voteHit.entry.run(
             sock,
@@ -248,6 +248,7 @@ const handleMessage = async (sock, msg) => {
             voteHit.item,
           );
         } catch (e) {
+          telemetry.recordFailure('selection');
           console.error('Error running poll selection:', e.message);
           try {
             await sock.sendMessage(
@@ -272,6 +273,8 @@ const handleMessage = async (sock, msg) => {
       body = content.videoMessage.caption || '';
     } else if (content.documentMessage) {
       body = content.documentMessage.caption || '';
+    } else if (content.interactiveResponseMessage) {
+      body = selections.extractInteractiveSelection(content);
     } else if (content.buttonsResponseMessage) {
       body = content.buttonsResponseMessage.selectedButtonId || '';
     } else if (content.listResponseMessage) {
