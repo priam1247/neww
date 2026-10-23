@@ -2959,14 +2959,14 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       const realMp4 = path.join(sandbox, 'yt1d_src.mp4');
       execFileSync(ff, [
         '-y', '-hide_banner', '-loglevel', 'error',
-        '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2',
-        '-c:a', 'aac', '-b:a', '128k', realM4a,
+        '-f', 'lavfi', '-i', 'sine=frequency=440:duration=5',
+        '-c:a', 'aac', '-b:a', '192k', realM4a,
       ]);
       execFileSync(ff, [
         '-y', '-hide_banner', '-loglevel', 'error',
-        '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=24:duration=2',
-        '-f', 'lavfi', '-i', 'sine=frequency=523:duration=2',
-        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', realMp4,
+        '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=24:duration=3',
+        '-f', 'lavfi', '-i', 'sine=frequency=523:duration=3',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-shortest', realMp4,
       ]);
 
       // Start local WebSocket render server + yt1d HTTP server
@@ -3138,13 +3138,13 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       const aOnly = path.join(sandbox, 'it_aonly.m4a');
       execFileSync(ff, [
         '-y', '-hide_banner', '-loglevel', 'error',
-        '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=24:duration=2', '-an',
+        '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=24:duration=3', '-an',
         '-c:v', 'libx264', '-pix_fmt', 'yuv420p', vOnly,
       ]);
       execFileSync(ff, [
         '-y', '-hide_banner', '-loglevel', 'error',
-        '-f', 'lavfi', '-i', 'sine=frequency=660:duration=2',
-        '-c:a', 'aac', '-b:a', '128k', aOnly,
+        '-f', 'lavfi', '-i', 'sine=frequency=660:duration=5',
+        '-c:a', 'aac', '-b:a', '192k', aOnly,
       ]);
 
       const toWebStream = (buf) => new ReadableStream({
@@ -3171,8 +3171,6 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       assert.strictEqual(capErr?.code, 'TOO_BIG', 'streamWebReadableToFile did not enforce maxBytes');
 
       // 3. Engine 2 (.song -> Innertube OAuth) cascade when yt-dlp hits BOT_CHECK
-      const savedFakeYtdlp = process.env.FAKE_YTDLP;
-      delete process.env.FAKE_YTDLP;
       const origDlAudio = YT24.downloadAudio;
       const origGetInfo = YT24.getInfo;
       YT24.getInfo = async () => { throw Object.assign(new Error('bot'), { stderr: 'ERROR: Sign in to confirm you are not a bot' }); };
@@ -3207,7 +3205,6 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
         ytInnertube._setTestOverride(null);
         YT24.downloadAudio = origDlAudio;
         YT24.getInfo = origGetInfo;
-        process.env.FAKE_YTDLP = savedFakeYtdlp;
       }
     });
 
@@ -3278,7 +3275,12 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
   console.log(`\n${'─'.repeat(52)}`);
   if (failures.length) {
     console.log(`❌ ${failures.length} failed, ${passed} passed`);
-    for (const f of failures) console.log(`   • ${f.name}: ${f.error.message}`);
+    for (const f of failures) {
+      console.log(`   • ${f.name}: ${f.error.message}`);
+      if (process.env.GITHUB_ACTIONS) {
+        console.log(`::error title=Selftest failed::${f.name}: ${String(f.error.message).replace(/\r?\n/g, ' | ')}`);
+      }
+    }
   } else {
     console.log(`✅ all ${passed} checks passed`);
   }

@@ -495,6 +495,7 @@ async function downloadWithClient(videoId, clientType, oauthCreds, mode, {
 }
 
 function isEnabled(opts = {}) {
+  if (_testOverride) return true;
   if (opts._allowInFakeYtdlp) return true;
   if (process.env.FAKE_YTDLP) return false;
   if (process.env.YT_INNERTUBE_DISABLED === '1') return false;
@@ -573,6 +574,7 @@ async function downloadVideo(urlOrId, opts = {}) {
 }
 
 async function getVideoInfo(urlOrId, opts = {}) {
+  if (process.env.FAKE_YTDLP && !opts._allowInFakeYtdlp) throw new Error('Innertube disabled in mock test mode');
   if (!isEnabled(opts)) throw new Error('Innertube disabled');
   const videoId = extractVideoId(urlOrId);
   if (!videoId) throw new Error('Invalid YouTube video ID');
