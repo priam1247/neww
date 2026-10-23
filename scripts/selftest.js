@@ -79,6 +79,10 @@ if (process.env.FAKE_REJECT_FLAG && args.includes(process.env.FAKE_REJECT_FLAG))
   console.error('yt-dlp: error: no such option: ' + process.env.FAKE_REJECT_FLAG);
   process.exit(2);
 }
+if (process.env.FAKE_FAIL_PROXY === '1' && args.includes('--proxy')) {
+  console.error('ERROR: Unable to download webpage: ProxyError: Tunnel connection failed: 502 Bad Gateway');
+  process.exit(1);
+}
 if (env === 'timeout') { setTimeout(() => {}, 60000); return; }
 
 // Bot-check, optionally only for the first N calls (tests profile escalation)
@@ -1082,7 +1086,7 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     const cmds = loadCommands();
     const names = new Set([...cmds.values()].map(c => c.name));
     for (const expected of ['song', 'ytv', 'dl', 'tiktok', 'x', 'pinterest', 'spotify',
-      'cookies', 'ytdl', 'menu', 'paper', 'sticker', 'fb', 'instagram',
+      'cookies', 'ytdl', 'ytlogin', 'menu', 'paper', 'sticker', 'fb', 'instagram',
       'movie', 'series', 'providers', 'moviestatus', 'debrid']) {
       assert.ok(names.has(expected), `command missing: ${expected}`);
     }
@@ -2824,6 +2828,450 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       assert.match(lines[2], /^2\.\s*🟢\s*vixsrc$/);
       assert.match(lines[3], /^3\.\s*🟢\s*vidlink$/);
     });
+  }
+
+  console.log('\n── 24. YouTube proxy hardening, Innertube PoToken/SABR & yt1d WebSocket muxer ──');
+  {
+    const http = require('http');
+    const { EventEmitter } = require('events');
+    const { execFileSync } = require('child_process');
+    const WebSocket = require('ws');
+    // Re-require after Section 23's hotReload() so we share exact module singletons with commands
+    const cfg24 = require(path.join(REPO, 'config.js'));
+    const YT24 = require(path.join(REPO, 'utils/youtubedl.js'));
+    const settings24 = require(path.join(REPO, 'utils/mediaSettings.js'));
+    const MT24 = require(path.join(REPO, 'utils/mediaTransfer.js'));
+    const getFfmpeg = require(path.join(REPO, 'utils/ffmpeg.js'));
+    const ytAuth = require(path.join(REPO, 'utils/ytAuth.js'));
+    const ytInnertube = require(path.join(REPO, 'utils/ytInnertube.js'));
+    const yt1d = require(path.join(REPO, 'utils/yt1d.js'));
+    const ytdlCmd = require(path.join(REPO, 'commands/admin/ytdl.js'));
+    const ytloginCmd = require(path.join(REPO, 'commands/admin/ytlogin.js'));
+    const songCmd24 = require(path.join(REPO, 'commands/media/song.js'));
+    const ytvCmd24 = require(path.join(REPO, 'commands/media/ytv.js'));
+    const { probeMedia } = MT24;
+
+    const prevSettingsFile = process.env.MEDIA_SETTINGS_FILE;
+    const prevAuthFile = process.env.YT_AUTH_FILE;
+    process.env.MEDIA_SETTINGS_FILE = path.join(sandbox, 'media_settings_24.json');
+    process.env.YT_AUTH_FILE = path.join(sandbox, 'yt_auth_24.json');
+    settings24.reload();
+
+    await test('validateProxyUrl rejects non-numeric :port and placeholder hosts while accepting real proxies', () => {
+      // Exact bug from user screenshot: http://user:pass@us-proxy:port
+      const badPort = settings24.validateProxyUrl('http://user:pass@us-proxy:port');
+      assert.strictEqual(badPort.ok, false);
+      assert.match(badPort.reason, /non-numeric port 'port'/i);
+
+      for (const bad of [
+        'http://user:pass@host:8080',
+        'http://proxy:3128',
+        'http://proxy.example.com:8080',
+        'http://198.51.100.10:70000',
+        'http://198.51.100.10:0',
+        'ftp://198.51.100.10:8080',
+        'http://<proxy>:8080',
+      ]) {
+        assert.strictEqual(settings24.validateProxyUrl(bad).ok, false, `accepted invalid proxy: ${bad}`);
+      }
+
+      for (const good of [
+        'http://user:pass@127.0.0.1:8888',
+        'http://myuser:mypass@198.51.100.10:8080',
+        'socks5://198.51.100.10:1080',
+        'socks5h://user:pass@proxy.isp.co.mw:1080',
+        'http://[2001:db8::1]:8080',
+      ]) {
+        const res = settings24.validateProxyUrl(good);
+        assert.strictEqual(res.ok, true, `rejected valid proxy ${good}: ${res.reason}`);
+      }
+    });
+
+    await test('poisoned media_settings.json & YTDLP_PROXY self-heal instead of crashing yt-dlp with nonnumeric port', async () => {
+      // 1. Poisoned database/media_settings.json (exact production server state)
+      fs.writeFileSync(
+        process.env.MEDIA_SETTINGS_FILE,
+        JSON.stringify({ proxy: 'http://user:pass@us-proxy:port', remoteFallback: true }),
+        'utf8'
+      );
+      settings24.reload();
+      assert.strictEqual(settings24.get('proxy', ''), '', 'poisoned stored proxy was not scrubbed on reload');
+      const healedDisk = JSON.parse(fs.readFileSync(process.env.MEDIA_SETTINGS_FILE, 'utf8'));
+      assert.strictEqual(healedDisk.proxy, '', 'poisoned proxy remained on disk');
+
+      // 2. Poisoned YTDLP_PROXY env var
+      process.env.YTDLP_PROXY = 'http://user:pass@us-proxy:port';
+      assert.strictEqual(YT24.proxyUrl(), '', 'invalid YTDLP_PROXY leaked into proxyUrl()');
+      assert.ok(!YT24.baseArgs().includes('--proxy'), 'invalid proxy was passed to yt-dlp');
+      assert.match(String(YT24.invalidProxyReason()), /non-numeric port 'port'/i);
+      assert.strictEqual(YT24.classify({ stderr: "ERROR: nonnumeric port: 'port'" }).code, 'PROXY_ERROR');
+      delete process.env.YTDLP_PROXY;
+
+      // 3. .ytdl proxy command rejects placeholders and accepts real proxies
+      const replies = [];
+      const extra = {
+        reply: async (t) => { replies.push(t); },
+        status: async (t) => ({ update: async (u) => { replies.push(u); } }),
+      };
+      await ytdlCmd.execute({}, {}, ['proxy', 'http://user:pass@us-proxy:port'], extra);
+      assert.match(replies[replies.length - 1], /Invalid proxy.*non-numeric port/i);
+      assert.strictEqual(settings24.get('proxy', ''), '');
+
+      await ytdlCmd.execute({}, {}, ['proxy', 'http://myuser:secret@198.51.100.10:8080'], extra);
+      assert.match(replies[replies.length - 1], /Proxy set: http:\/\/\*\*\*@198\.51\.100\.10:8080/);
+      assert.strictEqual(YT24.proxyUrl(), 'http://myuser:secret@198.51.100.10:8080');
+
+      await ytdlCmd.execute({}, {}, ['proxy', 'off'], extra);
+      assert.strictEqual(YT24.proxyUrl(), '');
+    });
+
+    await test('yt-dlp automatically retries directly without --proxy when a configured proxy fails', async () => {
+      process.env.FAKE_YTDLP = 'success';
+      process.env.FAKE_FAIL_PROXY = '1';
+      settings24.set('proxy', 'http://127.0.0.1:18888');
+      try {
+        const res = await YT24.downloadAudio('https://www.youtube.com/watch?v=dQw4w9WgXcQ', {
+          maxMB: 50,
+          outBase: path.join(sandbox, 'proxy_fallback_audio'),
+          deadlineMs: 30000,
+        });
+        assert.ok(fs.existsSync(res.file), 'direct fallback did not produce audio file');
+        assert.match(res.profile, /\(direct\)$/, `expected direct fallback profile, got: ${res.profile}`);
+        assert.strictEqual(res.attempts.length, 1, `burned ${res.attempts.length} profiles on dead proxy instead of 1`);
+        assert.strictEqual(res.attempts[0].code, 'PROXY_ERROR');
+
+        const info = await YT24.getInfo('https://www.youtube.com/watch?v=kJQP7kiw5Fk', { timeout: 15000 });
+        assert.ok(info.title, 'fetchInfo did not fall back to direct egress');
+
+        const found = await YT24.searchVideos('joji sanctuary', { limit: 3, timeout: 15000 });
+        assert.strictEqual(found.length, 3, 'searchVideos did not fall back to direct egress');
+      } finally {
+        delete process.env.FAKE_FAIL_PROXY;
+        settings24.set('proxy', '');
+      }
+    });
+
+    await test('yt1d + flashydl WebSocket muxer delivers real MP3 (.song) and MP4 (.ytv) when yt-dlp is bot-checked', async () => {
+      const ff = getFfmpeg();
+      assert.ok(getFfmpeg.works(), 'ffmpeg must work for end-to-end media verification');
+
+      const realM4a = path.join(sandbox, 'yt1d_src.m4a');
+      const realMp4 = path.join(sandbox, 'yt1d_src.mp4');
+      execFileSync(ff, [
+        '-y', '-hide_banner', '-loglevel', 'error',
+        '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2',
+        '-c:a', 'aac', '-b:a', '128k', realM4a,
+      ]);
+      execFileSync(ff, [
+        '-y', '-hide_banner', '-loglevel', 'error',
+        '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=24:duration=2',
+        '-f', 'lavfi', '-i', 'sine=frequency=523:duration=2',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', realMp4,
+      ]);
+
+      // Start local WebSocket render server + yt1d HTTP server
+      const wss = new WebSocket.Server({ port: 0, host: '127.0.0.1' });
+      await new Promise((r) => wss.once('listening', r));
+      const wsPort = wss.address().port;
+
+      let httpPort = 0;
+      wss.on('connection', (socket, req) => {
+        const isAudio = String(req.url || '').includes('_MP3');
+        socket.send(JSON.stringify({ status: 'processing', progress: 50 }));
+        setTimeout(() => {
+          socket.send(JSON.stringify({
+            status: 'done',
+            output: {
+              url: `http://127.0.0.1:${httpPort}/${isAudio ? 'rendered.m4a' : 'rendered.mp4'}`,
+            },
+          }));
+        }, 25);
+      });
+
+      const yt1dServer = http.createServer((req, res) => {
+        if (req.url === '/') {
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          return res.end('<input name="yt1_nonce" value="nonce_abc"><script>var cfg={"merge_nonce":"m_xyz"};</script>');
+        }
+        if (req.url === '/get-server') {
+          res.writeHead(200, { 'Content-Type': 'text/plain' });
+          return res.end(`ws://127.0.0.1:${wsPort}`);
+        }
+        if (req.url === '/results/' && req.method === 'POST') {
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          return res.end([
+            '<button data-token="tok_mp3" data-quality="MP3" data-has-audio="1" data-filesize="32000" data-title="Joji - Sanctuary" data-merge-id="job777" data-merge-nonce="m_xyz"></button>',
+            '<button data-token="tok_720" data-quality="720p" data-has-audio="0" data-filesize="95000" data-title="Joji - Sanctuary" data-merge-id="job777" data-merge-nonce="m_xyz"></button>',
+          ].join('\n'));
+        }
+        if (req.url === '/wp-admin/admin-ajax.php' && req.method === 'POST') {
+          let body = '';
+          req.on('data', (c) => { body += c.toString(); });
+          req.on('end', () => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            if (body.includes('yt1_resolve_streams')) {
+              return res.end(JSON.stringify({
+                success: true,
+                data: {
+                  video_url: `http://127.0.0.1:${httpPort}/raw_video.mp4`,
+                  audio_url: `http://127.0.0.1:${httpPort}/rendered.m4a`,
+                },
+              }));
+            }
+            if (body.includes('process_video_merge')) {
+              return res.end(JSON.stringify({ success: true, data: { queued: true } }));
+            }
+            res.end(JSON.stringify({ success: false }));
+          });
+          return;
+        }
+        if (req.url === '/rendered.m4a') {
+          res.writeHead(200, { 'Content-Type': 'audio/mp4' });
+          return fs.createReadStream(realM4a).pipe(res);
+        }
+        if (req.url === '/rendered.mp4') {
+          res.writeHead(200, { 'Content-Type': 'video/mp4' });
+          return fs.createReadStream(realMp4).pipe(res);
+        }
+        res.writeHead(404).end();
+      });
+
+      await new Promise((r) => yt1dServer.listen(0, '127.0.0.1', r));
+      httpPort = yt1dServer.address().port;
+
+      const origDlAudio = YT24.downloadAudio;
+      const origDlVideo = YT24.downloadVideo;
+      const origGetInfo = YT24.getInfo;
+      process.env.YT1D_BASE_URL = `http://127.0.0.1:${httpPort}`;
+      process.env.YT1D_BALANCER_URL = `http://127.0.0.1:${httpPort}/get-server`;
+      cfg24.cobalt.useDefaultInstances = false;
+
+      try {
+        // Direct unit check on resolveYt1d
+        const resolvedAudio = await yt1d.resolveYt1d('https://www.youtube.com/watch?v=YWN81V7ojOE', { kind: 'audio', timeoutMs: 10000 });
+        assert.strictEqual(resolvedAudio.provider, 'yt1d');
+        assert.ok(resolvedAudio.url.endsWith('/rendered.m4a'));
+
+        // Full .song execution when yt-dlp throws BOT_CHECK
+        YT24.getInfo = async () => { throw Object.assign(new Error('bot check'), { stderr: 'ERROR: Sign in to confirm you are not a bot' }); };
+        YT24.downloadAudio = async () => { throw Object.assign(new Error('bot check'), { stderr: 'ERROR: Sign in to confirm you are not a bot' }); };
+        YT24.downloadVideo = async () => { throw Object.assign(new Error('bot check'), { stderr: 'ERROR: Sign in to confirm you are not a bot' }); };
+
+        const sentSong = [];
+        const songSock = {
+          user: { id: '1234:1@s.whatsapp.net' },
+          async sendMessage(_jid, content) {
+            if (content?.document?.url && fs.existsSync(content.document.url)) {
+              Object.defineProperty(content, '__bytes', { value: fs.readFileSync(content.document.url) });
+            }
+            sentSong.push(content);
+            return { key: { id: 's1' } };
+          },
+        };
+        await songCmd24.execute(
+          songSock,
+          { key: { remoteJid: 'u@s.whatsapp.net', id: 'm_song' }, message: { conversation: '.song https://youtu.be/YWN81V7ojOE' } },
+          ['https://youtu.be/YWN81V7ojOE'],
+          { from: 'u@s.whatsapp.net', isOwner: false }
+        );
+        const docMsg = sentSong.find((m) => m.document);
+        assert.ok(docMsg, `.song via yt1d did not send document; sent=${JSON.stringify(sentSong)}`);
+        assert.strictEqual(docMsg.fileName, 'Joji - Sanctuary.mp3');
+        assert.match(docMsg.caption, /via yt1d/);
+        const id3 = MT24.readId3(docMsg.__bytes);
+        assert.strictEqual(id3.artist, 'Joji');
+        assert.strictEqual(id3.title, 'Sanctuary');
+
+        // Full .ytv execution when yt-dlp throws BOT_CHECK
+        const sentVid = [];
+        const vidSock = {
+          user: { id: '1234:1@s.whatsapp.net' },
+          async sendMessage(_jid, content) {
+            if (content?.video?.url && fs.existsSync(content.video.url)) {
+              Object.defineProperty(content, '__probed', { value: await probeMedia(content.video.url) });
+            }
+            sentVid.push(content);
+            return { key: { id: 'v1' } };
+          },
+        };
+        await ytvCmd24.execute(
+          vidSock,
+          { key: { remoteJid: 'u@s.whatsapp.net', id: 'm_ytv' }, message: { conversation: '.ytv https://youtu.be/YWN81V7ojOE 720' } },
+          ['https://youtu.be/YWN81V7ojOE', '720'],
+          { from: 'u@s.whatsapp.net', isOwner: false }
+        );
+        const vidMsg = sentVid.find((m) => m.video || m.document);
+        assert.ok(vidMsg, `.ytv via yt1d did not send video; sent=${JSON.stringify(sentVid)}`);
+        assert.match(vidMsg.caption, /via yt1d/);
+        assert.strictEqual(vidMsg.__probed?.hasAudio, true, 'yt1d video had no audio track');
+      } finally {
+        YT24.downloadAudio = origDlAudio;
+        YT24.downloadVideo = origDlVideo;
+        YT24.getInfo = origGetInfo;
+        cfg24.cobalt.useDefaultInstances = true;
+        delete process.env.YT1D_BASE_URL;
+        delete process.env.YT1D_BALANCER_URL;
+        await new Promise((r) => wss.close(r));
+        await new Promise((r) => yt1dServer.close(r));
+      }
+    });
+
+    await test('Innertube PoToken mutex, disk-streamed track merge, and .song/.ytv Engine 2 cascade work cleanly', async () => {
+      const { BG } = require('bgutils-js');
+      const ff = getFfmpeg();
+
+      // 1. Concurrent PoToken cold-start fallback & JSDOM global isolation
+      const failFetch = async () => { throw new Error('offline sandbox'); };
+      const [po1, po2, po3] = await Promise.all([
+        ytInnertube.generatePoToken('visitor_alpha', failFetch),
+        ytInnertube.generatePoToken('visitor_beta', failFetch),
+        ytInnertube.generatePoToken('visitor_gamma', failFetch),
+      ]);
+      assert.strictEqual(BG.PoToken.decodeColdStartToken(po1.poToken).identifier, 'visitor_alpha');
+      assert.strictEqual(BG.PoToken.decodeColdStartToken(po2.poToken).identifier, 'visitor_beta');
+      assert.strictEqual(BG.PoToken.decodeColdStartToken(po3.poToken).identifier, 'visitor_gamma');
+      assert.strictEqual(globalThis.window, undefined, 'JSDOM window leaked onto globalThis');
+      assert.strictEqual(globalThis.document, undefined, 'JSDOM document leaked onto globalThis');
+
+      // 2. Web ReadableStream -> disk streaming + maxBytes cap + ffmpeg A/V merge
+      const vOnly = path.join(sandbox, 'it_vonly.mp4');
+      const aOnly = path.join(sandbox, 'it_aonly.m4a');
+      execFileSync(ff, [
+        '-y', '-hide_banner', '-loglevel', 'error',
+        '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=24:duration=2', '-an',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', vOnly,
+      ]);
+      execFileSync(ff, [
+        '-y', '-hide_banner', '-loglevel', 'error',
+        '-f', 'lavfi', '-i', 'sine=frequency=660:duration=2',
+        '-c:a', 'aac', '-b:a', '128k', aOnly,
+      ]);
+
+      const toWebStream = (buf) => new ReadableStream({
+        start(ctrl) {
+          for (let i = 0; i < buf.length; i += 4096) ctrl.enqueue(buf.subarray(i, i + 4096));
+          ctrl.close();
+        },
+      });
+
+      const vStreamed = path.join(sandbox, 'streamed_v.mp4');
+      const aStreamed = path.join(sandbox, 'streamed_a.m4a');
+      const mergedMp4 = path.join(sandbox, 'streamed_merged.mp4');
+      await ytInnertube.streamWebReadableToFile(toWebStream(fs.readFileSync(vOnly)), vStreamed, { maxBytes: 5 * 1024 * 1024 });
+      await ytInnertube.streamWebReadableToFile(toWebStream(fs.readFileSync(aOnly)), aStreamed, { maxBytes: 5 * 1024 * 1024 });
+      ytInnertube.mergeTracksWithFfmpeg(vStreamed, aStreamed, mergedMp4);
+      const mergedProbe = await probeMedia(mergedMp4);
+      assert.strictEqual(mergedProbe.hasVideo, true);
+      assert.strictEqual(mergedProbe.hasAudio, true);
+
+      let capErr = null;
+      try {
+        await ytInnertube.streamWebReadableToFile(toWebStream(Buffer.alloc(20000, 1)), path.join(sandbox, 'cap.bin'), { maxBytes: 4096 });
+      } catch (e) { capErr = e; }
+      assert.strictEqual(capErr?.code, 'TOO_BIG', 'streamWebReadableToFile did not enforce maxBytes');
+
+      // 3. Engine 2 (.song -> Innertube OAuth) cascade when yt-dlp hits BOT_CHECK
+      const savedFakeYtdlp = process.env.FAKE_YTDLP;
+      delete process.env.FAKE_YTDLP;
+      const origDlAudio = YT24.downloadAudio;
+      const origGetInfo = YT24.getInfo;
+      YT24.getInfo = async () => { throw Object.assign(new Error('bot'), { stderr: 'ERROR: Sign in to confirm you are not a bot' }); };
+      YT24.downloadAudio = async () => { throw Object.assign(new Error('bot'), { stderr: 'ERROR: Sign in to confirm you are not a bot' }); };
+      ytInnertube._setTestOverride(async (_url, _mode, opts) => {
+        const dest = `${opts.outBase}_it.m4a`;
+        fs.copyFileSync(aOnly, dest);
+        return {
+          file: dest,
+          ext: 'm4a',
+          authenticated: true,
+          metadata: { title: 'Slow Dancing in the Dark', author: 'Joji', duration: 209 },
+        };
+      });
+      try {
+        const sent = [];
+        const sock = {
+          user: { id: '1234:1@s.whatsapp.net' },
+          async sendMessage(_jid, content) { sent.push(content); return { key: { id: 'it1' } }; },
+        };
+        await songCmd24.execute(
+          sock,
+          { key: { remoteJid: 'u@s.whatsapp.net', id: 'm_it' }, message: { conversation: '.song https://youtu.be/K3Qzzggn--s' } },
+          ['https://youtu.be/K3Qzzggn--s'],
+          { from: 'u@s.whatsapp.net', isOwner: true }
+        );
+        const doc = sent.find((m) => m.document);
+        assert.ok(doc, 'Engine 2 Innertube fallback did not deliver audio');
+        assert.strictEqual(doc.fileName, 'Joji - Slow Dancing in the Dark.mp3');
+        assert.match(doc.caption, /via innertube \(oauth\)/);
+      } finally {
+        ytInnertube._setTestOverride(null);
+        YT24.downloadAudio = origDlAudio;
+        YT24.getInfo = origGetInfo;
+        process.env.FAKE_YTDLP = savedFakeYtdlp;
+      }
+    });
+
+    await test('.ytlogin performs Google TV OAuth2 device-code flow, persists tokens, and updates .ytdl status', async () => {
+      ytAuth.clearYtCreds();
+      assert.strictEqual(ytAuth.hasYtCreds(), false);
+
+      ytAuth._setInnertubeFactoryForTest(async () => {
+        const session = new EventEmitter();
+        session.signIn = async () => {
+          setImmediate(() => {
+            session.emit('auth-pending', {
+              verification_url: 'https://www.google.com/device',
+              user_code: 'WXYZ-1234',
+              expires_in: 300,
+            });
+            setTimeout(() => {
+              session.emit('auth', {
+                credentials: {
+                  access_token: 'ya29.test_access_token',
+                  refresh_token: '1//test_refresh_token',
+                  expiry_date: '2026-12-31T00:00:00.000Z',
+                },
+              });
+            }, 20);
+          });
+        };
+        return { session };
+      });
+
+      try {
+        const messages = [];
+        const extra = {
+          reply: async (t) => { messages.push(t); },
+          status: async (t) => {
+            messages.push(t);
+            return { update: async (u) => { messages.push(u); } };
+          },
+        };
+
+        await ytloginCmd.execute({}, {}, [], extra);
+        assert.ok(messages.some((m) => m.includes('https://www.google.com/device') && m.includes('WXYZ-1234')), 'device code prompt missing');
+        assert.ok(messages.some((m) => /YouTube account linked/i.test(m)), 'linked confirmation missing');
+        assert.strictEqual(ytAuth.hasYtCreds(), true);
+
+        await ytloginCmd.execute({}, {}, ['status'], extra);
+        assert.match(messages[messages.length - 1], /OAuth: linked/);
+
+        await ytdlCmd.execute({}, {}, ['status'], extra);
+        assert.match(messages[messages.length - 1], /OAuth: linked/);
+
+        await ytloginCmd.execute({}, {}, ['off'], extra);
+        assert.strictEqual(ytAuth.hasYtCreds(), false);
+      } finally {
+        ytAuth._setInnertubeFactoryForTest(null);
+        ytAuth.clearYtCreds();
+      }
+    });
+
+    if (prevSettingsFile === undefined) delete process.env.MEDIA_SETTINGS_FILE;
+    else process.env.MEDIA_SETTINGS_FILE = prevSettingsFile;
+    if (prevAuthFile === undefined) delete process.env.YT_AUTH_FILE;
+    else process.env.YT_AUTH_FILE = prevAuthFile;
+    settings24.reload();
   }
 
   // ─── summary ────────────────────────────────────────────────────────────────

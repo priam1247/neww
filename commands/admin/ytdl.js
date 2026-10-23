@@ -1,19 +1,27 @@
 const YT = require('../../utils/youtubedl');
 const ffmpeg = require('../../utils/ffmpeg');
 const settings = require('../../utils/mediaSettings');
+const ytAuth = require('../../utils/ytAuth');
+const ytInnertube = require('../../utils/ytInnertube');
+const providers = require('../../utils/downloadProviders');
 const config = require('../../config');
 
 async function status() {
   const diag = await YT.diagnostics();
   const yt = diag.installed ? (diag.version || 'installed') : 'MISSING';
   const ck = diag.cookies ? `${diag.cookieCount || 0} (${diag.cookieSource || 'file'})` : 'none';
+  const oauth = ytAuth.hasYtCreds() ? 'linked' : 'none';
   const lines = [
     '*yt-dlp*',
     `Binary: ${yt}`,
     `ffmpeg: ${diag.ffmpeg || 'MISSING'}`,
+    `OAuth: ${oauth}`,
     `Cookies: ${ck}`,
     `Proxy: ${diag.proxy || 'none'}`,
   ];
+  if (diag.invalidProxy) {
+    lines.push(`Ignored bad proxy: ${diag.invalidProxy}`);
+  }
   if (diag.lastError) {
     lines.push(`Last error: ${diag.lastError.code}`);
   }
@@ -52,31 +60,48 @@ module.exports = {
       if (sub === 'proxy') {
         const value = args.slice(1).join(' ').trim();
         if (!value) {
-          const current = settings.get('proxy', '') || config.ytdlp?.proxy || process.env.YTDLP_PROXY || '';
+          const current = YT.proxyUrl();
           const masked = current ? current.replace(/\/\/([^@/]+)@/, '//***@') : 'none';
-          return extra.reply(`🌐 Proxy: ${masked}`);
+          const invalid = YT.invalidProxyReason();
+          return extra.reply(invalid ? `🌐 Proxy: none (ignored invalid ${invalid})` : `🌐 Proxy: ${masked}`);
         }
         if (['off', 'none', 'clear', 'delete'].includes(value.toLowerCase())) {
           settings.set('proxy', '');
           return extra.reply('🌐 Proxy cleared.');
         }
-        if (!/^(https?|socks[45]?):\/\//i.test(value)) {
-          return extra.reply(`Usage: ${P}ytdl proxy http://user:pass@host:port`);
+        const check = settings.validateProxyUrl(value);
+        if (!check.ok) {
+          return extra.reply(`❌ Invalid proxy (${check.reason}).\nExample: ${P}ytdl proxy http://user:pass@198.51.100.10:8080`);
         }
-        settings.set('proxy', value);
-        return extra.reply(`🌐 Proxy set: ${value.replace(/\/\/([^@/]+)@/, '//***@')}`);
+        settings.set('proxy', check.url);
+        return extra.reply(`🌐 Proxy set: ${check.url.replace(/\/\/([^@/]+)@/, '//***@')}`);
       }
 
       if (sub === 'test') {
         const target = args.slice(1).join(' ').trim();
         if (!target) return extra.reply(`Usage: ${P}ytdl test <link or query>`);
 
-        const url = YT.isYouTubeUrl(target) ? YT.normalizeYouTubeUrl(target) : `ytsearch1:${target}`;
+        const isYt = YT.isYouTubeUrl(target);
+        const url = isYt ? YT.normalizeYouTubeUrl(target) : `ytsearch1:${target}`;
         const s = await extra.status('🔎 Probing…');
         try {
-          const info = await YT.getInfo(url, { timeout: 60000 });
-          return s.update(`✅ OK — ${info.title || '?'}\nyt-dlp ${YT.version()} · ffmpeg ${ffmpeg.version() || 'missing'}`);
+          const info = await YT.getInfo(url, { timeout: 45000 });
+          return s.update(`✅ yt-dlp OK — ${info.title || '?'}\nyt-dlp ${YT.version()} · ffmpeg ${ffmpeg.version() || 'missing'}`);
         } catch (e) {
+          if (isYt) {
+            try {
+              const itInfo = await ytInnertube.getVideoInfo(url);
+              if (itInfo?.title) {
+                return s.update(`✅ Innertube OK — ${itInfo.title}\n(yt-dlp: ${YT.classify(e).code})`);
+              }
+            } catch { /* fall through */ }
+            try {
+              const hit = await providers.resolveMedia(url, { kind: 'audio', timeoutMs: 35000 });
+              if (hit?.url) {
+                return s.update(`✅ Remote (${hit.provider}) OK — ${hit.title || 'stream ready'}\n(yt-dlp: ${YT.classify(e).code})`);
+              }
+            } catch { /* fall through */ }
+          }
           const info = YT.classify(e);
           return s.update(`❌ ${info.code}: ${YT.friendlyError(e, { isOwner: true })}`);
         }

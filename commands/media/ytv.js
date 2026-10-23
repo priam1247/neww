@@ -22,6 +22,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('../../config');
 const YT = require('../../utils/youtubedl');
+const ytInnertube = require('../../utils/ytInnertube');
 const settings = require('../../utils/mediaSettings');
 const providers = require('../../utils/downloadProviders');
 const youtubeSearch = require('../../utils/youtubeSearch');
@@ -125,10 +126,16 @@ const execute = async (sock, msg, args, extra) => {
   // ── Metadata (best effort) ───────────────────────────────────────────────
   if (!title || !duration) {
     try {
-      const i = await YT.getInfo(query, { timeout: 45000 });
+      const i = await YT.getInfo(query, { timeout: 35000 });
       title = title || i.title; duration = duration || i.duration;
       author = author || i.uploader; thumbnail = thumbnail || i.thumbnail;
-    } catch { /* the download attempt reports the real reason */ }
+    } catch {
+      try {
+        const itMeta = await ytInnertube.getVideoInfo(query);
+        title = title || itMeta.title; duration = duration || itMeta.duration;
+        author = author || itMeta.uploader; thumbnail = thumbnail || itMeta.thumbnail;
+      } catch { /* the download attempt reports the real reason */ }
+    }
   }
   if (MAX_MINUTES && duration && duration > MAX_MINUTES * 60) {
     return say(`❌ Video is ${Math.round(duration / 60)} min — the limit is ${MAX_MINUTES} min.`);
@@ -178,29 +185,58 @@ const execute = async (sock, msg, args, extra) => {
         attempts.push({ engine: `yt-dlp:${q}p`, code: info.code });
         log.warn(`yt-dlp failed at ${q}p · ${info.code} · ${info.detail}`);
         ytErr = e;
-        // Only a size problem is worth a lower quality; anything else is final.
-        if (!['TOO_BIG', 'NO_FORMATS', 'UNKNOWN'].includes(info.code)) break;
+        // Only a size/format problem is worth a lower quality; bot/proxy checks cascade immediately.
+        if (!['TOO_BIG', 'NO_FORMATS'].includes(info.code)) break;
         if (Date.now() > deadlineAt - 20000) break;
       }
     }
 
-    // ── Remote providers (only when the local engine could not do it) ─────
+    // ── Engine 2 (Innertube + PoToken/SABR) & Engine 3 (yt1d/remote) ───────
     if (!file) {
       const info = ytErr ? YT.classify(ytErr) : { code: 'UNKNOWN' };
-      const remoteWorthTrying = ['BOT_CHECK', 'NO_YTDLP', 'NO_FORMATS', 'FFMPEG_MISSING', 'UNKNOWN',
-        'NETWORK', 'RATE_LIMIT', 'PO_TOKEN', 'AGE_RESTRICTED', 'GEO_BLOCK', 'BAD_ARGS', 'TOO_BIG'];
-      const remoteAllowed = settings.get('remoteFallback', true) !== false;
+      const fallbackWorthTrying = ['BOT_CHECK', 'NO_YTDLP', 'NO_FORMATS', 'FFMPEG_MISSING', 'UNKNOWN',
+        'NETWORK', 'RATE_LIMIT', 'PO_TOKEN', 'AGE_RESTRICTED', 'GEO_BLOCK', 'BAD_ARGS', 'TOO_BIG', 'PROXY_ERROR'];
 
-      if (ytErr && (!remoteAllowed || !remoteWorthTrying.includes(info.code))) throw ytErr;
+      if (ytErr && !fallbackWorthTrying.includes(info.code)) throw ytErr;
 
       await react('🔄');
+
+      if (ytInnertube.isEnabled()) {
+        try {
+          const itRes = await ytInnertube.downloadVideo(query, {
+            height: requestedHeight,
+            outBase,
+            maxMB: MAX_VIDEO_MB,
+            timeoutMs: 180000,
+            onAttempt: (name, err) => {
+              attempts.push({ engine: name, code: err?.code || 'FAILED' });
+            },
+          });
+          file = itRes.file;
+          height = requestedHeight;
+          via = itRes.authenticated ? 'innertube (oauth)' : 'innertube';
+          title = title || itRes.metadata?.title || '';
+          author = author || itRes.metadata?.author || '';
+        } catch (itErr) {
+          log.warn(`innertube video failed · ${itErr.message}`);
+          attempts.push({ engine: 'innertube', code: itErr.code || 'FAILED' });
+        }
+      }
+    }
+
+    if (!file) {
+      const remoteAllowed = settings.get('remoteFallback', true) !== false;
+      if (!remoteAllowed) {
+        if (ytErr) throw ytErr;
+        throw Object.assign(new Error('remote fallbacks are disabled'), { code: 'FALLBACK_DISABLED', attempts });
+      }
 
       let remoteHit = null;
       try {
         remoteHit = await providers.resolveMedia(query, {
           kind: 'video',
-          quality: height,
-          timeoutMs: 20000,
+          quality: requestedHeight,
+          timeoutMs: 75000,
           onAttempt: (name, err, st) => { if (st.code !== 'OK') attempts.push({ engine: name, code: st.code }); },
         });
       } catch (providerErr) {
@@ -210,6 +246,7 @@ const execute = async (sock, msg, args, extra) => {
       }
 
       via = remoteHit.provider;
+      height = requestedHeight;
       const dest = path.join(getTempDir(), `${stamp}_remote.${remoteHit.ext || 'mp4'}`);
       const got = await downloadToFile(remoteHit.url, dest, {
         maxBytes: MAX_VIDEO_MB * 1024 * 1024,

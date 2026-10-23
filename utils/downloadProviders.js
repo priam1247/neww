@@ -1,14 +1,13 @@
 /**
  * ZaFar Bot — remote downloader providers
  *
- * Everything here is a *fallback*: yt-dlp is always tried first (best quality,
- * nothing depends on a third party). These providers exist for the one case a
- * local engine cannot fix — a hosting IP that YouTube refuses to serve at all
- * and where the owner has no cookies or proxy yet.
+ * Everything here is a *fallback*: yt-dlp and native Innertube are tried first.
+ * These providers exist for when a hosting IP is refused by YouTube and the
+ * owner has not run `.ytlogin` or `.cookies set` yet.
  *
- * Contract: a provider only *resolves* a direct media URL (cheap metadata
- * call). Downloading is done by the command that called us, once, with the
- * normal size cap — so listing several providers costs seconds, not megabytes.
+ * Contract: a provider only *resolves* a direct media URL (metadata / remote
+ * mux call). Downloading is done by the command that called us, once, with the
+ * normal size cap.
  *
  *   resolveMedia(url, { kind: 'audio'|'video', quality, timeoutMs })
  *     → { provider, url, ext, title, headers }
@@ -18,9 +17,10 @@ const axios = require('axios');
 const APIs = require('./api');
 const config = require('../config');
 const settings = require('./mediaSettings');
+const yt1d = require('./yt1d');
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-const DEFAULT_TIMEOUT = 20000;
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36';
+const DEFAULT_TIMEOUT = 45000;
 
 const isHttp = (u) => typeof u === 'string' && /^https?:\/\//i.test(u);
 
@@ -61,13 +61,13 @@ async function cobaltResolve(baseUrl, { url, kind, quality, timeoutMs }) {
   const endpoint = String(baseUrl).replace(/\/+$/, '') + '/';
   const body = {
     url,
-    downloadMode: 'auto',
+    downloadMode: kind === 'audio' ? 'audio' : 'auto',
     videoQuality: String(quality || 720),
     audioFormat: 'mp3',
     filenameStyle: 'basic',
   };
   const res = await axios.post(endpoint, body, {
-    timeout: timeoutMs,
+    timeout: Math.min(timeoutMs, 15000),
     maxRedirects: 3,
     headers: {
       'User-Agent': UA,
@@ -98,13 +98,26 @@ async function cobaltResolve(baseUrl, { url, kind, quality, timeoutMs }) {
 
 const PROVIDERS = [
   {
+    name: 'yt1d',
+    kinds: ['audio', 'video'],
+    enabled: () => Boolean((!process.env.FAKE_YTDLP || process.env.YT1D_BASE_URL) && process.env.YT1D_DISABLED !== '1'),
+    resolve: async ({ url, kind, quality, timeoutMs }) => {
+      if (!yt1d.extractVideoId(url)) {
+        throw new Error('yt1d: only YouTube URLs are supported');
+      }
+      const hit = await yt1d.resolveYt1d(url, { kind, quality, timeoutMs });
+      if (!hit || !isHttp(hit.url)) throw new Error('yt1d: no media URL returned');
+      return hit;
+    },
+  },
+  {
     name: 'gifted',
     kinds: ['audio', 'video'],
     enabled: () => Boolean(String(config.giftedApi?.apiKey || '').trim()),
     resolve: async ({ url, kind, quality, timeoutMs }) => {
       const hit = kind === 'audio'
-        ? await APIs.getGiftedAudioByUrl(url, { timeout: timeoutMs })
-        : await APIs.getGiftedVideoByUrl(url, quality, { timeout: timeoutMs });
+        ? await APIs.getGiftedAudioByUrl(url, { timeout: Math.min(timeoutMs, 20000) })
+        : await APIs.getGiftedVideoByUrl(url, quality, { timeout: Math.min(timeoutMs, 20000) });
       if (!hit || !isHttp(hit.download)) throw new Error('gifted: no download URL');
       return {
         provider: 'gifted',
