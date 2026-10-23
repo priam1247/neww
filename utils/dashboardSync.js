@@ -18,6 +18,8 @@ const config = require('../config');
 const { readWL, writeWL } = require('./accessControl');
 const { inspectDisk } = require('./diskSpace');
 const { panelRestart } = require('./panelClient');
+const jobQueue = require('./jobQueue');
+const telemetry = require('./telemetry');
 const log = require('./logger')('dashboardSync');
 
 const WL_FILE = path.join(__dirname, '..', 'database', 'whitelist.json');
@@ -253,6 +255,17 @@ function startDashboardSync(opts = {}) {
       /* non-fatal */
     }
 
+    const stats = telemetry.snapshot();
+    let queueLight = 0;
+    let queueHeavy = 0;
+    try {
+      const q = jobQueue.stats();
+      queueLight = (q.light?.active || 0) + (q.light?.queued || 0);
+      queueHeavy = (q.heavy?.active || 0) + (q.heavy?.queued || 0);
+    } catch {
+      /* non-fatal */
+    }
+
     const localUsers = collectUnsyncedLocalUsers(wlFile);
     const batchResults = pendingResults.splice(0, pendingResults.length);
     const bodyObj = {
@@ -261,6 +274,12 @@ function startDashboardSync(opts = {}) {
       botName: config.botName,
       version: botVersion,
       uptimeSeconds: Math.floor((Date.now() - BOT_BOOT_AT) / 1000),
+      commandsTotal: stats.commandsTotal,
+      downloadsSuccess: stats.downloadsSuccess,
+      failedTotal: stats.failedTotal,
+      ramUsedMB: stats.ramUsedMB,
+      queueLight,
+      queueHeavy,
       diskUsedMB,
       diskBudgetMB,
       whitelistVersion: lastWhitelistVersion,

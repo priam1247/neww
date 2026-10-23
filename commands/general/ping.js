@@ -16,7 +16,7 @@ module.exports = {
       const sent  = await extra.reply('🏓 Pinging...');
       const ms    = Date.now() - start;
       await sock.sendMessage(extra.from, {
-        text: `╭─ 🏓 *Pong!*\n│ ⚡ ${ms}ms response\n╰─ ${config.botName || 'ZaFar Bot'}`,
+        text: `🏓 *Pong!* · ${ms}ms`,
         edit: sent.key,
       });
     } catch (err) {

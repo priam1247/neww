@@ -30,15 +30,7 @@ const MOVIES = () => config.movies || {};
 const pad = (n) => String(n).padStart(2, '0');
 
 const help = (P) =>
-  `📺 *Series*\n\n` +
-  `*${P}series <title> s01e03 [quality]*  — one episode\n` +
-  `*${P}series <title> s01 1-6 [quality]*  — episode range\n` +
-  `*${P}series <title> s01 full [quality]* — season pack\n` +
-  `*${P}series <title> 2 [quality]*        — season 2 options\n\n` +
-  `e.g.  ${P}series Full House s01e03 720\n` +
-  `      ${P}series 9-1-1 s02 1-4\n` +
-  `      ${P}series the boys 2\n\n` +
-  `qualities: 480 · 720 · 1080 · 2160 (4k)`;
+  `Usage: ${P}series <title> s01e03 | s01 1-6 | s01 full [480|720|1080]`;
 
 function parseArgs(args) {
   const rawTokens = (args || []).map((a) => String(a || '').trim()).filter(Boolean);
@@ -313,9 +305,8 @@ async function sendEpisode(sock, msg, chatId, file, meta, season, episode, quali
   const shownQuality = res.quality || quality;
   const note = res.downgraded ? ` _(no ${quality}p — ${shownQuality}p)_` : '';
   const caption =
-    `📺 *${meta.title}* — ${tag}\n` +
-    `💾 ${(stat.size / 1048576).toFixed(0)} MB · ${shownQuality}p${note}\n` +
-    `📡 ${res.provider}${res.tier !== undefined ? ` · tier ${res.tier}` : ''}`;
+    `📺 *${meta.title}* ${tag}\n` +
+    `${(stat.size / 1048576).toFixed(0)} MB · ${shownQuality}p${note}`;
 
   await host.deliver(sock, chatId, msg, {
     file,
@@ -403,17 +394,16 @@ async function deliverSeasonPack(sock, msg, extra, meta, job) {
 
     await host.release(file).catch(() => false);
     packFile = null;
+    require('../../utils/telemetry').recordDownloadSuccess('series');
     return react('✅');
   } catch (e) {
+    require('../../utils/telemetry').recordFailure('series');
     log.error(`${meta.title} S${pad(season)} pack · ${e.code || 'FAIL'} · ${String(e.message || '').split('\n')[0]}`);
     await react('❌');
     if (e.code === 'NOT_ENOUGH_DISK') {
       return say(safeErrorMessage(e, { isOwner: Boolean(extra?.isOwner) }));
     }
-    return say(
-      `❌ No full season pack found for *${meta.title}* S${pad(season)}.\n` +
-      `💡 Try downloading episodes instead: \`${config.prefix}series ${meta.title.toLowerCase()} s${pad(season)} 1-4\``
-    );
+    return say(`❌ No season pack for *${meta.title}* S${pad(season)}.`);
   } finally {
     if (packFile) await host.release(packFile).catch(() => false);
     packReservation?.release?.();
@@ -556,14 +546,16 @@ async function deliver(sock, msg, extra, meta, job) {
     }
   }
 
-  // Silence on success (the files are the answer); one short line on failure.
+  const telemetry = require('../../utils/telemetry');
+  if (sent > 0) telemetry.recordDownloadSuccess('series', sent);
+  if (failures.length > 0) telemetry.recordFailure('series', failures.length);
+
   if (!failures.length) return react('✅');
 
   await react(sent ? '⚠️' : '❌');
   const alts = sent ? [] : await engine.alternatives(job.matches, { chosen: meta }).catch(() => []);
   const hint = alts.length
-    ? `\n💡 Did you mean *${alts[0].title}*${alts[0].year ? ` (${alts[0].year})` : ''}?` +
-      `\n→ ${config.prefix}series ${alts[0].title.toLowerCase()} s${pad(season)}`
+    ? `\n💡 Did you mean *${alts[0].title}*${alts[0].year ? ` (${alts[0].year})` : ''}?`
     : '';
   return say(
     `⚠️ *${meta.title}* S${pad(season)} — ${sent}/${episodes.length} sent\n` +
@@ -585,15 +577,8 @@ module.exports = {
     const job = parseArgs(args);
     if (!job.title) return extra.reply(help(P));
 
-    // No episode/season marker at all → ask clearly (preserving titles like "Full House" & "9-1-1")
     if (!job.hasTarget) {
-      return extra.reply(
-        `❓ Which season or episode of *${job.title}*?\n\n` +
-        `Try:\n` +
-        `• \`${P}series ${job.title} s01e01\`\n` +
-        `• \`${P}series ${job.title} s01 1-4\`\n` +
-        `• \`${P}series ${job.title} 1\``
-      );
+      return extra.reply(`❓ Specify episode/season: \`${P}series ${job.title} s01e01\``);
     }
 
     try {

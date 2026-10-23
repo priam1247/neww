@@ -20,6 +20,7 @@ const YT = require('./youtubedl');
 const settings = require('./mediaSettings');
 const providers = require('./downloadProviders');
 const jobQueue = require('./jobQueue');
+const telemetry = require('./telemetry');
 const {
   downloadToFile, sniffFile, audioToMp3, tagMp3, ensureWhatsAppMp4, probeMedia, safeName, fmtMB,
 } = require('./mediaTransfer');
@@ -220,6 +221,7 @@ async function downloadAndSend(sock, msg, extra, {
         caption: `🖼️ *${safeName(title, 'image')}*${author ? `\n👤 ${author}` : ''}\n📦 ${fmtMB(size)}${viaText}`,
       }, { quoted: msg });
       await react('✅');
+      telemetry.recordDownloadSuccess('image');
       return { sent: true, kind: 'image', via };
     }
 
@@ -233,8 +235,6 @@ async function downloadAndSend(sock, msg, extra, {
         const mp3 = await audioToMp3(file, `${outBase}_wa.mp3`);
         if (mp3) { files.push(mp3); finalFile = mp3; ext = 'mp3'; mime = 'audio/mpeg'; }
       }
-      // Tag before sending: a document keeps its name, but the file the user
-      // saves should still show the song title and artist in any player.
       if (ext === 'mp3') {
         const tagged = await tagMp3(finalFile, `${outBase}_tagged.mp3`, { title: safeName(title, ''), artist: author });
         if (tagged) { files.push(tagged); finalFile = tagged; }
@@ -247,23 +247,21 @@ async function downloadAndSend(sock, msg, extra, {
       const fileName = `${name}.${ext}`;
       const caption = `🎵 *${name}*${author ? `\n👤 ${author}` : ''}\n📦 ${fmtMB(size)}${viaText}`;
 
-      // Documents by default — the filename is where the artist/song name live.
       if (String(config.song?.sendAs || 'document').toLowerCase() === 'audio') {
-        const sent = await sock.sendMessage(chatId, { audio: { url: finalFile }, mimetype: mime, ptt: false, fileName }, { quoted: msg });
+        await sock.sendMessage(chatId, { audio: { url: finalFile }, mimetype: mime, ptt: false, fileName }, { quoted: msg });
       } else {
-        const sent = await sock.sendMessage(chatId, { document: { url: finalFile }, mimetype: mime, fileName, caption }, { quoted: msg });
+        await sock.sendMessage(chatId, { document: { url: finalFile }, mimetype: mime, fileName, caption }, { quoted: msg });
       }
       await react('✅');
+      telemetry.recordDownloadSuccess('audio');
       return { sent: true, kind: 'audio', via };
     }
 
     // ── Video ──────────────────────────────────────────────────────────────
     const ready = await ensureWhatsAppMp4(file, path.join(getTempDir(), `${stamp}_wa.mp4`));
     files.push(ready);
-    if (ready !== file) deleteTempFile(file);   // a 2 GB source must not sit on disk twice
+    if (ready !== file) deleteTempFile(file);
 
-    // A silent video is worse than an error: verify the audio track survived the
-    // download and the remux before anything is sent.
     const audioCheck = await probeMedia(ready);
     if (audioCheck.probed && !audioCheck.hasAudio) {
       throw Object.assign(new Error('the downloaded video has no audio track'), { code: 'NO_AUDIO' });
@@ -276,20 +274,21 @@ async function downloadAndSend(sock, msg, extra, {
     const caption = `🎬 *${title || name}*${author ? `\n👤 ${author}` : ''}\n📦 ${fmtMB(size)} • ${height}p${viaText}`;
 
     if (size > AS_DOC_ABOVE) {
-      const sent = await sock.sendMessage(chatId, { document: { url: ready }, mimetype: 'video/mp4', fileName: `${name}.mp4`, caption }, { quoted: msg });
+      await sock.sendMessage(chatId, { document: { url: ready }, mimetype: 'video/mp4', fileName: `${name}.mp4`, caption }, { quoted: msg });
     } else {
-      const sent = await sock.sendMessage(chatId, { video: { url: ready }, mimetype: 'video/mp4', caption }, { quoted: msg });
+      await sock.sendMessage(chatId, { video: { url: ready }, mimetype: 'video/mp4', caption }, { quoted: msg });
     }
     await react('✅');
+    telemetry.recordDownloadSuccess('video');
     return { sent: true, kind: 'video', via };
   } catch (err) {
+    telemetry.recordFailure('media');
     const info = YT.classify(err);
     const merged = attempts.length ? attempts : (err.attempts || info.attempts);
-    // One short line, never a wall of engine detail.
     if (info.code === 'TOO_BIG') {
-      await say(`❌ Too big (video ${MAX_VIDEO_MB} MB / audio ${MAX_AUDIO_MB} MB) — try a lower quality or a shorter clip.`);
+      await say(`❌ File exceeds limit (${MAX_VIDEO_MB} MB video / ${MAX_AUDIO_MB} MB audio).`);
     } else if (info.code === 'NO_AUDIO') {
-      await say('❌ That video has no audio track — I did not send it silently. Try another link.');
+      await say('❌ Video has no audio track.');
     } else if (err.code === 'NOT_ENOUGH_DISK') {
       const { safeErrorMessage } = require('./userErrors');
       await say(safeErrorMessage(err, { isOwner: Boolean(extra?.isOwner) }));
@@ -297,11 +296,9 @@ async function downloadAndSend(sock, msg, extra, {
       const isOwner = Boolean(extra?.isOwner);
       const tail = isOwner ? YT.attemptsSummary(merged) : '';
       const lines = String(YT.friendlyError(err, { isOwner }) + tail).split('\n').filter(Boolean);
-      await say(lines.slice(0, 3).join('\n'));
+      await say(lines.slice(0, 2).join('\n'));
     }
     await react('❌');
-    // The user has already been told what happened — report it, don't throw
-    // (callers would only end up printing the same thing twice).
     return { sent: false, kind, via: 'none', code: info.code, error: err };
   } finally {
     diskReservation?.release?.();

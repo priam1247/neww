@@ -46,14 +46,10 @@ const makeCommand = ({ name, aliases, description, usage, domains, hostLabel, la
     const url = YT.extractUrl(rest.join(' ').trim()) || YT.extractUrl(quotedTextOf(msg));
 
     if (!url) {
-      return say(`Usage: ${P}${usage.replace(/^\./, '')}\nExample: ${P}${name} https://...`);
+      return say(`Usage: ${P}${usage.replace(/^\./, '')}`);
     }
 
     const known = domains.some((d) => url.toLowerCase().includes(d));
-    if (!known) {
-      await say(`ℹ️ That is not a ${hostLabel} link — using the general downloader.`);
-    }
-
     const imageUrl = /\.(?:avif|gif|jpe?g|png|webp)(?:[?#]|$)/i.test(url);
     const lane = kind === 'audio' || kind === 'image' || imageUrl ? 'light' : 'heavy';
 

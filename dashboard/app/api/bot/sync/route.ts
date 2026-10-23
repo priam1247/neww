@@ -10,6 +10,7 @@ import {
   claimPendingBotCommands,
   completeBotCommand,
   computeWhitelistSnapshot,
+  getBotHeartbeat,
   getNextBotPollMs,
   getStoredWhatsAppUser,
   saveBotHeartbeat,
@@ -86,23 +87,40 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // 3. Store fresh bot heartbeat
+  // 3. Store fresh bot heartbeat + live telemetry counters
+  const prevHb = await getBotHeartbeat();
   await saveBotHeartbeat({
     lastSeenAt: Date.now(),
     connected: Boolean(body.connected),
     botNumber: body.botNumber ? String(body.botNumber) : null,
-    botName: typeof body.botName === 'string' ? body.botName : undefined,
-    version: typeof body.version === 'string' ? body.version : undefined,
+    botName: typeof body.botName === 'string' ? body.botName : prevHb?.botName,
+    version: typeof body.version === 'string' ? body.version : prevHb?.version,
     uptimeSeconds:
-      typeof body.uptimeSeconds === 'number' ? body.uptimeSeconds : undefined,
+      typeof body.uptimeSeconds === 'number' ? body.uptimeSeconds : prevHb?.uptimeSeconds,
+    commandsTotal:
+      typeof body.commandsTotal === 'number'
+        ? body.commandsTotal
+        : (prevHb?.commandsTotal ?? 0),
+    downloadsSuccess:
+      typeof body.downloadsSuccess === 'number'
+        ? body.downloadsSuccess
+        : (prevHb?.downloadsSuccess ?? 0),
+    failedTotal:
+      typeof body.failedTotal === 'number'
+        ? body.failedTotal
+        : (prevHb?.failedTotal ?? 0),
+    ramUsedMB:
+      typeof body.ramUsedMB === 'number' ? body.ramUsedMB : prevHb?.ramUsedMB,
     diskUsedMB:
-      typeof body.diskUsedMB === 'number' ? body.diskUsedMB : undefined,
+      typeof body.diskUsedMB === 'number' ? body.diskUsedMB : prevHb?.diskUsedMB,
     diskBudgetMB:
-      typeof body.diskBudgetMB === 'number' ? body.diskBudgetMB : undefined,
+      typeof body.diskBudgetMB === 'number'
+        ? body.diskBudgetMB
+        : prevHb?.diskBudgetMB,
     queueLight:
-      typeof body.queueLight === 'number' ? body.queueLight : undefined,
+      typeof body.queueLight === 'number' ? body.queueLight : prevHb?.queueLight,
     queueHeavy:
-      typeof body.queueHeavy === 'number' ? body.queueHeavy : undefined,
+      typeof body.queueHeavy === 'number' ? body.queueHeavy : prevHb?.queueHeavy,
   });
 
   // 4. Compute versioned whitelist delta + claim queued commands + poll interval

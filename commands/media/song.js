@@ -87,13 +87,12 @@ const execute = async (sock, msg, args, extra) => {
 
     let text = args.join(' ').trim();
     if (text.startsWith('!')) { firstHit = true; text = text.slice(1).trim(); }
-    if (!text) return reply(`Usage: .song <song name or YouTube link>\nExample: .song Faded Alan Walker`);
+    if (!text) return reply('Usage: .song <name or YouTube link>');
 
     const id = stamp();
     const outBase = path.join(getTempDir(), id);
     const files = [];
     const attempts = [];
-    let progress = null;
 
     try {
       // ── 1. Resolve to a YouTube URL + metadata ────────────────────────────
@@ -108,16 +107,15 @@ const execute = async (sock, msg, args, extra) => {
         if (!results.length) {
           const engine = YT.resolveCommand() || await YT.ensureInstalled();
           if (!engine) return reply(YT.friendlyError({ code: 'NO_YTDLP' }, { isOwner: Boolean(extra?.isOwner) }));
-          return reply('❌ No results found for that search. Try a different spelling, or paste a YouTube link.');
+          return reply('❌ No results found.');
         }
 
         const pickerOn = settings.get('searchPicker', config.search?.picker === true) !== false;
         if (results.length > 1 && pickerOn && !firstHit) {
-          // Let the user choose instead of silently taking the first hit.
           void YT.getInfo(results[0].url).catch(() => {});
           const listText = youtubeSearch.formatResults(results, {
-            header: `🔎 *Results for "${text}"*`,
-            note: `Reply with a number (1-${results.length}) to download, or *cancel*.\n_Next time, add --first to skip this step._`,
+            header: `🔎 *${text}*`,
+            note: `Reply *1–${results.length}* or *cancel*.`,
           });
           await selections.sendTextPrompt(sock, msg, extra, {
             text: listText,
@@ -293,6 +291,7 @@ const execute = async (sock, msg, args, extra) => {
         }, { quoted: msg });
       }
       await react('✅');
+      require('../../utils/telemetry').recordDownloadSuccess('audio');
       } finally {
         diskReservation.release();
         releaseHold();
@@ -301,6 +300,7 @@ const execute = async (sock, msg, args, extra) => {
         await react('⏳');
       });
     } catch (err) {
+      require('../../utils/telemetry').recordFailure('song');
       log.error(`${text || 'song'} · ${YT.classify(err).code} · ${String(err.message).split('\n')[0]}`);
       const isOwner = Boolean(extra?.isOwner);
       if (err.code === 'NOT_ENOUGH_DISK') {

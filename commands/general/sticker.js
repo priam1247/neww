@@ -62,7 +62,7 @@ module.exports = {
       targetMessage.message?.stickerMessage;
 
     if (!mediaMessage) {
-      return extra.reply('📎 Reply to an *image* / *video* with .sticker or send media with .sticker as caption.');
+      return extra.reply('📎 Reply to an image or video with .sticker');
     }
 
     const tempDir = getTempDir();

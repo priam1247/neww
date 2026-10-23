@@ -43,6 +43,7 @@ async function test(name, fn) {
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'zafar-selftest-'));
 process.chdir(sandbox);                       // engine looks for ./bin/yt-dlp
 fs.mkdirSync(path.join(sandbox, 'bin'), { recursive: true });
+require(path.join(REPO, 'utils/telemetry.js'))._resetForTests(path.join(sandbox, 'telemetry.json'));
 fs.mkdirSync(path.join(sandbox, 'database'), { recursive: true });
 
 const FAKE = path.join(sandbox, 'bin', 'yt-dlp');
@@ -2192,7 +2193,7 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       const parsedApril = paperCmd._parsePaper('APRIL 2023 NURS 2201 END OF SEMESTER.pdf');
       assert.strictEqual(parsedApril.courseCode, 'NURS');
       assert.strictEqual(parsedApril.moduleNumber, '2201');
-      assert.ok(paperCmd.MAX_PAPERS_PER_QUERY <= 5, 'papers per query not capped');
+      assert.strictEqual(paperCmd.MAX_PAPERS_PER_QUERY, 10, 'papers per query default should be 10');
 
       const prevVault = paperCmd._getVaultForTests();
       const fakeVaultFiles = Array.from({ length: 60 }, (_, idx) => ({
@@ -2545,6 +2546,62 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       const nums = savedWl.users.map((u) => u.number);
       assert.ok(nums.includes('265991112233'), 'whitelist delta not applied');
       assert.ok(nums.includes('265998887766'), 'paired number not added to whitelist');
+    });
+
+    await test('.providers lists active providers cleanly and telemetry syncs live counters', async () => {
+      const [providersCmd] = require(path.join(REPO, 'commands/general/providers.js'));
+      const telemetry = require(path.join(REPO, 'utils/telemetry.js'));
+      const { startDashboardSync } = require(path.join(REPO, 'utils/dashboardSync.js'));
+
+      let outText = '';
+      await providersCmd.execute(
+        {},
+        { key: { remoteJid: 'c@s.whatsapp.net' } },
+        [],
+        { reply: async (t) => { outText = String(t); } },
+      );
+      const lines = outText.trim().split('\n').filter(Boolean);
+      assert.ok(lines[0].startsWith('*Providers ('), `missing clean header: ${outText}`);
+      for (const p of ['moviebox', 'eztv', 'nyaa', 'solidtorrents', 'apibay', 'torrentio', 'yts']) {
+        assert.ok(outText.includes(p), `missing provider ${p}`);
+      }
+      assert.ok(!/Metadata|TMDB|debrid|trust\s+\d|hdhub4u/i.test(outText), `.providers still contains verbose metadata: ${outText}`);
+
+      const telFile = path.join(sandbox, 'telemetry-check.json');
+      telemetry._resetForTests(telFile);
+      telemetry.recordCommand('song');
+      telemetry.recordCommand('paper');
+      telemetry.recordDownloadSuccess('audio', 1);
+      telemetry.recordDownloadSuccess('paper', 3);
+      telemetry.recordFailure('ytv', 1);
+      telemetry.flushNow();
+
+      const snap = telemetry.snapshot();
+      assert.strictEqual(snap.commandsTotal, 2);
+      assert.strictEqual(snap.downloadsSuccess, 4);
+      assert.strictEqual(snap.failedTotal, 1);
+      assert.ok(snap.ramUsedMB > 0);
+
+      let syncPayload = null;
+      const sync = startDashboardSync({
+        manualOnly: true,
+        dashboardUrl: 'https://portal.example.test',
+        token: 'sync_secret_telemetry',
+        wlFile: path.join(sandbox, 'wl-tel.json'),
+        fetchImpl: async (_url, opts) => {
+          syncPayload = JSON.parse(opts.body);
+          return { ok: true, status: 200, json: async () => ({ ok: true, commands: [] }) };
+        },
+        getStatus: () => ({ connected: true, botNumber: '265894016453' }),
+      });
+      await sync.syncNow();
+      sync.stop();
+
+      assert.strictEqual(syncPayload.commandsTotal, 2);
+      assert.strictEqual(syncPayload.downloadsSuccess, 4);
+      assert.strictEqual(syncPayload.failedTotal, 1);
+      assert.strictEqual(typeof syncPayload.uptimeSeconds, 'number');
+      assert.strictEqual(typeof syncPayload.ramUsedMB, 'number');
     });
   }
 

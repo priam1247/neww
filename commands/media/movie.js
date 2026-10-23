@@ -60,12 +60,7 @@ function parseArgs(args) {
   return { title, year, quality, explicitQuality };
 }
 
-const help = (P) =>
-  `🎬 *Movies*\n\n` +
-  `*${P}movie <title> [year] [quality]*\n` +
-  `e.g.  ${P}movie inception 2010 1080\n` +
-  `      ${P}movie dune 2021\n\n` +
-  `qualities: 480 · 720 · 1080 · 2160 (4k)`;
+const help = (P) => `Usage: ${P}movie <title> [year] [480|720|1080|2160]`;
 
 const sanitize = (name) => String(name || 'subtitle')
   .replace(/[\\/:*?"<>|]+/g, ' ')
@@ -301,25 +296,21 @@ async function deliver(sock, msg, extra, meta, job) {
     });
 
     await trySubtitles(sock, chatId, msg, meta);
-    // The chat has the file now — delete it, nothing is cached.
     await host.release(file).catch(() => false);
     activeFile = null;
     await react('✅');
+    require('../../utils/telemetry').recordDownloadSuccess('movie');
   } catch (e) {
-    // full message: the logger collapses the bullets onto one line, so the
-    // reason (dead host, quality mismatch, no candidates) stays visible
+    require('../../utils/telemetry').recordFailure('movie');
     log.error(`${meta.title}${meta.year ? ` (${meta.year})` : ''} · ${e.code || 'FAIL'} · ${e.message}`);
     await react('❌');
-    // A bare "no source" is useless when the title matched a 0-vote ghost:
-    // say what it matched and offer the film the user probably meant.
     const alts = await engine.alternatives(job.matches, { chosen: meta }).catch(() => []);
     const matched = `*${meta.title}*${meta.year ? ` (${meta.year})` : ''}`;
     const hint = alts.length
-      ? `\n💡 Did you mean *${alts[0].title}*${alts[0].year ? ` (${alts[0].year})` : ''}?` +
-        `\n→ ${config.prefix}movie ${alts[0].title.toLowerCase()}${alts[0].year ? ` ${alts[0].year}` : ''}`
+      ? `\n💡 Did you mean *${alts[0].title}*${alts[0].year ? ` (${alts[0].year})` : ''}?`
       : '';
     if (e.code === 'SHORT' || /trailer\/fake/.test(String(e.message))) {
-      return say(`❌ Only a trailer/fake clip of ${matched} is out there right now — no full-length copy yet.`);
+      return say(`❌ No full-length source for ${matched} yet.`);
     }
     if (e.code === 'NOT_ENOUGH_DISK') {
       return say(safeErrorMessage(e, { isOwner: Boolean(extra?.isOwner) }));

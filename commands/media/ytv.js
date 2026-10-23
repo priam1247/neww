@@ -76,13 +76,12 @@ const execute = async (sock, msg, args, extra) => {
   if (query.startsWith('!')) { firstHit = true; query = query.slice(1).trim(); }
 
   if (!query) {
-    return say(`Usage: .ytv <YouTube link or name> [quality]\nQualities: ${QUALITIES.join(', ')} (default ${DEFAULT_HEIGHT}p)`);
+    return say(`Usage: .ytv <name or link> [360|480|720|1080]`);
   }
 
   const attempts = [];
   let title = '', author = '', duration = 0, thumbnail = '';
 
-  // ── Search phrases: list the results and let the user pick ───────────────
   if (!YT.isYouTubeUrl(query)) {
     const maxResults = Number(config.search?.maxResults) || 5;
     const results = await youtubeSearch.searchYouTube(query, { limit: maxResults });
@@ -90,15 +89,15 @@ const execute = async (sock, msg, args, extra) => {
     if (!results.length) {
       const engine = YT.resolveCommand() || await YT.ensureInstalled();
       if (!engine) return say(YT.friendlyError({ code: 'NO_YTDLP' }, { isOwner: Boolean(extra?.isOwner) }));
-      return say('❌ No results found for that search.');
+      return say('❌ No results found.');
     }
 
     const pickerOn = config.search?.picker !== false && settings.get('searchPicker', true) !== false;
     if (results.length > 1 && pickerOn && !firstHit) {
       void YT.getInfo(results[0].url).catch(() => {});
       const listText = youtubeSearch.formatResults(results, {
-        header: `🔎 *Results for "${query}"*`,
-        note: `Reply with a number (1-${results.length}) to download in ${height}p, or *cancel*.\n_Next time, add --first to skip this step._`,
+        header: `🔎 *${query}*`,
+        note: `Reply *1–${results.length}* (${height}p) or *cancel*.`,
       });
       await selections.sendTextPrompt(sock, msg, extra, {
         text: listText,
@@ -247,7 +246,9 @@ const execute = async (sock, msg, args, extra) => {
       const sent = await sock.sendMessage(chatId, { video: { url: ready }, mimetype: 'video/mp4', caption }, { quoted: msg });
     }
     await react('✅');
+    require('../../utils/telemetry').recordDownloadSuccess('video');
   } catch (err) {
+    require('../../utils/telemetry').recordFailure('ytv');
     log.error(`${title || query || 'video'} · ${YT.classify(err).code} · ${String(err.message).split('\n')[0]}`);
     const info = YT.classify(err);
     const merged = attempts.length ? attempts : (err.attempts || info.attempts);
