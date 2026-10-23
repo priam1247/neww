@@ -2603,6 +2603,21 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       assert.strictEqual(typeof syncPayload.uptimeSeconds, 'number');
       assert.strictEqual(typeof syncPayload.ramUsedMB, 'number');
     });
+
+    await test('hotReload purges cached commands/handler from disk when panel power API returns 404', () => {
+      const { onReload, reloadRuntime } = require(path.join(REPO, 'utils', 'hotReload'));
+      const telemetry = require(path.join(REPO, 'utils', 'telemetry'));
+      const beforeHandler = require(path.join(REPO, 'handler'));
+      let notified = null;
+      const off = onReload((h) => { notified = h; });
+      const res = reloadRuntime();
+      off();
+      assert.strictEqual(res.ok, true);
+      assert.ok(res.evicted > 10, `expected >10 evicted modules, got ${res.evicted}`);
+      assert.ok(notified && typeof notified.handleMessage === 'function');
+      assert.notStrictEqual(notified, beforeHandler, 'handler should be reloaded fresh from disk');
+      assert.strictEqual(telemetry.snapshot().commandsTotal, 2, 'telemetry singleton must survive hotReload');
+    });
   }
 
   // ─── summary ────────────────────────────────────────────────────────────────

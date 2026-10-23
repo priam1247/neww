@@ -78,7 +78,9 @@ const {
 } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
 const config = require('./config');
-const handler = require('./handler');
+let handler = require('./handler');
+const { onReload, reloadRuntime } = require('./utils/hotReload');
+onReload((freshHandler) => { handler = freshHandler; });
 const { createReconnector } = require('./utils/reconnect');
 const { isSystemJid } = require('./utils/jid');
 const fs = require('fs');
@@ -500,7 +502,13 @@ require('./utils/logger').banner([
     },
     requestPairing: requestPairForDashboard,
     requestRestart: async () => {
-      console.log('🔄 Dashboard requested bot reconnect/restart...');
+      console.log('🔄 Dashboard requested bot reload + reconnect...');
+      try {
+        const res = reloadRuntime();
+        console.log(`♻️ Hot-reloaded ${res.evicted} module(s) from disk.`);
+      } catch (err) {
+        console.error('⚠️ Hot-reload warning:', err?.message || err);
+      }
       if (currentSock) {
         try { currentSock.end(new Error('dashboard restart requested')); } catch { /* ignore */ }
       } else {
