@@ -1,36 +1,49 @@
 /**
- * ZaFar Bot — Hardened Pending Choices & WhatsApp Polls
+ * ZaFar Bot — Interactive Selector (`single_select`), Polls & Pending Choices
  *
- * Supports two ways for a user to answer a bot prompt (.movie, .series, .song, .ytv):
- *   1. Tapping a WhatsApp Poll option (`pollCreationMessageV3` → `pollUpdateMessage`),
- *      decrypted with Baileys' `decryptPollVote`.
- *   2. Replying with a number ("2", "2.", "#2") — either quoting the specific
- *      prompt message OR sending a bare number in the chat.
+ * Primary UX on live WhatsApp sockets (`sock.relayMessage`):
+ *   • Native Flow `single_select` bottom-sheet selector (`interactiveMessage` +
+ *     `<biz><interactive type="native_flow">`), so users simply tap a button
+ *     and tap the movie / series / quality they want.
  *
- * Hardening guarantees:
- *   • Unique offer IDs (`sel_<seq>_<ts>`) and unique per-offer row IDs.
- *   • Quoted-message binding: if the user quotes a specific message (`quotedId`),
- *     ONLY the prompt matching that `promptMessageId` can be triggered — quoting
- *     a friend's message with "2" in a group chat will NEVER trigger a pending
- *     download! Multiple concurrent prompts by the same user can also be
- *     disambiguated by quoting the desired prompt.
- *   • PN / LID JID awareness via `jidVariants`: a user whose WhatsApp JID flips
- *     between `@s.whatsapp.net` and `@lid` still owns their own pending choice,
- *     and nobody else in a group can vote on or hijack their poll.
- *   • Send-failure hygiene (`sendPollOrText` / `sendTextPrompt`): any stale
- *     previous choice is cleared upfront, and the new pending choice is ONLY
- *     stored after `sock.sendMessage` succeeds.
- *   • Single-execution lock: voting on a poll immediately consumes the paired
- *     typed-number entry (and vice-versa), so tapping + typing "1" never runs twice.
+ * Automatic fallbacks:
+ *   • WhatsApp Poll (`pollCreationMessageV3` → `pollUpdateMessage`) when
+ *     `relayMessage` is unavailable (e.g. unit-test sockets) or fails.
+ *   • Clean numbered text card when >24 items or polls are unsupported.
+ *   • Typed numbers ("1", "2", "#2") always work alongside tap selectors.
  */
 
 const crypto = require('crypto');
-const { jidNormalizedUser } = require('@whiskeysockets/baileys');
+const {
+  proto,
+  generateWAMessageFromContent,
+  normalizeMessageContent,
+  getContentType,
+  jidNormalizedUser,
+} = require('@whiskeysockets/baileys');
 const { decryptPollVote } = require('@whiskeysockets/baileys/lib/Utils/process-message');
 const { jidVariants } = require('./jid');
 
 const DEFAULT_TTL_MS = 5 * 60 * 1000;
 const MAX_POLL_OPTIONS = 12;
+const MAX_SELECTOR_ROWS = 24;
+
+const BIZ_NATIVE_FLOW_NODE = {
+  tag: 'biz',
+  attrs: {},
+  content: [
+    {
+      tag: 'interactive',
+      attrs: { type: 'native_flow', v: '1' },
+      content: [
+        {
+          tag: 'native_flow',
+          attrs: { v: '9', name: 'mixed' },
+        },
+      ],
+    },
+  ],
+};
 
 let _seq = 0;
 const nextOfferId = () => `sel_${++_seq}_${Date.now().toString(36)}`;
@@ -39,10 +52,31 @@ const nextOfferId = () => `sel_${++_seq}_${Date.now().toString(36)}`;
 const pending = new Map();
 // Prompt message ID -> entry (lets quoted replies target the exact prompt)
 const pendingByMsgId = new Map();
+// Offer ID -> entry (lets `sel_<id>:<row>` taps resolve directly)
+const pendingByOfferId = new Map();
 // Poll message ID -> poll entry (for `pollUpdateMessage` vote decryption)
 const pendingPolls = new Map();
 
 const sha256Hex = (text) => crypto.createHash('sha256').update(String(text), 'utf8').digest('hex');
+
+/**
+ * Guard `{ quoted: msg }` so Baileys' `generateWAMessageFromContent` never
+ * crashes with `Cannot read properties of undefined (reading 'undefined')`
+ * when a synthetic or poll-vote message lacks `.message`.
+ */
+function canQuote(msg) {
+  if (!msg || !msg.key || !msg.message) return false;
+  try {
+    const inner = normalizeMessageContent(msg.message);
+    return Boolean(inner && getContentType(inner));
+  } catch {
+    return false;
+  }
+}
+
+function quoteOpts(msg) {
+  return canQuote(msg) ? { quoted: msg } : {};
+}
 
 function senderKeys(chatId, sender) {
   const variants = [...jidVariants(sender)];
@@ -59,6 +93,9 @@ function removeEntry(entry) {
   if (entry.promptMessageId && pendingByMsgId.get(entry.promptMessageId) === entry) {
     pendingByMsgId.delete(entry.promptMessageId);
   }
+  if (entry.offerId && pendingByOfferId.get(entry.offerId) === entry) {
+    pendingByOfferId.delete(entry.offerId);
+  }
   if (entry.pollMessageId) {
     pendingPolls.delete(entry.pollMessageId);
   }
@@ -72,6 +109,12 @@ function prune() {
   for (const [id, entry] of pendingByMsgId) {
     if (entry.consumed || now - entry.at > entry.ttlMs) {
       pendingByMsgId.delete(id);
+      removeEntry(entry);
+    }
+  }
+  for (const [id, entry] of pendingByOfferId) {
+    if (entry.consumed || now - entry.at > entry.ttlMs) {
+      pendingByOfferId.delete(id);
       removeEntry(entry);
     }
   }
@@ -95,18 +138,6 @@ function senderMatches(entry, sender) {
 
 /**
  * Register a pending choice.
- *
- * @param {{
- *   chatId: string,
- *   sender: string|string[],
- *   items: any[],
- *   run: Function,
- *   ttlMs?: number,
- *   label?: string,
- *   ids?: string[]|null,
- *   promptMessageId?: string|null
- * }} opts
- * @returns {string} unique offerId
  */
 function offer({
   chatId,
@@ -117,22 +148,22 @@ function offer({
   label = '',
   ids = null,
   promptMessageId = null,
+  offerId: explicitOfferId = null,
+  originMsg = null,
 }) {
   if (!Array.isArray(items) || !items.length || typeof run !== 'function') {
     throw new Error('offer() needs items and a run callback');
   }
   prune();
 
-  const offerId = nextOfferId();
+  const offerId = explicitOfferId || nextOfferId();
   const keys = senderKeys(chatId, sender);
   const senderSet = new Set(jidVariants(sender));
-  const rawIds = Array.isArray(ids) ? ids.map((x) => String(x)) : null;
-  const scopedIds = rawIds ? rawIds.map((x) => `${offerId}:${x}`) : null;
+  const rawIds = Array.isArray(ids) && ids.length === items.length
+    ? ids.map((x) => String(x))
+    : items.map((_, i) => String(i));
+  const scopedIds = rawIds.map((x) => `${offerId}:${x}`);
 
-  // Replace the latest unquoted slot for this sender in this chat, while keeping
-  // any earlier message-bound entries addressable ONLY via direct quote if needed
-  // — actually replacing previous unconsumed entry for the same sender avoids
-  // stale choices piling up.
   for (const k of keys) {
     const prev = pending.get(k);
     if (prev) removeEntry(prev);
@@ -149,14 +180,16 @@ function offer({
     items,
     run,
     label,
-    ids: rawIds,
+    ids: Array.isArray(ids) ? ids.map((x) => String(x)) : null,
     scopedIds,
     promptMessageId: promptMessageId ? String(promptMessageId) : null,
     pollMessageId: null,
+    originMsg: canQuote(originMsg) ? originMsg : null,
     consumed: false,
   };
 
   for (const k of keys) pending.set(k, entry);
+  pendingByOfferId.set(offerId, entry);
   if (entry.promptMessageId) {
     pendingByMsgId.set(entry.promptMessageId, entry);
   }
@@ -165,25 +198,25 @@ function offer({
 }
 
 /**
- * Send a WhatsApp Poll (up to 12 options) with automatic numbered-text fallback,
- * and register both the poll vote handler and typed-number fallback ONLY if
- * sending succeeds. Any stale pending choice for `(chatId, sender)` is cleared
- * before sending so a failed send never leaves stale state behind.
- *
- * @param {object} sock
- * @param {object} msg
- * @param {object} extra
- * @param {{
- *   pollName: string,
- *   optionLabels: string[],
- *   fallbackText: string,
- *   fallbackImage?: string|null,
- *   items: any[],
- *   ids?: string[]|null,
- *   label?: string,
- *   ttlMs?: number,
- *   run: Function,
- * }} spec
+ * Extract selected row ID or text from an incoming `interactiveResponseMessage`.
+ */
+function extractInteractiveSelection(content) {
+  const irm = content?.interactiveResponseMessage;
+  if (!irm) return '';
+  const rawJson = irm.nativeFlowResponseMessage?.paramsJson;
+  if (rawJson) {
+    try {
+      const parsed = JSON.parse(rawJson);
+      const id = parsed?.id || parsed?.selectedId || parsed?.rowId || '';
+      if (id) return String(id).trim();
+    } catch { /* fall through */ }
+  }
+  return String(irm.body?.text || '').trim();
+}
+
+/**
+ * Send a Native Flow `single_select` tap selector on live WhatsApp sockets,
+ * falling back cleanly to a WhatsApp Poll or numbered text card.
  */
 async function sendPollOrText(sock, msg, extra, spec) {
   const chatId = extra?.from || msg?.key?.remoteJid;
@@ -195,7 +228,7 @@ async function sendPollOrText(sock, msg, extra, spec) {
   ].filter(Boolean);
   const sender = senderList.length ? senderList : [chatId];
 
-  // Always clear stale choices first — if sending throws, nothing stale remains.
+  // Clear stale choices first so a failed send never leaves stale state behind.
   clear(chatId, sender);
 
   const {
@@ -203,6 +236,7 @@ async function sendPollOrText(sock, msg, extra, spec) {
     optionLabels = [],
     fallbackText,
     fallbackImage = null,
+    selector = null,
     items,
     ids = null,
     label = '',
@@ -210,19 +244,123 @@ async function sendPollOrText(sock, msg, extra, spec) {
     run,
   } = spec;
 
-  const canPoll =
-    items.length >= 2 &&
-    items.length <= MAX_POLL_OPTIONS &&
-    optionLabels.length === items.length;
+  const preOfferId = nextOfferId();
+  const rawIds = Array.isArray(ids) && ids.length === items.length
+    ? ids.map((x) => String(x))
+    : items.map((_, i) => String(i));
+  const scopedIds = rawIds.map((x) => `${preOfferId}:${x}`);
 
   let sent = null;
+  let usedSelector = false;
   let usedPoll = false;
   let messageSecret = null;
   let finalValues = null;
 
+  // ── 1. Primary: Native Flow `single_select` tap-to-select drawer ─────────
+  const canSelector =
+    typeof sock?.relayMessage === 'function' &&
+    Boolean(sock?.user?.id) &&
+    items.length >= 2 &&
+    items.length <= MAX_SELECTOR_ROWS &&
+    (selector?.rows?.length === items.length || optionLabels.length === items.length);
+
+  if (canSelector) {
+    try {
+      const rawLines = String(pollName || '').split('\n').map((s) => s.trim()).filter(Boolean);
+      const headerTitle = String(selector?.headerTitle || rawLines[0] || 'Select an option')
+        .replace(/\*/g, '')
+        .slice(0, 60);
+      const bodyText = String(
+        selector?.bodyText ||
+        (rawLines.length > 1 ? rawLines.slice(1).join('\n') : rawLines[0]) ||
+        'Tap below to select:',
+      ).slice(0, 1024);
+      const footerText = String(selector?.footerText || 'Tap below or reply with a number').slice(0, 60);
+      const buttonText = String(selector?.buttonText || 'Tap to Select').slice(0, 20);
+      const sectionTitle = String(selector?.sectionTitle || 'Options').slice(0, 24);
+
+      const rows = items.map((_, idx) => {
+        const custom = selector?.rows?.[idx];
+        const fallbackLbl = String(optionLabels[idx] || `Option ${idx + 1}`).replace(/\s+/g, ' ').trim();
+        const title = String(custom?.title || fallbackLbl).slice(0, 60);
+        const description = String(custom?.description || '').slice(0, 72);
+        return {
+          header: '',
+          title,
+          description,
+          id: scopedIds[idx],
+        };
+      });
+
+      const waMsg = generateWAMessageFromContent(
+        chatId,
+        {
+          viewOnceMessage: {
+            message: {
+              messageContextInfo: {
+                deviceListMetadata: {},
+                deviceListMetadataVersion: 2,
+                messageSecret: crypto.randomBytes(32),
+              },
+              interactiveMessage: proto.Message.InteractiveMessage.fromObject({
+                header: {
+                  title: headerTitle,
+                  hasMediaAttachment: false,
+                },
+                body: {
+                  text: bodyText,
+                },
+                footer: {
+                  text: footerText,
+                },
+                nativeFlowMessage: {
+                  buttons: [
+                    {
+                      name: 'single_select',
+                      buttonParamsJson: JSON.stringify({
+                        title: buttonText,
+                        sections: [
+                          {
+                            title: sectionTitle,
+                            rows,
+                          },
+                        ],
+                      }),
+                    },
+                  ],
+                  messageParamsJson: '',
+                },
+              }),
+            },
+          },
+        },
+        {
+          userJid: sock.user.id,
+          ...quoteOpts(msg),
+        },
+      );
+
+      await sock.relayMessage(chatId, waMsg.message, {
+        messageId: waMsg.key.id,
+        additionalNodes: [BIZ_NATIVE_FLOW_NODE],
+      });
+
+      sent = waMsg;
+      usedSelector = true;
+    } catch {
+      sent = null;
+      usedSelector = false;
+    }
+  }
+
+  // ── 2. Fallback: WhatsApp Poll (unit-test mocks or if relayMessage fails) ─
+  const canPoll =
+    !usedSelector &&
+    items.length >= 2 &&
+    items.length <= MAX_POLL_OPTIONS &&
+    optionLabels.length === items.length;
+
   if (canPoll) {
-    // Prefix with `1. `, `2. ` if not already numbered so option hashes are
-    // strictly unique AND users can still type a number if they prefer!
     finalValues = optionLabels.map((opt, idx) => {
       const clean = String(opt || '').replace(/\s+/g, ' ').trim();
       const numbered = /^\d+[.)]\s/.test(clean) ? clean : `${idx + 1}. ${clean}`;
@@ -241,7 +379,7 @@ async function sendPollOrText(sock, msg, extra, spec) {
             messageSecret,
           },
         },
-        { quoted: msg },
+        quoteOpts(msg),
       );
       if (sent?.key?.id) {
         usedPoll = true;
@@ -252,20 +390,22 @@ async function sendPollOrText(sock, msg, extra, spec) {
     }
   }
 
-  if (!usedPoll) {
+  // ── 3. Fallback: Numbered text card ──────────────────────────────────────
+  if (!usedSelector && !usedPoll) {
     if (fallbackImage) {
       sent = await sock.sendMessage(
         chatId,
         { image: { url: fallbackImage }, caption: fallbackText },
-        { quoted: msg },
-      ).catch(() => sock.sendMessage(chatId, { text: fallbackText }, { quoted: msg }));
+        quoteOpts(msg),
+      ).catch(() => sock.sendMessage(chatId, { text: fallbackText }, quoteOpts(msg)));
     } else {
-      sent = await sock.sendMessage(chatId, { text: fallbackText }, { quoted: msg });
+      sent = await sock.sendMessage(chatId, { text: fallbackText }, quoteOpts(msg));
     }
   }
 
   const promptMessageId = sent?.key?.id ? String(sent.key.id) : null;
   const offerId = offer({
+    offerId: preOfferId,
     chatId,
     sender,
     items,
@@ -273,12 +413,12 @@ async function sendPollOrText(sock, msg, extra, spec) {
     label,
     ttlMs,
     promptMessageId,
+    originMsg: canQuote(msg) ? msg : sent,
     run,
   });
 
-  const entry = peek(chatId, sender);
+  const entry = pendingByOfferId.get(offerId);
   if (usedPoll && promptMessageId && entry) {
-    // Capture secret generated by Baileys or our explicit 32-byte secret
     const secret =
       sent?.message?.messageContextInfo?.messageSecret ||
       messageSecret;
@@ -305,13 +445,14 @@ async function sendPollOrText(sock, msg, extra, spec) {
       optionHashes,
       values: finalValues,
       creatorJids: [...new Set(creatorCandidates)],
+      sentMsg: canQuote(sent) ? sent : null,
       at: entry.at,
       ttlMs,
       entry,
     });
   }
 
-  return { offerId, promptMessageId, usedPoll };
+  return { offerId, promptMessageId, usedSelector, usedPoll };
 }
 
 /**
@@ -338,10 +479,11 @@ async function sendTextPrompt(sock, msg, extra, {
 
   clear(chatId, sender);
 
+  const qOpts = quoteOpts(msg);
   const sent = image
-    ? await sock.sendMessage(chatId, { image: { url: image }, caption: text }, { quoted: msg })
-      .catch(() => sock.sendMessage(chatId, { text }, { quoted: msg }))
-    : await sock.sendMessage(chatId, { text }, { quoted: msg });
+    ? await sock.sendMessage(chatId, { image: { url: image }, caption: text }, qOpts)
+      .catch(() => sock.sendMessage(chatId, { text }, qOpts))
+    : await sock.sendMessage(chatId, { text }, qOpts);
 
   const promptMessageId = sent?.key?.id ? String(sent.key.id) : null;
   const offerId = offer({
@@ -352,6 +494,7 @@ async function sendTextPrompt(sock, msg, extra, {
     label,
     ttlMs,
     promptMessageId,
+    originMsg: canQuote(msg) ? msg : sent,
     run,
   });
   return { offerId, promptMessageId };
@@ -359,10 +502,6 @@ async function sendTextPrompt(sock, msg, extra, {
 
 /**
  * Resolve an incoming `pollUpdateMessage` against `pendingPolls`.
- *
- * @param {object} sock
- * @param {object} msg  raw Baileys message carrying `pollUpdateMessage`
- * @returns {{ entry: object, item: any, index: number, chatId: string, voterJid: string } | null}
  */
 function resolvePollVote(sock, msg) {
   prune();
@@ -379,12 +518,11 @@ function resolvePollVote(sock, msg) {
   const voterRawList = [
     msg.key?.participant,
     msg.key?.participantAlt,
-    ! String(msg.key?.remoteJid || '').endsWith('@g.us') ? msg.key?.remoteJid : null,
+    !String(msg.key?.remoteJid || '').endsWith('@g.us') ? msg.key?.remoteJid : null,
     msg.key?.remoteJidAlt,
     pollUpdate.pollCreationMessageKey?.participant,
   ].filter(Boolean);
 
-  // Only the user who opened this picker may vote on it
   if (!senderMatches(poll.entry, voterRawList)) {
     return null;
   }
@@ -434,7 +572,6 @@ function resolvePollVote(sock, msg) {
   }
 
   if (!decrypted || !Array.isArray(decrypted.selectedOptions) || !decrypted.selectedOptions.length) {
-    // Empty selectedOptions means user deselected their vote — keep poll alive
     return null;
   }
 
@@ -444,6 +581,15 @@ function resolvePollVote(sock, msg) {
       const index = poll.optionHashes.get(hex);
       const item = poll.entry.items[index];
       const entry = poll.entry;
+      const originMsg =
+        entry.originMsg ||
+        poll.sentMsg || {
+          key: {
+            ...(pollUpdate.pollCreationMessageKey || msg.key),
+            remoteJid: poll.chatId,
+          },
+          message: { conversation: poll.values?.[index] || entry.label || 'Selected' },
+        };
       removeEntry(entry);
       return {
         entry,
@@ -451,6 +597,7 @@ function resolvePollVote(sock, msg) {
         index,
         chatId: poll.chatId,
         voterJid: uniqueVoters[0] || entry.rawSender,
+        originMsg,
       };
     }
   }
@@ -475,15 +622,23 @@ const isCancel = (text) => /^(cancel|stop|no|nevermind|never mind)$/i.test(Strin
  * If `quotedMessageId` is supplied AND the pending entry has a `promptMessageId`,
  * they MUST match — quoting an unrelated chat message will never match!
  */
-function peek(chatId, sender, { quotedMessageId = null } = {}) {
+function peek(chatId, sender, { quotedMessageId = null, rawText = null } = {}) {
   prune();
+  if (rawText) {
+    const m = /^((?:sel)_\d+_[a-z0-9]+):/i.exec(String(rawText).trim());
+    if (m) {
+      const byOffer = pendingByOfferId.get(m[1]);
+      if (byOffer && byOffer.chatId === chatId && senderMatches(byOffer, sender)) {
+        return byOffer;
+      }
+    }
+  }
+
   if (quotedMessageId) {
     const byMsg = pendingByMsgId.get(String(quotedMessageId));
     if (byMsg && byMsg.chatId === chatId && senderMatches(byMsg, sender)) {
       return byMsg;
     }
-    // Look up sender's entry: if that entry WAS bound to a specific promptMessageId
-    // and the user quoted a DIFFERENT message, do NOT hijack their reply!
     for (const k of senderKeys(chatId, sender)) {
       const entry = pending.get(k);
       if (entry && !entry.promptMessageId) return entry;
@@ -499,18 +654,13 @@ function peek(chatId, sender, { quotedMessageId = null } = {}) {
 }
 
 /**
- * Resolve an incoming text/row reply against a pending choice.
- * @param {string} chatId
- * @param {string|string[]} sender
- * @param {string} text
- * @param {{ quotedMessageId?: string|null }} [opts]
- * @returns {{entry:object,item:any,index:number}|null}
+ * Resolve an incoming tap/row/number reply against a pending choice.
  */
 function match(chatId, sender, text, opts = {}) {
-  const entry = peek(chatId, sender, opts);
+  const raw = String(text || '').trim();
+  const entry = peek(chatId, sender, { ...opts, rawText: raw });
   if (!entry) return null;
 
-  const raw = String(text || '').trim();
   if (raw && entry.scopedIds && entry.scopedIds.includes(raw)) {
     const index = entry.scopedIds.indexOf(raw);
     removeEntry(entry);
@@ -565,9 +715,13 @@ const size = () => {
 
 module.exports = {
   offer,
+  sendSelector: sendPollOrText,
   sendPollOrText,
   sendTextPrompt,
+  extractInteractiveSelection,
   resolvePollVote,
+  canQuote,
+  quoteOpts,
   match,
   peek,
   clear,
@@ -577,4 +731,5 @@ module.exports = {
   size,
   DEFAULT_TTL_MS,
   MAX_POLL_OPTIONS,
+  MAX_SELECTOR_ROWS,
 };

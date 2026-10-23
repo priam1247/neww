@@ -2618,6 +2618,212 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
       assert.notStrictEqual(notified, beforeHandler, 'handler should be reloaded fresh from disk');
       assert.strictEqual(telemetry.snapshot().commandsTotal, 2, 'telemetry singleton must survive hotReload');
     });
+
+    await test('native single_select tap selector chains movie -> quality without undefined quote crash', async () => {
+      const { generateWAMessageFromContent, normalizeMessageContent } = require('@whiskeysockets/baileys');
+      const handler = require(path.join(REPO, 'handler'));
+      const movieCmd = require(path.join(REPO, 'commands', 'media', 'movie'));
+      const engine = require(path.join(REPO, 'utils', 'movieEngine'));
+
+      const origQual = engine.qualityOptions;
+      engine.qualityOptions = async () => ({
+        options: [
+          { quality: 1080, sizeMB: 1850, provider: 'moviebox', candidates: 1 },
+          { quality: 720, sizeMB: 850, provider: 'moviebox', candidates: 1 },
+        ],
+      });
+
+      const relayed = [];
+      let deliveredQuality = null;
+      const origDeliver = movieCmd._askQuality;
+      const lidJid = '244934032494829@lid';
+      const ownerPn = '265894016453@s.whatsapp.net';
+
+      const sock = {
+        user: { id: '265894016453:1@s.whatsapp.net' },
+        relayMessage: async (jid, message, opts) => {
+          relayed.push({ jid, message, opts });
+          return opts.messageId;
+        },
+        sendMessage: async (jid, content, opts = {}) => {
+          if (opts.quoted) {
+            // Run real Baileys quote builder to guarantee zero "reading 'undefined'" crash
+            generateWAMessageFromContent(jid, { extendedTextMessage: { text: 'ok' } }, {
+              userJid: sock.user.id,
+              quoted: opts.quoted,
+            });
+          }
+          return { key: { id: `MSG_${relayed.length}`, remoteJid: jid }, message: { conversation: 'ok' } };
+        },
+      };
+
+      const initMsg = {
+        key: { id: 'INIT_1', remoteJid: lidJid, remoteJidAlt: ownerPn, fromMe: false },
+        message: { conversation: '.movie avatar' },
+      };
+      const extra = { from: lidJid, sender: lidJid, isOwner: true, reply: (t) => sock.sendMessage(lidJid, { text: t }) };
+
+      try {
+        await movieCmd._offerChoices(
+          sock,
+          initMsg,
+          extra,
+          [
+            { title: 'Avatar', year: 2009, rating: 7.9, tmdbId: 19995 },
+            { title: 'Avatar: The Way of Water', year: 2022, rating: 7.6, tmdbId: 76600 },
+          ],
+          { title: 'Avatar', quality: 720, explicitQuality: false, matches: [] },
+          'movie',
+        );
+
+        assert.strictEqual(relayed.length, 1, 'did not relay native single_select selector');
+        assert.strictEqual(relayed[0].opts.additionalNodes?.[0]?.tag, 'biz', 'missing <biz> native_flow node');
+        const inner1 = normalizeMessageContent(relayed[0].message);
+        const btn1 = inner1.interactiveMessage.nativeFlowMessage.buttons[0];
+        assert.strictEqual(btn1.name, 'single_select');
+        const params1 = JSON.parse(btn1.buttonParamsJson);
+        assert.strictEqual(params1.title, 'Select Movie');
+        const secondRowId = params1.sections[0].rows[1].id;
+
+        // Simulate user tapping Movie #2 in the native selector sheet
+        await handler.handleMessage(sock, {
+          key: { id: 'TAP_1', remoteJid: lidJid, remoteJidAlt: ownerPn, fromMe: false },
+          message: {
+            interactiveResponseMessage: {
+              body: { text: '2. Avatar: The Way of Water', format: 0 },
+              contextInfo: { stanzaId: relayed[0].opts.messageId },
+              nativeFlowResponseMessage: {
+                name: 'menu_options',
+                paramsJson: JSON.stringify({ id: secondRowId, title: '2. Avatar: The Way of Water' }),
+                version: 1,
+              },
+            },
+          },
+        });
+
+        assert.strictEqual(relayed.length, 2, 'tapping movie did not send Quality Selector');
+        const inner2 = normalizeMessageContent(relayed[1].message);
+        const params2 = JSON.parse(inner2.interactiveMessage.nativeFlowMessage.buttons[0].buttonParamsJson);
+        assert.strictEqual(params2.title, 'Select Quality');
+        assert.match(params2.sections[0].rows[0].title, /1080p/);
+        assert.match(params2.sections[0].rows[0].description, /1\.8 GB|1\.9 GB/);
+        assert.match(params2.sections[0].rows[0].description, /moviebox/);
+      } finally {
+        engine.qualityOptions = origQual;
+        void origDeliver;
+        void deliveredQuality;
+        require(path.join(REPO, 'utils', 'selections')).clear(lidJid, [lidJid, ownerPn]);
+      }
+    });
+
+    await test('poll vote without quoted.message never throws reading undefined in Baileys quote builder', async () => {
+      const crypto = require('crypto');
+      const { proto, generateWAMessageFromContent } = require('@whiskeysockets/baileys');
+      const { hmacSign, aesEncryptGCM } = require('@whiskeysockets/baileys/lib/Utils/crypto');
+      const selections = require(path.join(REPO, 'utils', 'selections'));
+      const handler = require(path.join(REPO, 'handler'));
+
+      let pollPayload = null;
+      let chainedSent = false;
+      const voterPn = '265894016453@s.whatsapp.net';
+      const lidChat = '244934032494829@lid';
+
+      const sock = {
+        user: { id: '265894016453:1@s.whatsapp.net' },
+        sendMessage: async (jid, content, opts = {}) => {
+          if (opts.quoted) {
+            generateWAMessageFromContent(jid, { extendedTextMessage: { text: 'chained' } }, {
+              userJid: sock.user.id,
+              quoted: opts.quoted,
+            });
+          }
+          if (content.poll) {
+            pollPayload = content.poll;
+            return { key: { id: 'POLL_CHAIN_1', remoteJid: lidChat } }; // note: no .message property!
+          }
+          return { key: { id: 'NEXT_1', remoteJid: lidChat } };
+        },
+      };
+
+      // Note: initial msg intentionally lacks .message to reproduce worst-case quote edge
+      await selections.sendPollOrText(sock, { key: { id: 'M0', remoteJid: lidChat } }, { from: lidChat, sender: voterPn }, {
+        pollName: 'Pick film',
+        optionLabels: ['Dune (2021)', 'Dune: Part Two (2024)'],
+        fallbackText: 'fallback',
+        items: [{ id: 1 }, { id: 2 }],
+        run: async (s2, m2, e2) => {
+          await e2.reply('Chained step ok');
+          await selections.sendPollOrText(s2, m2, e2, {
+            pollName: 'Pick quality',
+            optionLabels: ['1080p', '720p'],
+            fallbackText: 'q fallback',
+            items: [{ q: 1080 }, { q: 720 }],
+            run: async () => {},
+          });
+          chainedSent = true;
+        },
+      });
+
+      const optHash = crypto.createHash('sha256').update(pollPayload.values[0], 'utf8').digest();
+      const votePlain = proto.Message.PollVoteMessage.encode({ selectedOptions: [optHash] }).finish();
+      const creatorJid = '265894016453@s.whatsapp.net';
+      const sign = Buffer.concat([
+        Buffer.from('POLL_CHAIN_1'),
+        Buffer.from(creatorJid),
+        Buffer.from(voterPn),
+        Buffer.from('Poll Vote'),
+        Buffer.from([1]),
+      ]);
+      const key0 = hmacSign(pollPayload.messageSecret, new Uint8Array(32), 'sha256');
+      const decKey = hmacSign(sign, key0, 'sha256');
+      const aad = Buffer.from(`POLL_CHAIN_1\0${voterPn}`);
+      const iv = crypto.randomBytes(12);
+      const encPayload = aesEncryptGCM(votePlain, decKey, iv, aad);
+
+      await handler.handleMessage(sock, {
+        key: { id: 'VOTE_1', remoteJid: lidChat, remoteJidAlt: voterPn, fromMe: false },
+        message: {
+          pollUpdateMessage: {
+            pollCreationMessageKey: { id: 'POLL_CHAIN_1', remoteJid: lidChat, fromMe: true },
+            vote: { encPayload, encIv: iv },
+          },
+        },
+      });
+
+      assert.strictEqual(chainedSent, true, 'poll vote chained step threw or did not complete');
+      selections.clear(lidChat, voterPn);
+    });
+
+    await test('providers are ranked by reliability with MovieBox #1 (including multi-GB files)', async () => {
+      const { rank } = await import(pathToFileURL(path.join(REPO, 'engine/core/ranker.js')).href);
+      const [provCmd] = require(path.join(REPO, 'commands', 'general', 'providers'));
+
+      // 1. MovieBox #1 beats others even with a 1950 MB (~2 GB) direct MP4
+      const withMovieBox = rank([
+        { provider: 'vaplayer', kind: 'hls', quality: 1080, title: 'Film', sourceTag: 'WEBDL', sizeMB: 0 },
+        { provider: 'vixsrc', kind: 'file', quality: 1080, title: 'Film', sourceTag: 'WEBDL', sizeMB: 1200 },
+        { provider: 'moviebox', kind: 'file', quality: 1080, title: 'Film', sourceTag: 'WEBDL', sizeMB: 1950 },
+      ], { want: 1080, year: 2024 });
+      assert.strictEqual(withMovieBox[0].provider, 'moviebox');
+      assert.strictEqual(withMovieBox[1].provider, 'vixsrc');
+      assert.strictEqual(withMovieBox[2].provider, 'vaplayer');
+
+      // 2. Fallback torrents also follow reliability rank at equal seeds/quality
+      const torrents = rank([
+        { provider: 'apibay', kind: 'torrent', seeds: 50, quality: 1080, title: 'Film', sourceTag: 'WEBDL', sizeMB: 1400 },
+        { provider: 'torrentio', kind: 'torrent', seeds: 50, quality: 1080, title: 'Film', sourceTag: 'WEBDL', sizeMB: 1400 },
+        { provider: 'yts', kind: 'torrent', seeds: 50, quality: 1080, title: 'Film', sourceTag: 'WEBDL', sizeMB: 1400 },
+      ], { want: 1080, year: 2024 });
+      assert.deepStrictEqual(torrents.map((t) => t.provider), ['yts', 'torrentio', 'apibay']);
+
+      // 3. .providers outputs numbered reliability ranking with moviebox #1
+      let replyText = '';
+      await provCmd.execute({}, {}, [], { reply: async (t) => { replyText = t; } });
+      const lines = replyText.split('\n');
+      assert.match(lines[1], /^1\.\s*🟢\s*moviebox$/);
+      assert.match(lines[2], /^2\.\s*🟢\s*vixsrc$/);
+      assert.match(lines[3], /^3\.\s*🟢\s*vidlink$/);
+    });
   }
 
   // ─── summary ────────────────────────────────────────────────────────────────

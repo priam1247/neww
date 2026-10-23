@@ -1,11 +1,41 @@
 const engine = require('../../utils/movieEngine');
 const telemetry = require('../../utils/telemetry');
 
+const RELIABILITY_ORDER = [
+  'moviebox',
+  'vixsrc',
+  'vidlink',
+  'videasy',
+  'vidsrc',
+  'vaplayer',
+  'yts',
+  'torrentio',
+  'eztv',
+  'nyaa',
+  'knaben',
+  'solidtorrents',
+  'torrentscsv',
+  'apibay',
+];
+
+const rankOf = (id) => {
+  const idx = RELIABILITY_ORDER.indexOf(String(id || '').toLowerCase());
+  return idx === -1 ? 999 : idx;
+};
+
+const stateScore = (state) => {
+  const s = String(state || 'live').toLowerCase();
+  if (s === 'live' || s === 'closed') return 0;
+  if (s.includes('half')) return 1;
+  if (s.startsWith('open')) return 2;
+  return 1;
+};
+
 const providersCommand = {
   name: 'providers',
   aliases: ['sources'],
   category: 'general',
-  description: 'List download providers',
+  description: 'List download providers by reliability',
   usage: '.providers',
 
   async execute(sock, msg, args, extra) {
@@ -13,13 +43,19 @@ const providersCommand = {
       const rows = await engine.providers();
       if (!rows.length) return extra.reply('No providers loaded.');
 
-      const lines = rows
-        .sort((a, b) => b.tier - a.tier || String(a.id).localeCompare(String(b.id)))
-        .map((p) => {
-          const state = String(p.state || 'live');
-          const icon = /live|closed/i.test(state) ? '🟢' : /open/i.test(state) ? '🔴' : '🟡';
-          return `${icon} ${p.id}`;
-        });
+      const sorted = [...rows].sort((a, b) => {
+        const healthDiff = stateScore(a.state) - stateScore(b.state);
+        if (healthDiff !== 0) return healthDiff;
+        const rDiff = rankOf(a.id) - rankOf(b.id);
+        if (rDiff !== 0) return rDiff;
+        return Number(b.trust || 1) - Number(a.trust || 1);
+      });
+
+      const lines = sorted.map((p, idx) => {
+        const state = String(p.state || 'live');
+        const icon = /live|closed/i.test(state) ? '🟢' : /open/i.test(state) ? '🔴' : '🟡';
+        return `${idx + 1}. ${icon} ${p.id}`;
+      });
 
       return extra.reply([`*Providers (${lines.length})*`, ...lines].join('\n'));
     } catch (e) {

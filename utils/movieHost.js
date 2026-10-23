@@ -203,13 +203,14 @@ async function sendMedia(sock, chatId, msg, { file, title = '', caption = '' } =
   const fileName = `${name}.${ext}`;
   const text = caption || `🎬 *${name}*\n📦 ${fmtMB(stat.size)}`;
 
+  const qOpts = host('./selections')?.quoteOpts ? host('./selections').quoteOpts(msg) : (msg?.message ? { quoted: msg } : {});
   await sock.sendMessage(chatId, {
     document: { url: file },
     // an HLS source without ffmpeg lands as .ts — say so instead of lying
     mimetype: MIME_BY_EXT[ext] || 'video/mp4',
     fileName,
     caption: text,
-  }, { quoted: msg });
+  }, qOpts);
   return { as: 'document', bytes: stat.size };
 }
 
@@ -225,11 +226,12 @@ async function sendSubtitle(sock, chatId, msg, { file, name = 'subtitle', langua
   const ext = (path.extname(file) || '.srt').replace('.', '').toLowerCase();
   const base = safeName(name, 'subtitle');
   const tag = language ? `.${String(language).toLowerCase().replace(/[^a-z-]/g, '')}` : '';
+  const qOpts = host('./selections')?.quoteOpts ? host('./selections').quoteOpts(msg) : (msg?.message ? { quoted: msg } : {});
   await sock.sendMessage(chatId, {
     document: { url: file },
     mimetype: ext === 'vtt' ? 'text/vtt' : 'application/x-subrip',
     fileName: `${base}${tag}.${ext}`,
-  }, { quoted: msg });
+  }, qOpts);
   return { bytes: stat.size, fileName: `${base}${tag}.${ext}` };
 }
 

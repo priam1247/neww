@@ -30,7 +30,6 @@ const PRESERVED_UTILS = new Set([
   'safeLog.js',
   'adminApi.js',
   'youtubedl.js',
-  'selections.js',
   'botState.js',
   'jsonStore.js',
 ]);
