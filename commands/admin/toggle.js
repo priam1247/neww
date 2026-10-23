@@ -1,7 +1,3 @@
-/**
- * ZaFar Bot — .on / .off
- */
-
 const database = require('../../database');
 const config   = require('../../config');
 
@@ -10,12 +6,10 @@ module.exports = {
   aliases: ['off'],
   ownerOnly: true,
   category: 'admin',
-  description: 'Turn the bot on or off globally',
+  description: 'Enable or disable the bot globally',
   usage: '.on | .off',
 
   async execute(sock, msg, args, extra) {
-    // Use the resolved command name from handler.js (works across ephemeral
-    // messages, captions, custom prefixes, etc.) instead of raw message text.
     const invoked = String(extra?.commandName || '').trim().toLowerCase();
     const turningOn = invoked
       ? invoked === 'on'
@@ -27,11 +21,11 @@ module.exports = {
     if (turningOn) {
       database.setBotState(true);
       await sock.sendMessage(extra.from, { react: { text: '✅', key: msg.key } });
-      return extra.reply(`✅ *${config.botName} is ON*\nAll commands are active.`);
+      return extra.reply('🟢 Bot ON');
     } else {
       database.setBotState(false);
       await sock.sendMessage(extra.from, { react: { text: '🔴', key: msg.key } });
-      return extra.reply(`🔴 *${config.botName} is OFF*\nUse ${config.prefix}on to bring it back.`);
+      return extra.reply('🔴 Bot OFF');
     }
   },
 };

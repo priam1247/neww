@@ -11,7 +11,7 @@ import {
   Lock,
   Mail,
   RefreshCw,
-  ShieldCheck,
+  Server,
   User as UserIcon,
 } from 'lucide-react';
 import { AuthUser } from '@/lib/types';
@@ -67,9 +67,7 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
       if (!res.ok) {
         if (data?.needsVerification) {
           setStep('verify');
-          setInfo(
-            'Your email still needs verification. Enter the 6-digit code sent to your inbox or click Resend Code.',
-          );
+          setInfo('Enter the 6-digit verification code sent to your email.');
           return;
         }
         throw new Error(data?.error || 'Sign in failed.');
@@ -99,15 +97,11 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
         }),
       });
       const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data?.error || 'Could not create account.');
-      }
+      if (!res.ok) throw new Error(data?.error || 'Registration failed.');
       setStep('verify');
       setCooldown(45);
-      setInfo(data.message || `Sent a 6-digit verification code to ${email.trim()}.`);
-      if (data.devPreviewCode) {
-        setDevCodeHint(String(data.devPreviewCode));
-      }
+      setInfo(data.message || `Code sent to ${email.trim()}.`);
+      if (data.devPreviewCode) setDevCodeHint(String(data.devPreviewCode));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Registration failed.');
     } finally {
@@ -130,18 +124,16 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
         }),
       });
       const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data?.error || 'Verification failed.');
-      }
+      if (!res.ok) throw new Error(data?.error || 'Verification failed.');
       if (data.token && data.user) {
         onAuthenticated({ token: data.token, user: data.user });
         return;
       }
       setStep('login');
       setDevCodeHint(null);
-      setInfo('Email verified! Sign in with your password below.');
+      setInfo('Verified. Sign in below.');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Invalid verification code.');
+      setError(err instanceof Error ? err.message : 'Invalid code.');
     } finally {
       setSubmitting(false);
     }
@@ -160,10 +152,8 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || 'Could not resend code.');
       setCooldown(45);
-      setInfo(data.message || 'Sent a fresh 6-digit code to your email.');
-      if (data.devPreviewCode) {
-        setDevCodeHint(String(data.devPreviewCode));
-      }
+      setInfo('Code resent.');
+      if (data.devPreviewCode) setDevCodeHint(String(data.devPreviewCode));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not resend code.');
     } finally {
@@ -185,13 +175,8 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || 'Request failed.');
       setStep('reset');
-      setInfo(
-        data.message ||
-          'Check your email inbox for your 6-digit password reset code.',
-      );
-      if (data.devPreviewCode) {
-        setDevCodeHint(String(data.devPreviewCode));
-      }
+      setInfo('Reset code sent.');
+      if (data.devPreviewCode) setDevCodeHint(String(data.devPreviewCode));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to send reset code.');
     } finally {
@@ -220,7 +205,7 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
       setCode('');
       setDevCodeHint(null);
       setStep('login');
-      setInfo(data.message || 'Password updated! Sign in with your new password.');
+      setInfo('Password updated.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Reset failed.');
     } finally {
@@ -229,28 +214,32 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   };
 
   return (
-    <div className="bg-portal-canvas flex min-h-screen flex-col justify-between px-4 py-8 sm:px-6">
-      <div className="mx-auto flex w-full max-w-[1080px] flex-wrap items-center justify-between gap-2.5">
-        <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-teal-600 font-mono text-sm font-extrabold text-white shadow-sm">
-            ZF
+    <div className="bg-portal-canvas flex min-h-screen w-full flex-col justify-center overflow-x-hidden px-3.5 py-6 sm:px-6">
+      <div className="mx-auto w-full max-w-[400px]">
+        <div className="mb-4 flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-teal-600 font-mono text-sm font-extrabold text-white shadow-sm">
+              ZF
+            </div>
+            <div className="min-w-0">
+              <div className="truncate text-sm font-bold text-slate-900">
+                ZaFar Server
+              </div>
+              <div className="font-mono text-[11px] text-slate-500">
+                Console Access
+              </div>
+            </div>
           </div>
-          <div>
-            <div className="text-sm font-bold text-slate-900">ZaFar Portal</div>
-            <div className="text-xs text-slate-500">WhatsApp Access &amp; Operations</div>
-          </div>
+
+          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-2.5 py-1 font-mono text-[11px] font-semibold text-slate-600 shadow-sm">
+            <Server className="h-3 w-3 text-teal-600" />
+            v2.2
+          </span>
         </div>
 
-        <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 shadow-sm">
-          <ShieldCheck className="h-3.5 w-3.5 text-teal-600" />
-          Email Verified Sign-In
-        </span>
-      </div>
-
-      <div className="mx-auto my-8 w-full max-w-[440px]">
-        <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-[0_20px_60px_rgba(15,23,42,0.08)] sm:p-8">
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-lg sm:p-6">
           {(step === 'login' || step === 'register') && (
-            <div className="mb-6 grid grid-cols-2 rounded-xl bg-slate-100 p-1">
+            <div className="mb-5 grid grid-cols-2 rounded-xl bg-slate-100 p-1">
               <button
                 type="button"
                 onClick={() => switchStep('login')}
@@ -271,7 +260,7 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                Create account
+                Register
               </button>
             </div>
           )}
@@ -280,80 +269,58 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
             <button
               type="button"
               onClick={() => switchStep('login')}
-              className="mb-5 inline-flex items-center gap-1.5 text-xs font-medium text-slate-500 transition hover:text-slate-900"
+              className="mb-4 inline-flex items-center gap-1.5 text-xs font-medium text-slate-500 transition hover:text-slate-900"
             >
               <ArrowLeft className="h-3.5 w-3.5" />
-              Back to sign in
+              Back
             </button>
           )}
 
-          <div className="mb-5">
-            <h1 className="text-2xl font-bold tracking-tight text-slate-900">
-              {step === 'login' && 'Sign in to ZaFar'}
-              {step === 'register' && 'Create member account'}
-              {step === 'verify' && 'Verify your email'}
-              {step === 'forgot' && 'Reset your password'}
-              {step === 'reset' && 'Set a new password'}
-            </h1>
-            <p className="mt-1 text-xs leading-relaxed text-slate-500">
-              {step === 'login' &&
-                'Sign in with email — members go to their WhatsApp access portal, and administrators automatically open the Admin Console.'}
-              {step === 'register' &&
-                'Enter your details to receive a 6-digit verification code by email.'}
-              {step === 'verify' &&
-                `Enter the 6-digit code sent to ${email || 'your email'}.`}
-              {step === 'forgot' &&
-                'Enter your account email and we will send a 6-digit reset code.'}
-              {step === 'reset' &&
-                `Enter the 6-digit code sent to ${email} and choose a new password.`}
-            </p>
-          </div>
+          <h1 className="mb-4 text-lg font-bold tracking-tight text-slate-900">
+            {step === 'login' && 'Sign in'}
+            {step === 'register' && 'Create account'}
+            {step === 'verify' && 'Verify email'}
+            {step === 'forgot' && 'Reset password'}
+            {step === 'reset' && 'New password'}
+          </h1>
 
           {error && (
-            <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-medium text-rose-700">
+            <div className="mb-3.5 break-words rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
               {error}
             </div>
           )}
 
           {info && (
-            <div className="mb-4 flex items-start gap-2 rounded-xl border border-teal-200 bg-teal-50 px-3.5 py-2.5 text-xs font-medium text-teal-800">
-              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-teal-600" />
-              <span>{info}</span>
+            <div className="mb-3.5 flex items-start gap-2 rounded-xl border border-teal-200 bg-teal-50 px-3 py-2 text-xs font-medium text-teal-800">
+              <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-teal-600" />
+              <span className="min-w-0 break-words">{info}</span>
             </div>
           )}
 
           {devCodeHint && (
-            <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
-              <div className="font-semibold">
-                Local Preview Outbox (container port 587 blocked)
-              </div>
-              <div className="mt-1 text-[11px] text-amber-700">
-                On Vercel production, codes go directly to your email inbox:
-              </div>
+            <div className="mb-3.5 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+              <div className="font-semibold">Preview Code</div>
               <button
                 type="button"
                 onClick={() => setCode(devCodeHint)}
-                className="mt-2 inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-white px-3 py-1.5 font-mono text-sm font-bold tracking-[0.25em] text-teal-700 shadow-sm"
+                className="mt-1.5 inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-white px-3 py-1 font-mono text-sm font-bold tracking-[0.2em] text-teal-700 shadow-sm"
               >
                 {devCodeHint}
-                <span className="font-sans text-[10px] tracking-normal text-slate-500">
-                  Tap to fill
-                </span>
               </button>
             </div>
           )}
 
           {step === 'login' && (
-            <form onSubmit={handleLogin} className="space-y-4">
+            <form onSubmit={handleLogin} className="space-y-3.5">
               <div>
                 <label
                   htmlFor="login-email"
-                  className="mb-1.5 block text-xs font-medium text-slate-700"
+                  className="mb-1 block text-xs font-medium text-slate-700"
                 >
-                  Email address
+                  Email
                 </label>
                 <div className="relative">
-                  <Mail className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <Mail className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                   <input
                     id="login-email"
                     type="email"
@@ -362,13 +329,13 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="you@gmail.com"
-                    className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-10 pr-3.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-600/15"
+                    className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
                   />
                 </div>
               </div>
 
               <div>
-                <div className="mb-1.5 flex items-center justify-between">
+                <div className="mb-1 flex items-center justify-between gap-2">
                   <label
                     htmlFor="login-password"
                     className="text-xs font-medium text-slate-700"
@@ -380,11 +347,11 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                     onClick={() => switchStep('forgot')}
                     className="text-xs font-semibold text-teal-700 hover:underline"
                   >
-                    Forgot password?
+                    Forgot?
                   </button>
                 </div>
                 <div className="relative">
-                  <Lock className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <Lock className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                   <input
                     id="login-password"
                     type={showPassword ? 'text' : 'password'}
@@ -393,13 +360,13 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="••••••••"
-                    className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-10 pr-10 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-600/15"
+                    className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-9 pr-9 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
                   />
                   <button
                     type="button"
                     onClick={() => setShowPassword((s) => !s)}
                     aria-label={showPassword ? 'Hide password' : 'Show password'}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
                   >
                     {showPassword ? (
                       <EyeOff className="h-4 w-4" />
@@ -422,16 +389,16 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
           )}
 
           {step === 'register' && (
-            <form onSubmit={handleRegister} className="space-y-4">
+            <form onSubmit={handleRegister} className="space-y-3.5">
               <div>
                 <label
                   htmlFor="reg-name"
-                  className="mb-1.5 block text-xs font-medium text-slate-700"
+                  className="mb-1 block text-xs font-medium text-slate-700"
                 >
-                  Full name
+                  Name
                 </label>
                 <div className="relative">
-                  <UserIcon className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <UserIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                   <input
                     id="reg-name"
                     type="text"
@@ -440,8 +407,8 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                     autoComplete="name"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="Your name"
-                    className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-10 pr-3.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-600/15"
+                    placeholder="Name"
+                    className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
                   />
                 </div>
               </div>
@@ -449,12 +416,12 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
               <div>
                 <label
                   htmlFor="reg-email"
-                  className="mb-1.5 block text-xs font-medium text-slate-700"
+                  className="mb-1 block text-xs font-medium text-slate-700"
                 >
-                  Email address
+                  Email
                 </label>
                 <div className="relative">
-                  <Mail className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <Mail className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                   <input
                     id="reg-email"
                     type="email"
@@ -463,7 +430,7 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="you@gmail.com"
-                    className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-10 pr-3.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-600/15"
+                    className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
                   />
                 </div>
               </div>
@@ -471,12 +438,12 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
               <div>
                 <label
                   htmlFor="reg-password"
-                  className="mb-1.5 block text-xs font-medium text-slate-700"
+                  className="mb-1 block text-xs font-medium text-slate-700"
                 >
-                  Password (minimum 6 characters)
+                  Password
                 </label>
                 <div className="relative">
-                  <Lock className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <Lock className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                   <input
                     id="reg-password"
                     type={showPassword ? 'text' : 'password'}
@@ -485,14 +452,14 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                     autoComplete="new-password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Create a strong password"
-                    className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-10 pr-10 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-600/15"
+                    placeholder="Min 6 characters"
+                    className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-9 pr-9 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
                   />
                   <button
                     type="button"
                     onClick={() => setShowPassword((s) => !s)}
                     aria-label={showPassword ? 'Hide password' : 'Show password'}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
                   >
                     {showPassword ? (
                       <EyeOff className="h-4 w-4" />
@@ -509,22 +476,22 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                 className="flex w-full items-center justify-center gap-2 rounded-xl bg-teal-600 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-teal-700 disabled:opacity-60"
               >
                 {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
-                {submitting ? 'Sending verification email…' : 'Send verification code'}
+                {submitting ? 'Sending…' : 'Create account'}
               </button>
             </form>
           )}
 
           {step === 'verify' && (
-            <form onSubmit={handleVerify} className="space-y-4">
+            <form onSubmit={handleVerify} className="space-y-3.5">
               <div>
                 <label
                   htmlFor="verify-code"
-                  className="mb-1.5 block text-xs font-medium text-slate-700"
+                  className="mb-1 block text-xs font-medium text-slate-700"
                 >
-                  6-digit verification code
+                  6-digit code
                 </label>
                 <div className="relative">
-                  <KeyRound className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-teal-600" />
+                  <KeyRound className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-teal-600" />
                   <input
                     id="verify-code"
                     type="text"
@@ -534,9 +501,11 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                     required
                     autoFocus
                     value={code}
-                    onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    onChange={(e) =>
+                      setCode(e.target.value.replace(/\D/g, '').slice(0, 6))
+                    }
                     placeholder="000000"
-                    className="w-full rounded-xl border border-slate-300 bg-slate-50 py-3 pl-10 pr-4 font-mono text-xl font-bold tracking-[0.35em] text-slate-900 placeholder:text-slate-300 focus:border-teal-600 focus:bg-white focus:outline-none tabular-nums"
+                    className="w-full rounded-xl border border-slate-300 bg-slate-50 py-2.5 pl-9 pr-3 font-mono text-lg font-bold tracking-[0.25em] text-slate-900 placeholder:text-slate-300 focus:border-teal-600 focus:bg-white focus:outline-none tabular-nums"
                   />
                 </div>
               </div>
@@ -547,35 +516,37 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                 className="flex w-full items-center justify-center gap-2 rounded-xl bg-teal-600 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-teal-700 disabled:opacity-50"
               >
                 {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
-                {submitting ? 'Verifying…' : 'Verify email & continue'}
+                {submitting ? 'Verifying…' : 'Verify'}
               </button>
 
               <div className="flex items-center justify-between pt-1 text-xs text-slate-500">
-                <span>Didn&apos;t receive the code?</span>
+                <span>No code?</span>
                 <button
                   type="button"
                   disabled={cooldown > 0 || resending}
                   onClick={handleResend}
                   className="inline-flex items-center gap-1 font-semibold text-teal-700 hover:underline disabled:opacity-50"
                 >
-                  <RefreshCw className={`h-3 w-3 ${resending ? 'animate-spin' : ''}`} />
-                  {cooldown > 0 ? `Resend in ${cooldown}s` : 'Resend code'}
+                  <RefreshCw
+                    className={`h-3 w-3 ${resending ? 'animate-spin' : ''}`}
+                  />
+                  {cooldown > 0 ? `${cooldown}s` : 'Resend'}
                 </button>
               </div>
             </form>
           )}
 
           {step === 'forgot' && (
-            <form onSubmit={handleForgot} className="space-y-4">
+            <form onSubmit={handleForgot} className="space-y-3.5">
               <div>
                 <label
                   htmlFor="forgot-email"
-                  className="mb-1.5 block text-xs font-medium text-slate-700"
+                  className="mb-1 block text-xs font-medium text-slate-700"
                 >
-                  Account email address
+                  Email
                 </label>
                 <div className="relative">
-                  <Mail className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <Mail className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                   <input
                     id="forgot-email"
                     type="email"
@@ -583,7 +554,7 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="you@gmail.com"
-                    className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-10 pr-3.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                    className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
                   />
                 </div>
               </div>
@@ -594,19 +565,19 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                 className="flex w-full items-center justify-center gap-2 rounded-xl bg-teal-600 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-teal-700 disabled:opacity-60"
               >
                 {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
-                {submitting ? 'Sending reset code…' : 'Send 6-digit reset code'}
+                {submitting ? 'Sending…' : 'Send code'}
               </button>
             </form>
           )}
 
           {step === 'reset' && (
-            <form onSubmit={handleReset} className="space-y-4">
+            <form onSubmit={handleReset} className="space-y-3.5">
               <div>
                 <label
                   htmlFor="reset-code"
-                  className="mb-1.5 block text-xs font-medium text-slate-700"
+                  className="mb-1 block text-xs font-medium text-slate-700"
                 >
-                  6-digit reset code
+                  6-digit code
                 </label>
                 <input
                   id="reset-code"
@@ -616,16 +587,18 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                   maxLength={6}
                   required
                   value={code}
-                  onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  onChange={(e) =>
+                    setCode(e.target.value.replace(/\D/g, '').slice(0, 6))
+                  }
                   placeholder="000000"
-                  className="w-full rounded-xl border border-slate-300 bg-slate-50 px-4 py-2.5 font-mono text-lg font-bold tracking-[0.3em] text-slate-900 placeholder:text-slate-300 focus:border-teal-600 focus:bg-white focus:outline-none tabular-nums"
+                  className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3.5 py-2.5 font-mono text-lg font-bold tracking-[0.25em] text-slate-900 placeholder:text-slate-300 focus:border-teal-600 focus:bg-white focus:outline-none tabular-nums"
                 />
               </div>
 
               <div>
                 <label
                   htmlFor="reset-new-pw"
-                  className="mb-1.5 block text-xs font-medium text-slate-700"
+                  className="mb-1 block text-xs font-medium text-slate-700"
                 >
                   New password
                 </label>
@@ -636,7 +609,7 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                   minLength={6}
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
-                  placeholder="At least 6 characters"
+                  placeholder="Min 6 characters"
                   className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
                 />
               </div>
@@ -647,16 +620,12 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                 className="flex w-full items-center justify-center gap-2 rounded-xl bg-teal-600 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-teal-700 disabled:opacity-50"
               >
                 {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
-                {submitting ? 'Updating password…' : 'Update password'}
+                {submitting ? 'Updating…' : 'Update password'}
               </button>
             </form>
           )}
         </div>
       </div>
-
-      <p className="text-center text-xs text-slate-400">
-        ZaFar Platform · Separate Member &amp; Administrator Workspaces
-      </p>
     </div>
   );
 }

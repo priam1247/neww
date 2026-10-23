@@ -6,13 +6,10 @@ import { useRouter } from 'next/navigation';
 import {
   Activity,
   AlertCircle,
-  Check,
   CheckCircle2,
-  Copy,
   ExternalLink,
   Eye,
   EyeOff,
-  HelpCircle,
   Link2,
   Loader2,
   LogOut,
@@ -23,7 +20,6 @@ import {
   Server,
   ShieldBan,
   ShieldCheck,
-  Smartphone,
   Trash2,
   UserCheck,
   UserPlus,
@@ -43,13 +39,10 @@ import {
 } from '@/lib/client-session';
 import { PairingCodeBanner } from './pairing-code-banner';
 import { AccountModal } from './account-modal';
+import { LiveAnalytics } from './live-analytics';
 
-type AdminTab = 'members' | 'bot' | 'guide';
+type AdminTab = 'server' | 'members';
 type MemberFilter = 'all' | 'allowed' | 'disallowed';
-
-const BOT_ENV_EXAMPLE = `DASHBOARD_URL=https://your-portal.vercel.app
-BOT_SYNC_TOKEN=choose-a-strong-bot-sync-secret
-ADMIN_API_ENABLED=false`;
 
 export function AdminConsole() {
   const router = useRouter();
@@ -58,7 +51,7 @@ export function AdminConsole() {
   const [quota, setQuota] = useState<UserQuota | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
 
-  const [tab, setTab] = useState<AdminTab>('members');
+  const [tab, setTab] = useState<AdminTab>('server');
   const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState<{ text: string; bad?: boolean } | null>(null);
 
@@ -106,7 +99,6 @@ export function AdminConsole() {
   const [busyNumber, setBusyNumber] = useState<string | null>(null);
   const [confirmDeleteNum, setConfirmDeleteNum] = useState<string | null>(null);
   const [activePair, setActivePair] = useState<PairCodePayload | null>(null);
-  const [copiedSnippet, setCopiedSnippet] = useState(false);
 
   const loadOverview = useCallback(
     async (silent = false, hydrateInputs = false) => {
@@ -125,7 +117,7 @@ export function AdminConsole() {
           return;
         }
         const json = (await res.json()) as AdminOverviewPayload & { error?: string };
-        if (!res.ok) throw new Error(json.error || 'Failed to load admin console');
+        if (!res.ok) throw new Error(json.error || 'Failed to load server status');
         setData(json);
         if (hydrateInputs) {
           setBotUrlInput(json.botApiUrl || '');
@@ -137,7 +129,7 @@ export function AdminConsole() {
         }
       } catch (err) {
         setNotice({
-          text: err instanceof Error ? err.message : 'Unable to fetch admin status',
+          text: err instanceof Error ? err.message : 'Unable to fetch status',
           bad: true,
         });
       } finally {
@@ -169,7 +161,7 @@ export function AdminConsole() {
     if (!user) return;
     const id = setInterval(() => {
       void loadOverview(true, false);
-    }, 15_000);
+    }, 10_000);
     return () => clearInterval(id);
   }, [user, loadOverview]);
 
@@ -204,7 +196,7 @@ export function AdminConsole() {
       setData((prev) => ({ ...prev, members: json.members }));
       setNewMemberEmail('');
       setNewMemberName('');
-      setNotice({ text: `Allowed member ${newMemberEmail.trim().toLowerCase()}.` });
+      setNotice({ text: `Allowed ${newMemberEmail.trim().toLowerCase()}` });
     } catch (err) {
       setNotice({
         text: err instanceof Error ? err.message : 'Failed to allow member',
@@ -235,9 +227,7 @@ export function AdminConsole() {
         users: json.users || prev.users,
       }));
       setNotice({
-        text: allowed
-          ? `Allowed member ${email} to use ZaFar Bot.`
-          : `Disallowed member ${email} and disabled their linked numbers.`,
+        text: allowed ? `Allowed ${email}` : `Disallowed ${email}`,
       });
     } catch (err) {
       setNotice({
@@ -263,28 +253,19 @@ export function AdminConsole() {
         }),
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json?.error || 'Failed to save bot link');
+      if (!res.ok) throw new Error(json?.error || 'Failed to save sync settings');
 
       await loadOverview(true, false);
       if (json.probe?.reachable) {
         setNotice({
-          text: `Connected to live bot server (${json.probe.latencyMs ?? 0}ms) — WhatsApp socket is ${
-            json.probe.connected ? 'ONLINE' : 'waiting to pair'
-          }.`,
-        });
-      } else if (botUrlInput.trim()) {
-        setNotice({
-          text: `Saved Bot URL in cloud database, though probe reported: ${
-            json.probe?.error || 'server not reachable yet'
-          }.`,
-          bad: true,
+          text: `Sync verified (${json.probe.connected ? 'ONLINE' : 'STANDBY'})`,
         });
       } else {
-        setNotice({ text: 'Cleared Bot Server URL.' });
+        setNotice({ text: 'Sync settings saved.' });
       }
     } catch (err) {
       setNotice({
-        text: err instanceof Error ? err.message : 'Failed to save bot settings',
+        text: err instanceof Error ? err.message : 'Failed to save sync settings',
         bad: true,
       });
     } finally {
@@ -301,16 +282,14 @@ export function AdminConsole() {
         body: JSON.stringify({ botEnabledForMembers: nextState }),
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json?.error || 'Failed to toggle bot access');
+      if (!res.ok) throw new Error(json?.error || 'Failed to toggle access');
       setData((prev) => ({ ...prev, botEnabledForMembers: nextState }));
       setNotice({
-        text: nextState
-          ? 'Enabled bot number linking for all allowed members.'
-          : 'Paused new number linking for members.',
+        text: nextState ? 'Member access enabled.' : 'Member access paused.',
       });
     } catch (err) {
       setNotice({
-        text: err instanceof Error ? err.message : 'Could not update setting',
+        text: err instanceof Error ? err.message : 'Could not update access',
         bad: true,
       });
     }
@@ -331,7 +310,7 @@ export function AdminConsole() {
       setData((prev) => ({ ...prev, users: json.users }));
       setNumInput('');
       setNumLabel('');
-      setNotice({ text: `Approved WhatsApp number +${numInput.replace(/\D/g, '')}.` });
+      setNotice({ text: `Approved +${numInput.replace(/\D/g, '')}` });
     } catch (err) {
       setNotice({
         text: err instanceof Error ? err.message : 'Failed to add number',
@@ -354,9 +333,7 @@ export function AdminConsole() {
       if (!res.ok) throw new Error(json?.error || 'Update failed');
       await loadOverview(true, false);
       setNotice({
-        text: enabled
-          ? `Allowed WhatsApp number +${number}.`
-          : `Disallowed WhatsApp number +${number}.`,
+        text: enabled ? `Allowed +${number}` : `Disallowed +${number}`,
       });
     } catch (err) {
       setNotice({
@@ -380,7 +357,7 @@ export function AdminConsole() {
       setData((prev) => ({ ...prev, users: json.users || [] }));
       if (activePair?.number === number) setActivePair(null);
       setConfirmDeleteNum(null);
-      setNotice({ text: `Removed +${number}.` });
+      setNotice({ text: `Removed +${number}` });
     } catch (err) {
       setNotice({
         text: err instanceof Error ? err.message : 'Failed to remove number',
@@ -416,17 +393,15 @@ export function AdminConsole() {
           .map((s: { name: string; id: string }) => `${s.name} (${s.id})`)
           .join(', ');
         setNotice({
-          text: `Panel API verified! Detected server${
-            (json.servers || []).length === 1 ? '' : 's'
-          }: ${names || json.panelServerId || 'OK'}.`,
+          text: `Panel verified: ${names || json.panelServerId || 'OK'}`,
         });
       } else if (json.discoveryError) {
         setNotice({
-          text: `Saved panel credentials, though live check reported: ${json.discoveryError}`,
+          text: `Saved (${json.discoveryError})`,
           bad: true,
         });
       } else {
-        setNotice({ text: 'Updated panel configuration.' });
+        setNotice({ text: 'Panel saved.' });
       }
     } catch (err) {
       setNotice({
@@ -448,10 +423,10 @@ export function AdminConsole() {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error || `Could not ${signal} bot`);
-      setNotice({ text: json.message || `Sent "${signal}" signal to bot.` });
+      setNotice({ text: json.message || `Signal sent: ${signal}` });
     } catch (err) {
       setNotice({
-        text: err instanceof Error ? err.message : 'Panel power command failed',
+        text: err instanceof Error ? err.message : 'Power command failed',
         bad: true,
       });
     } finally {
@@ -471,9 +446,7 @@ export function AdminConsole() {
       if (!res.ok) throw new Error(json?.error || 'Could not request code');
 
       if (json.pending && json.requestId) {
-        setNotice({
-          text: `Waiting for bot to pick up pairing request for +${number}…`,
-        });
+        setNotice({ text: `Requesting code for +${number}…` });
         const deadline = Date.now() + 26_000;
         while (Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 1500));
@@ -483,7 +456,7 @@ export function AdminConsole() {
           );
           const pollJson = await pollRes.json();
           if (!pollRes.ok) {
-            throw new Error(pollJson?.error || 'Pairing request failed.');
+            throw new Error(pollJson?.error || 'Pairing failed.');
           }
           if (!pollJson.pending && pollJson.code) {
             setActivePair({
@@ -493,11 +466,11 @@ export function AdminConsole() {
               number,
               issuedAt: Date.now(),
             });
-            setNotice({ text: `Generated linking code for +${number}.` });
+            setNotice({ text: `Code issued for +${number}` });
             return;
           }
         }
-        throw new Error('Timed out waiting for bot to return a pairing code.');
+        throw new Error('Timed out waiting for bot.');
       }
 
       setActivePair({
@@ -507,10 +480,10 @@ export function AdminConsole() {
         number,
         issuedAt: Date.now(),
       });
-      setNotice({ text: `Generated linking code for +${number}.` });
+      setNotice({ text: `Code issued for +${number}` });
     } catch (err) {
       setNotice({
-        text: err instanceof Error ? err.message : 'Failed to request pairing code',
+        text: err instanceof Error ? err.message : 'Failed to request code',
         bad: true,
       });
     } finally {
@@ -528,7 +501,7 @@ export function AdminConsole() {
     if (res.ok && json.user) {
       setUser(json.user);
       if (json.token) setSavedSessionToken(json.token);
-      setNotice({ text: 'Updated administrator display name.' });
+      setNotice({ text: 'Display name updated.' });
     }
   };
 
@@ -539,10 +512,10 @@ export function AdminConsole() {
 
   if (checking || !user) {
     return (
-      <div className="bg-portal-canvas flex min-h-screen items-center justify-center">
-        <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-5 py-3.5 text-sm font-medium text-slate-700 shadow-sm">
+      <div className="bg-portal-canvas flex min-h-screen items-center justify-center px-4">
+        <div className="flex items-center gap-2.5 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs font-semibold text-slate-700 shadow-sm">
           <Loader2 className="h-4 w-4 animate-spin text-teal-600" />
-          Loading Admin Console…
+          Connecting…
         </div>
       </div>
     );
@@ -552,689 +525,240 @@ export function AdminConsole() {
   const enabledNumbersCount = data.users.filter((u) => u.enabled).length;
 
   return (
-    <div className="bg-portal-canvas min-h-screen">
-      {/* Light Top Navbar */}
-      <header className="sticky top-0 z-30 border-b border-slate-200/90 bg-white/90 backdrop-blur-md">
-        <div className="mx-auto flex max-w-[1180px] flex-wrap items-center justify-between gap-3 px-5 py-3.5">
-          <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-teal-600 font-mono text-sm font-extrabold text-white shadow-sm">
-              ZF
-            </div>
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm font-bold text-slate-900">
-                  ZaFar Admin Console
-                </span>
-                <span className="rounded-full bg-teal-50 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-teal-700 ring-1 ring-teal-200">
-                  Admin Only
-                </span>
+    <div className="bg-portal-canvas min-h-screen w-full overflow-x-hidden">
+      {/* Top Server Console Bar */}
+      <header className="sticky top-0 z-30 border-b border-slate-200/90 bg-white/95 backdrop-blur-md">
+        <div className="mx-auto max-w-[1140px] px-3.5 py-2.5 sm:px-5 sm:py-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2.5">
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-teal-600 font-mono text-xs font-extrabold text-white shadow-sm">
+                ZF
               </div>
-              <p className="hidden text-xs text-slate-500 sm:block">
-                Controlling members, WhatsApp numbers &amp; live bot link
-              </p>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="truncate text-sm font-bold text-slate-900">
+                    ZaFar Server
+                  </span>
+                  <span className="shrink-0 rounded bg-teal-50 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase text-teal-700 ring-1 ring-teal-200">
+                    ROOT
+                  </span>
+                </div>
+                <div className="truncate font-mono text-[10px] text-slate-500">
+                  {data.storageEngine}
+                  {data.botVersion ? ` · v${data.botVersion}` : ''}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex shrink-0 items-center gap-1.5">
+              <Link
+                href="/dashboard"
+                title="Member View"
+                className="inline-flex h-8 items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 px-2.5 text-xs font-semibold text-slate-700 transition hover:border-teal-300 hover:bg-teal-50 hover:text-teal-800"
+              >
+                <span className="hidden sm:inline">Portal</span>
+                <ExternalLink className="h-3.5 w-3.5" />
+              </Link>
+
+              <button
+                type="button"
+                onClick={() => loadOverview(false, false)}
+                disabled={refreshing}
+                title="Refresh"
+                className="flex h-8 w-8 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 transition hover:border-slate-300 hover:text-slate-900"
+              >
+                {refreshing ? (
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin text-teal-600" />
+                ) : (
+                  <Activity className="h-3.5 w-3.5" />
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setAccountOpen(true)}
+                className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-800 shadow-sm transition hover:border-teal-300"
+              >
+                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-teal-600 font-mono text-[10px] font-bold uppercase text-white">
+                  {(user.name || user.email).slice(0, 2)}
+                </span>
+                <span className="hidden max-w-[96px] truncate sm:inline">
+                  {user.name}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleSignOut}
+                title="Sign out"
+                className="flex h-8 w-8 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+              </button>
             </div>
           </div>
 
           <nav
-            aria-label="Admin sections"
-            className="order-3 flex w-full items-center gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1 md:order-2 md:w-auto"
+            aria-label="Server sections"
+            className="mt-2.5 grid grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1"
           >
             <button
               type="button"
+              onClick={() => setTab('server')}
+              className={`flex min-w-0 items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${
+                tab === 'server'
+                  ? 'bg-white text-slate-900 shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Server
+                className={`h-3.5 w-3.5 shrink-0 ${tab === 'server' ? 'text-teal-600' : ''}`}
+              />
+              <span className="truncate">
+                Server &amp; Numbers ({enabledNumbersCount}/{data.users.length})
+              </span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => setTab('members')}
-              className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition ${
+              className={`flex min-w-0 items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${
                 tab === 'members'
                   ? 'bg-white text-slate-900 shadow-sm'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              <Users className={`h-3.5 w-3.5 ${tab === 'members' ? 'text-teal-600' : ''}`} />
-              Members ({data.members.length})
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setTab('bot')}
-              className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition ${
-                tab === 'bot'
-                  ? 'bg-white text-slate-900 shadow-sm'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <Server className={`h-3.5 w-3.5 ${tab === 'bot' ? 'text-teal-600' : ''}`} />
-              Bot &amp; Numbers ({data.users.length})
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setTab('guide')}
-              className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition ${
-                tab === 'guide'
-                  ? 'bg-white text-slate-900 shadow-sm'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <HelpCircle className={`h-3.5 w-3.5 ${tab === 'guide' ? 'text-teal-600' : ''}`} />
-              How to Link Bot
+              <Users
+                className={`h-3.5 w-3.5 shrink-0 ${tab === 'members' ? 'text-teal-600' : ''}`}
+              />
+              <span className="truncate">
+                Members ({allowedMembersCount}/{data.members.length})
+              </span>
             </button>
           </nav>
-
-          <div className="order-2 flex items-center gap-2 md:order-3">
-            <Link
-              href="/dashboard"
-              className="hidden items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-teal-300 hover:bg-teal-50 hover:text-teal-800 sm:inline-flex"
-            >
-              Member Page
-              <ExternalLink className="h-3 w-3" />
-            </Link>
-
-            <button
-              type="button"
-              onClick={() => loadOverview(false, false)}
-              disabled={refreshing}
-              title="Refresh live data"
-              className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 transition hover:border-slate-300 hover:text-slate-900"
-            >
-              {refreshing ? (
-                <RefreshCw className="h-3.5 w-3.5 animate-spin text-teal-600" />
-              ) : (
-                <Activity className="h-3.5 w-3.5" />
-              )}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setAccountOpen(true)}
-              className="flex items-center gap-2 rounded-full border border-slate-200 bg-white py-1 pl-1.5 pr-3 text-xs font-semibold text-slate-800 shadow-sm transition hover:border-teal-300"
-            >
-              <span className="flex h-6 w-6 items-center justify-center rounded-full bg-teal-600 font-mono text-[10px] font-bold uppercase text-white">
-                {(user.name || user.email).slice(0, 2)}
-              </span>
-              <span className="max-w-[120px] truncate">{user.name}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleSignOut}
-              title="Sign out"
-              className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600"
-            >
-              <LogOut className="h-3.5 w-3.5" />
-            </button>
-          </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1180px] px-5 pb-16 pt-8">
-        {/* Page Heading */}
-        <section className="mb-6 flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <span className="text-xs font-bold uppercase tracking-widest text-teal-700">
-              Administrator Control Room · {user.email}
-            </span>
-            <h1 className="mt-1 text-3xl font-extrabold tracking-tight text-slate-900 sm:text-4xl">
-              Control Members &amp; Bot Operations
-            </h1>
-            <p className="mt-1.5 max-w-2xl text-sm text-slate-600">
-              Allow or disallow members by email, connect your live WhatsApp bot server once for everyone, and manage all linked phone numbers.
-            </p>
+      <main className="mx-auto max-w-[1140px] px-3.5 pb-14 pt-4 sm:px-5 sm:pt-6">
+        {/* Live Server Analytics: Commands, Successful Downloads, Failed, Uptime + RAM/Disk/Queues */}
+        <LiveAnalytics
+          reachable={data.botReachable}
+          connected={data.connected}
+          botNumber={data.botNumber}
+          lastSeenSecondsAgo={data.lastSeenSecondsAgo}
+          uptimeSeconds={data.uptimeSeconds}
+          commandsTotal={data.commandsTotal}
+          downloadsSuccess={data.downloadsSuccess}
+          failedTotal={data.failedTotal}
+          ramUsedMB={data.ramUsedMB}
+          diskUsedMB={data.diskUsedMB}
+          diskBudgetMB={data.diskBudgetMB}
+          queueLight={data.queueLight}
+          queueHeavy={data.queueHeavy}
+          showResources
+        />
+
+        {/* Quick Server Operations Bar (Power + Member Gate) */}
+        <section className="mb-5 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm sm:px-4">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              disabled={sendingPower !== null}
+              onClick={() => handlePanelPower('restart')}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-teal-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-teal-700 disabled:opacity-50"
+            >
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${sendingPower === 'restart' ? 'animate-spin' : ''}`}
+              />
+              {sendingPower === 'restart' ? 'Restarting…' : 'Restart'}
+            </button>
+
+            <button
+              type="button"
+              disabled={sendingPower !== null}
+              onClick={() => handlePanelPower('start')}
+              className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800 transition hover:bg-emerald-100 disabled:opacity-50"
+            >
+              {sendingPower === 'start' ? 'Starting…' : 'Start'}
+            </button>
+
+            <button
+              type="button"
+              disabled={sendingPower !== null}
+              onClick={() => handlePanelPower('stop')}
+              className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 disabled:opacity-50"
+            >
+              {sendingPower === 'stop' ? 'Stopping…' : 'Stop'}
+            </button>
           </div>
 
           <button
             type="button"
             onClick={handleToggleGlobalBot}
-            className={`inline-flex items-center gap-2 rounded-xl border px-4 py-2.5 text-xs font-bold shadow-sm transition ${
+            className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold transition ${
               data.botEnabledForMembers
                 ? 'border-teal-200 bg-teal-50 text-teal-800 hover:bg-teal-100'
                 : 'border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100'
             }`}
           >
-            <Power className="h-4 w-4" />
-            {data.botEnabledForMembers
-              ? 'Member Access: ACTIVE (Click to Pause)'
-              : 'Member Access: PAUSED (Click to Enable)'}
+            <Power className="h-3.5 w-3.5 shrink-0" />
+            <span>
+              Members: {data.botEnabledForMembers ? 'ACTIVE' : 'PAUSED'}
+            </span>
           </button>
         </section>
 
         {notice && (
           <div
             role="status"
-            className={`mb-5 flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-xs font-medium ${
+            className={`mb-4 flex items-center justify-between gap-2 rounded-xl border px-3.5 py-2.5 text-xs font-medium ${
               notice.bad
                 ? 'border-rose-200 bg-rose-50 text-rose-800'
                 : 'border-teal-200 bg-teal-50 text-teal-900'
             }`}
           >
-            <div className="flex items-center gap-2">
+            <div className="flex min-w-0 items-center gap-2">
               {notice.bad ? (
                 <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" />
               ) : (
                 <CheckCircle2 className="h-4 w-4 shrink-0 text-teal-600" />
               )}
-              <span>{notice.text}</span>
+              <span className="min-w-0 break-words">{notice.text}</span>
             </div>
             <button
               type="button"
               onClick={() => setNotice(null)}
-              className="text-[11px] font-semibold underline"
+              className="shrink-0 text-[11px] font-semibold underline"
             >
-              Dismiss
+              Close
             </button>
           </div>
         )}
 
-        {data.botServerLinked && data.botReachable === false && (
-          <div
-            role="alert"
-            className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-950"
-          >
-            <div className="flex items-start gap-2.5">
-              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-              <div>
-                <strong className="font-bold">Bot Offline:</strong>{' '}
-                {data.botError || 'Could not reach the bot server within 3 seconds.'}{' '}
-                <span className="text-amber-800">
-                  Member &amp; number changes still save to D1 and sync automatically once the bot is back online.
+        {/* TAB 1: SERVER & WHATSAPP NUMBERS */}
+        {tab === 'server' && (
+          <div className="space-y-4">
+            {/* Approved WhatsApp Numbers */}
+            <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-sm font-bold text-slate-900 sm:text-base">
+                  WhatsApp Numbers
+                </h2>
+                <span className="font-mono text-xs text-slate-500 tabular-nums">
+                  {enabledNumbersCount} active / {data.users.length} total
                 </span>
               </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setTab('bot')}
-              className="shrink-0 rounded-lg border border-amber-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-amber-900 hover:bg-amber-100"
-            >
-              Check Bot Link
-            </button>
-          </div>
-        )}
-
-        {/* Summary Metric Cards */}
-        <section className="mb-7 grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-3.5">
-          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="text-xs font-medium text-slate-500">Allowed Members</div>
-            <div className="mt-1.5 flex items-baseline gap-2">
-              <b className="font-mono text-2xl font-bold text-slate-900 tabular-nums">
-                {allowedMembersCount}
-              </b>
-              <span className="text-xs text-slate-500">of {data.members.length}</span>
-            </div>
-          </div>
-
-          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="text-xs font-medium text-slate-500">Active Numbers</div>
-            <div className="mt-1.5 flex items-baseline gap-2">
-              <b className="font-mono text-2xl font-bold text-slate-900 tabular-nums">
-                {enabledNumbersCount}
-              </b>
-              <span className="text-xs text-slate-500">of {data.users.length}</span>
-            </div>
-          </div>
-
-          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="text-xs font-medium text-slate-500">Live Bot Socket</div>
-            <div className="mt-1.5 flex items-center gap-2">
-              <span
-                className={`h-2.5 w-2.5 shrink-0 rounded-full ${
-                  data.connected
-                    ? 'bg-teal-500'
-                    : data.botReachable
-                      ? 'bg-amber-500'
-                      : data.botServerLinked
-                        ? 'bg-rose-500'
-                        : 'bg-slate-300'
-                }`}
-              />
-              <b className="text-base font-bold text-slate-900 sm:text-xl">
-                {data.botServerLinked
-                  ? data.connected
-                    ? 'Online'
-                    : data.botReachable
-                      ? 'Awaiting Pair'
-                      : 'Bot Offline'
-                  : 'Not Linked'}
-              </b>
-            </div>
-            {data.lastSeenSecondsAgo != null && (
-              <div className="mt-1 text-[11px] font-medium text-slate-500">
-                Last seen {data.lastSeenSecondsAgo}s ago
-                {data.diskUsedMB != null && data.diskBudgetMB != null
-                  ? ` · ${data.diskUsedMB}/${data.diskBudgetMB} MB`
-                  : ''}
-              </div>
-            )}
-          </div>
-
-          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="flex items-center justify-between text-xs font-medium text-slate-500">
-              <span>Bot WhatsApp ID</span>
-              <Smartphone className="h-3.5 w-3.5 text-teal-600" />
-            </div>
-            <b className="mt-1.5 block font-mono text-xl font-bold text-slate-900 tabular-nums">
-              {data.botNumber ? `+${data.botNumber}` : '—'}
-            </b>
-          </div>
-        </section>
-
-        {/* TAB 1: MEMBERS CONTROL */}
-        {tab === 'members' && (
-          <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <h2 className="flex items-center gap-2 text-lg font-bold text-slate-900">
-                  <UserCheck className="h-5 w-5 text-teal-600" />
-                  Member Access Control
-                </h2>
-                <p className="mt-0.5 text-xs text-slate-500">
-                  Allow or disallow members by email. Disallowing a member immediately blocks them from adding numbers or linking WhatsApp devices.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-1 rounded-xl bg-slate-100 p-1 text-xs">
-                {(['all', 'allowed', 'disallowed'] as MemberFilter[]).map((f) => (
-                  <button
-                    key={f}
-                    type="button"
-                    onClick={() => setMemberFilter(f)}
-                    className={`rounded-lg px-3 py-1 font-semibold capitalize transition ${
-                      memberFilter === f
-                        ? 'bg-white text-slate-900 shadow-sm'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    {f}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Pre-allow / Add Member Form */}
-            <form
-              onSubmit={handleAddMember}
-              className="mt-5 grid grid-cols-1 gap-2.5 rounded-2xl border border-slate-200 bg-slate-50/70 p-4 sm:grid-cols-[1.2fr_1fr_auto] sm:items-end"
-            >
-              <div>
-                <label
-                  htmlFor="add-member-email"
-                  className="mb-1 block text-xs font-medium text-slate-700"
-                >
-                  Allow / pre-approve member email
-                </label>
-                <input
-                  id="add-member-email"
-                  type="email"
-                  required
-                  value={newMemberEmail}
-                  onChange={(e) => setNewMemberEmail(e.target.value)}
-                  placeholder="member@gmail.com"
-                  className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
-                />
-              </div>
-              <div>
-                <label
-                  htmlFor="add-member-name"
-                  className="mb-1 block text-xs font-medium text-slate-700"
-                >
-                  Member name (optional)
-                </label>
-                <input
-                  id="add-member-name"
-                  type="text"
-                  value={newMemberName}
-                  onChange={(e) => setNewMemberName(e.target.value)}
-                  placeholder="Student or team member"
-                  className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={addingMember}
-                className="inline-flex h-[38px] items-center justify-center gap-1.5 rounded-xl bg-teal-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-teal-700 disabled:opacity-60"
-              >
-                <UserPlus className="h-4 w-4" />
-                {addingMember ? 'Saving…' : 'Allow Member'}
-              </button>
-            </form>
-
-            {/* Search bar */}
-            <div className="relative mt-4">
-              <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-              <input
-                type="search"
-                value={memberSearch}
-                onChange={(e) => setMemberSearch(e.target.value)}
-                placeholder="Search members by email or name…"
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pl-10 pr-4 text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:bg-white focus:outline-none"
-              />
-            </div>
-
-            {/* Members list */}
-            <div className="mt-4 divide-y divide-slate-100">
-              {filteredMembers.length === 0 ? (
-                <div className="py-10 text-center text-sm text-slate-500">
-                  No members match this view yet. Registered members appear here automatically.
-                </div>
-              ) : (
-                filteredMembers.map((member) => {
-                  const busy = busyEmail === member.email;
-                  return (
-                    <div
-                      key={member.email}
-                      className="flex flex-wrap items-center justify-between gap-3 py-3.5"
-                    >
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-sm font-bold text-slate-900">
-                            {member.name}
-                          </span>
-                          {member.isAdmin ? (
-                            <span className="rounded-full bg-teal-50 px-2.5 py-0.5 text-[11px] font-bold text-teal-800 ring-1 ring-teal-200">
-                              Admin
-                            </span>
-                          ) : member.allowed ? (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700 ring-1 ring-emerald-200">
-                              <ShieldCheck className="h-3 w-3" />
-                              Allowed
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2.5 py-0.5 text-[11px] font-semibold text-rose-700 ring-1 ring-rose-200">
-                              <ShieldBan className="h-3 w-3" />
-                              Disallowed
-                            </span>
-                          )}
-                        </div>
-                        <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                          <span className="break-all font-mono text-slate-700">{member.email}</span>
-                          <span>·</span>
-                          <span>{member.numbersCount} linked number(s)</span>
-                        </div>
-                      </div>
-
-                      <div>
-                        {member.isAdmin ? (
-                          <span className="text-xs font-medium text-slate-400">
-                            Protected Owner
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() =>
-                              handleToggleMember(
-                                member.email,
-                                !member.allowed,
-                                member.name,
-                              )
-                            }
-                            className={`rounded-xl px-4 py-2 text-xs font-semibold transition disabled:opacity-50 ${
-                              member.allowed
-                                ? 'border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100'
-                                : 'bg-teal-600 text-white hover:bg-teal-700'
-                            }`}
-                          >
-                            {busy
-                              ? 'Updating…'
-                              : member.allowed
-                                ? 'Disallow Member'
-                                : 'Allow Member'}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </section>
-        )}
-
-        {/* TAB 2: BOT SERVER LINK & ALL NUMBERS */}
-        {tab === 'bot' && (
-          <div className="space-y-6">
-            {/* Link Bot Server Card */}
-            <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h2 className="flex items-center gap-2 text-lg font-bold text-slate-900">
-                    <Server className="h-5 w-5 text-teal-600" />
-                    Link Live WhatsApp Bot (Outbound HTTPS Sync — No Open Port Needed)
-                  </h2>
-                  <p className="mt-0.5 text-xs text-slate-500">
-                    Recommended: set <code className="font-mono">DASHBOARD_URL</code> and <code className="font-mono">BOT_SYNC_TOKEN</code> on your bot. It pushes live heartbeats, pulls whitelist deltas, and generates pairing codes over outbound HTTPS without opening any port on your panel.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setTab('guide')}
-                  className="text-xs font-semibold text-teal-700 hover:underline"
-                >
-                  Step-by-step Bot Setup Guide →
-                </button>
-              </div>
-
-              <form
-                onSubmit={handleSaveBotConfig}
-                className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_1fr_auto] md:items-end"
-              >
-                <div>
-                  <label
-                    htmlFor="admin-bot-sync-token"
-                    className="mb-1 block text-xs font-medium text-slate-700"
-                  >
-                    Outbound Sync Token (<code className="font-mono">BOT_SYNC_TOKEN</code>)
-                  </label>
-                  <div className="relative">
-                    <input
-                      id="admin-bot-sync-token"
-                      type={showBotToken ? 'text' : 'password'}
-                      value={botSyncTokenInput}
-                      onChange={(e) => setBotSyncTokenInput(e.target.value)}
-                      placeholder="Same BOT_SYNC_TOKEN set in bot .env"
-                      className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-3.5 pr-10 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowBotToken((s) => !s)}
-                      aria-label={showBotToken ? 'Hide token' : 'Show token'}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
-                    >
-                      {showBotToken ? (
-                        <EyeOff className="h-4 w-4" />
-                      ) : (
-                        <Eye className="h-4 w-4" />
-                      )}
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="admin-bot-url"
-                    className="mb-1 block text-xs font-medium text-slate-700"
-                  >
-                    Optional Inbound Bot URL (<code className="font-mono">blank = outbound mode</code>)
-                  </label>
-                  <input
-                    id="admin-bot-url"
-                    type="url"
-                    value={botUrlInput}
-                    onChange={(e) => setBotUrlInput(e.target.value)}
-                    placeholder="Leave blank on Hydrodactyl/Pterodactyl"
-                    className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="admin-bot-token"
-                    className="mb-1 block text-xs font-medium text-slate-700"
-                  >
-                    Optional <code className="font-mono">ADMIN_DASHBOARD_TOKEN</code>
-                  </label>
-                  <input
-                    id="admin-bot-token"
-                    type={showBotToken ? 'text' : 'password'}
-                    value={botTokenInput}
-                    onChange={(e) => setBotTokenInput(e.target.value)}
-                    placeholder="Optional fallback token"
-                    className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={savingBot}
-                  className="inline-flex h-[40px] items-center justify-center gap-1.5 rounded-xl bg-teal-600 px-5 text-xs font-semibold text-white shadow-sm transition hover:bg-teal-700 disabled:opacity-60"
-                >
-                  {savingBot ? 'Saving…' : 'Save Sync Settings'}
-                </button>
-              </form>
-
-              {(data.isInsecureHttp || /^http:\/\/(?!localhost|127\.0\.0\.1)/i.test(botUrlInput.trim())) && (
-                <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900">
-                  <strong>Tip:</strong> Leave Inbound Bot URL blank and use <code className="font-mono">BOT_SYNC_TOKEN</code> instead — your bot connects outbound over encrypted HTTPS automatically!
-                </p>
-              )}
-            </section>
-
-            {/* Hydrodactyl / Pterodactyl Panel Control Card */}
-            <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h2 className="flex items-center gap-2 text-lg font-bold text-slate-900">
-                    <Power className="h-5 w-5 text-teal-600" />
-                    Hydrodactyl / Pterodactyl Panel Power Control
-                  </h2>
-                  <p className="mt-0.5 text-xs text-slate-500">
-                    Store your <code className="font-mono">hydro_…</code> / <code className="font-mono">ptlc_…</code> Client API Key server-side so you can restart, start, or stop your bot container right here — even if the bot is crashed or offline.
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    disabled={sendingPower !== null}
-                    onClick={() => handlePanelPower('restart')}
-                    className="inline-flex items-center gap-1.5 rounded-xl bg-teal-600 px-3.5 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-teal-700 disabled:opacity-50"
-                  >
-                    <RefreshCw className={`h-3.5 w-3.5 ${sendingPower === 'restart' ? 'animate-spin' : ''}`} />
-                    {sendingPower === 'restart' ? 'Restarting…' : 'Restart Bot'}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={sendingPower !== null}
-                    onClick={() => handlePanelPower('start')}
-                    className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800 transition hover:bg-emerald-100 disabled:opacity-50"
-                  >
-                    {sendingPower === 'start' ? 'Starting…' : 'Start'}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={sendingPower !== null}
-                    onClick={() => handlePanelPower('stop')}
-                    className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 disabled:opacity-50"
-                  >
-                    {sendingPower === 'stop' ? 'Stopping…' : 'Stop'}
-                  </button>
-                </div>
-              </div>
-
-              <form
-                onSubmit={handleSavePanel}
-                className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[1.1fr_1fr_0.75fr_auto] md:items-end"
-              >
-                <div>
-                  <label
-                    htmlFor="admin-panel-url"
-                    className="mb-1 block text-xs font-medium text-slate-700"
-                  >
-                    Panel URL (<code className="font-mono">HTTPS</code>)
-                  </label>
-                  <input
-                    id="admin-panel-url"
-                    type="url"
-                    value={panelUrlInput}
-                    onChange={(e) => setPanelUrlInput(e.target.value)}
-                    placeholder="https://panel.xsystemshosting.com"
-                    className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="admin-panel-key"
-                    className="mb-1 block text-xs font-medium text-slate-700"
-                  >
-                    Account Client API Key (<code className="font-mono">hydro_… / ptlc_…</code>)
-                  </label>
-                  <div className="relative">
-                    <input
-                      id="admin-panel-key"
-                      type={showPanelKey ? 'text' : 'password'}
-                      value={panelKeyInput}
-                      onChange={(e) => setPanelKeyInput(e.target.value)}
-                      placeholder="Account → API Credentials → Create Key"
-                      className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-3.5 pr-10 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPanelKey((s) => !s)}
-                      aria-label={showPanelKey ? 'Hide API key' : 'Show API key'}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
-                    >
-                      {showPanelKey ? (
-                        <EyeOff className="h-4 w-4" />
-                      ) : (
-                        <Eye className="h-4 w-4" />
-                      )}
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="admin-panel-sid"
-                    className="mb-1 block text-xs font-medium text-slate-700"
-                  >
-                    Server ID (<code className="font-mono">auto-detected if blank</code>)
-                  </label>
-                  <input
-                    id="admin-panel-sid"
-                    type="text"
-                    value={panelServerIdInput}
-                    onChange={(e) => setPanelServerIdInput(e.target.value)}
-                    placeholder="e.g. a1b2c3d4"
-                    className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={savingPanel}
-                  className="inline-flex h-[40px] items-center justify-center gap-1.5 rounded-xl border border-teal-600 bg-teal-50 px-4 text-xs font-semibold text-teal-800 transition hover:bg-teal-100 disabled:opacity-60"
-                >
-                  {savingPanel ? 'Verifying…' : 'Verify & Save Panel'}
-                </button>
-              </form>
-            </section>
-
-            {/* All WhatsApp Numbers Table */}
-            <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-              <h2 className="text-lg font-bold text-slate-900">
-                All Linked &amp; Approved WhatsApp Numbers
-              </h2>
-              <p className="mt-0.5 text-xs text-slate-500">
-                View every WhatsApp number registered across all members, generate 60-second pairing codes, or revoke access.
-              </p>
 
               <form
                 onSubmit={handleAddNumber}
-                className="mt-4 grid grid-cols-1 gap-2.5 sm:grid-cols-[1.1fr_1fr_auto] sm:items-end"
+                className="mt-3.5 grid grid-cols-1 gap-2.5 sm:grid-cols-[1.1fr_1fr_auto] sm:items-end"
               >
-                <div>
+                <div className="min-w-0">
                   <label
                     htmlFor="admin-add-num"
                     className="mb-1 block text-xs font-medium text-slate-700"
                   >
-                    International WhatsApp number
+                    Number
                   </label>
                   <input
                     id="admin-add-num"
@@ -1247,19 +771,19 @@ export function AdminConsole() {
                     className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none tabular-nums"
                   />
                 </div>
-                <div>
+                <div className="min-w-0">
                   <label
                     htmlFor="admin-add-label"
                     className="mb-1 block text-xs font-medium text-slate-700"
                   >
-                    Label / note
+                    Label
                   </label>
                   <input
                     id="admin-add-label"
                     type="text"
                     value={numLabel}
                     onChange={(e) => setNumLabel(e.target.value)}
-                    placeholder="Operator phone"
+                    placeholder="Operator"
                     className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
                   />
                 </div>
@@ -1269,21 +793,21 @@ export function AdminConsole() {
                   className="inline-flex h-[42px] items-center justify-center gap-1.5 rounded-xl bg-teal-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-teal-700 disabled:opacity-60"
                 >
                   <Plus className="h-4 w-4" />
-                  {addingNumber ? 'Adding…' : 'Approve Number'}
+                  {addingNumber ? 'Adding…' : 'Approve'}
                 </button>
               </form>
 
-              <div className="mt-5">
+              <div className="mt-4">
                 <PairingCodeBanner
                   activePair={activePair}
                   onDismiss={() => setActivePair(null)}
                 />
               </div>
 
-              <div className="mt-3 divide-y divide-slate-100">
+              <div className="mt-2 divide-y divide-slate-100">
                 {data.users.length === 0 ? (
-                  <p className="py-8 text-center text-sm text-slate-500">
-                    No WhatsApp numbers approved yet.
+                  <p className="py-6 text-center font-mono text-xs text-slate-400">
+                    No numbers approved
                   </p>
                 ) : (
                   data.users.map((u) => {
@@ -1292,58 +816,58 @@ export function AdminConsole() {
                     return (
                       <div
                         key={u.number}
-                        className="flex flex-wrap items-center justify-between gap-3 py-3.5"
+                        className="flex flex-col gap-2.5 py-3.5 sm:flex-row sm:items-center sm:justify-between"
                       >
-                        <div>
+                        <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="font-mono text-sm font-bold text-slate-900 tabular-nums">
                               +{u.number}
                             </span>
                             <span
-                              className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
+                              className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${
                                 u.enabled
                                   ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
                                   : 'bg-rose-50 text-rose-700 ring-1 ring-rose-200'
                               }`}
                             >
-                              {u.enabled ? 'Allowed' : 'Disallowed'}
+                              {u.enabled ? 'Allowed' : 'Blocked'}
                             </span>
                           </div>
-                          <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                            <span>{u.label || 'Approved number'}</span>
+                          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+                            <span className="truncate">{u.label || 'Approved'}</span>
                             {u.addedBy && (
                               <>
                                 <span>·</span>
-                                <span className="font-mono text-slate-600">
-                                  Owner: {u.addedBy}
+                                <span className="break-all font-mono text-[11px] text-slate-600">
+                                  {u.addedBy}
                                 </span>
                               </>
                             )}
                           </div>
                         </div>
 
-                        <div className="flex flex-wrap items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
                           <button
                             type="button"
                             disabled={!u.enabled || busy}
                             onClick={() => handlePairNumber(u.number)}
-                            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-800 transition hover:border-teal-300 hover:bg-teal-50 hover:text-teal-800 disabled:opacity-40"
+                            className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-semibold text-slate-800 transition hover:border-teal-300 hover:bg-teal-50 hover:text-teal-800 disabled:opacity-40"
                           >
                             <Link2 className="h-3.5 w-3.5 text-teal-600" />
-                            Get Code
+                            Code
                           </button>
 
                           <button
                             type="button"
                             disabled={busy}
                             onClick={() => handleToggleNumber(u.number, !u.enabled)}
-                            className={`rounded-xl px-3 py-2 text-xs font-semibold transition ${
+                            className={`rounded-xl px-2.5 py-1.5 text-xs font-semibold transition ${
                               u.enabled
                                 ? 'border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100'
                                 : 'bg-teal-600 text-white hover:bg-teal-700'
                             }`}
                           >
-                            {u.enabled ? 'Disallow' : 'Allow'}
+                            {u.enabled ? 'Block' : 'Allow'}
                           </button>
 
                           {confirming ? (
@@ -1351,14 +875,14 @@ export function AdminConsole() {
                               <button
                                 type="button"
                                 onClick={() => handleDeleteNumber(u.number)}
-                                className="rounded-xl bg-rose-600 px-3 py-2 text-xs font-semibold text-white"
+                                className="rounded-xl bg-rose-600 px-2.5 py-1.5 text-xs font-semibold text-white"
                               >
                                 Confirm
                               </button>
                               <button
                                 type="button"
                                 onClick={() => setConfirmDeleteNum(null)}
-                                className="rounded-xl bg-slate-100 px-2.5 py-2 text-xs font-medium text-slate-600"
+                                className="rounded-xl bg-slate-100 px-2.5 py-1.5 text-xs font-medium text-slate-600"
                               >
                                 Cancel
                               </button>
@@ -1367,7 +891,7 @@ export function AdminConsole() {
                             <button
                               type="button"
                               onClick={() => setConfirmDeleteNum(u.number)}
-                              className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-xs font-semibold text-rose-600 hover:border-rose-200 hover:bg-rose-50"
+                              className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-rose-600 hover:border-rose-200 hover:bg-rose-50"
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                               Remove
@@ -1380,100 +904,358 @@ export function AdminConsole() {
                 )}
               </div>
             </section>
+
+            {/* Bot Sync & Hydrodactyl Credentials Rack */}
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+                <div className="flex items-center justify-between gap-2">
+                  <h2 className="flex items-center gap-2 text-sm font-bold text-slate-900">
+                    <Server className="h-4 w-4 text-teal-600" />
+                    Bot Sync Bridge
+                  </h2>
+                  <span className="rounded bg-slate-100 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase text-slate-600">
+                    {data.connectionMode || 'sync'}
+                  </span>
+                </div>
+
+                <form onSubmit={handleSaveBotConfig} className="mt-3.5 space-y-3">
+                  <div className="min-w-0">
+                    <label
+                      htmlFor="admin-bot-sync-token"
+                      className="mb-1 block font-mono text-[11px] font-semibold text-slate-600"
+                    >
+                      BOT_SYNC_TOKEN
+                    </label>
+                    <div className="relative">
+                      <input
+                        id="admin-bot-sync-token"
+                        type={showBotToken ? 'text' : 'password'}
+                        value={botSyncTokenInput}
+                        onChange={(e) => setBotSyncTokenInput(e.target.value)}
+                        placeholder="Sync token"
+                        className="w-full rounded-xl border border-slate-300 bg-white py-2 pl-3 pr-9 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowBotToken((s) => !s)}
+                        aria-label={showBotToken ? 'Hide token' : 'Show token'}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                      >
+                        {showBotToken ? (
+                          <EyeOff className="h-4 w-4" />
+                        ) : (
+                          <Eye className="h-4 w-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                    <div className="min-w-0">
+                      <label
+                        htmlFor="admin-bot-url"
+                        className="mb-1 block font-mono text-[11px] font-semibold text-slate-600"
+                      >
+                        INBOUND_URL (optional)
+                      </label>
+                      <input
+                        id="admin-bot-url"
+                        type="url"
+                        value={botUrlInput}
+                        onChange={(e) => setBotUrlInput(e.target.value)}
+                        placeholder="Blank = outbound"
+                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="min-w-0">
+                      <label
+                        htmlFor="admin-bot-token"
+                        className="mb-1 block font-mono text-[11px] font-semibold text-slate-600"
+                      >
+                        ADMIN_DASHBOARD_TOKEN
+                      </label>
+                      <input
+                        id="admin-bot-token"
+                        type={showBotToken ? 'text' : 'password'}
+                        value={botTokenInput}
+                        onChange={(e) => setBotTokenInput(e.target.value)}
+                        placeholder="Optional"
+                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={savingBot}
+                    className="inline-flex h-[38px] w-full items-center justify-center rounded-xl bg-teal-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-teal-700 disabled:opacity-60 sm:w-auto"
+                  >
+                    {savingBot ? 'Saving…' : 'Save Sync'}
+                  </button>
+                </form>
+              </section>
+
+              <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+                <div className="flex items-center justify-between gap-2">
+                  <h2 className="flex items-center gap-2 text-sm font-bold text-slate-900">
+                    <Power className="h-4 w-4 text-teal-600" />
+                    Panel API
+                  </h2>
+                  <span
+                    className={`rounded px-2 py-0.5 font-mono text-[10px] font-semibold uppercase ${
+                      data.panelConfigured
+                        ? 'bg-emerald-50 text-emerald-700'
+                        : 'bg-slate-100 text-slate-600'
+                    }`}
+                  >
+                    {data.panelConfigured ? 'Configured' : 'Unset'}
+                  </span>
+                </div>
+
+                <form onSubmit={handleSavePanel} className="mt-3.5 space-y-3">
+                  <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-[1.3fr_0.7fr]">
+                    <div className="min-w-0">
+                      <label
+                        htmlFor="admin-panel-url"
+                        className="mb-1 block font-mono text-[11px] font-semibold text-slate-600"
+                      >
+                        PANEL_URL
+                      </label>
+                      <input
+                        id="admin-panel-url"
+                        type="url"
+                        value={panelUrlInput}
+                        onChange={(e) => setPanelUrlInput(e.target.value)}
+                        placeholder="https://panel.xsystemshosting.com"
+                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="min-w-0">
+                      <label
+                        htmlFor="admin-panel-sid"
+                        className="mb-1 block font-mono text-[11px] font-semibold text-slate-600"
+                      >
+                        SERVER_ID
+                      </label>
+                      <input
+                        id="admin-panel-sid"
+                        type="text"
+                        value={panelServerIdInput}
+                        onChange={(e) => setPanelServerIdInput(e.target.value)}
+                        placeholder="Auto"
+                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="min-w-0">
+                    <label
+                      htmlFor="admin-panel-key"
+                      className="mb-1 block font-mono text-[11px] font-semibold text-slate-600"
+                    >
+                      PANEL_API_KEY (hydro_ / ptlc_)
+                    </label>
+                    <div className="relative">
+                      <input
+                        id="admin-panel-key"
+                        type={showPanelKey ? 'text' : 'password'}
+                        value={panelKeyInput}
+                        onChange={(e) => setPanelKeyInput(e.target.value)}
+                        placeholder="API key"
+                        className="w-full rounded-xl border border-slate-300 bg-white py-2 pl-3 pr-9 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPanelKey((s) => !s)}
+                        aria-label={showPanelKey ? 'Hide API key' : 'Show API key'}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                      >
+                        {showPanelKey ? (
+                          <EyeOff className="h-4 w-4" />
+                        ) : (
+                          <Eye className="h-4 w-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={savingPanel}
+                    className="inline-flex h-[38px] w-full items-center justify-center rounded-xl border border-teal-600 bg-teal-50 px-4 text-xs font-semibold text-teal-800 transition hover:bg-teal-100 disabled:opacity-60 sm:w-auto"
+                  >
+                    {savingPanel ? 'Verifying…' : 'Verify & Save Panel'}
+                  </button>
+                </form>
+              </section>
+            </div>
           </div>
         )}
 
-        {/* TAB 3: STEP-BY-STEP HOW TO LINK BOT GUIDE */}
-        {tab === 'guide' && (
-          <section className="space-y-5 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <div>
-              <span className="text-xs font-bold uppercase tracking-widest text-teal-700">
-                Connection Guide
-              </span>
-              <h2 className="mt-1 text-xl font-bold text-slate-900">
-                How to Connect Your WhatsApp Bot to This Website
+        {/* TAB 2: MEMBERS ACCESS CONTROL */}
+        {tab === 'members' && (
+          <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="flex items-center gap-2 text-sm font-bold text-slate-900 sm:text-base">
+                <UserCheck className="h-4 w-4 text-teal-600" />
+                Members
               </h2>
-              <p className="mt-1 text-sm text-slate-600">
-                Your WhatsApp bot includes the built-in dashboard bridge in{' '}
-                <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-800">
-                  index.js
-                </code>{' '}
-                (<code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-800">utils/adminApi.js</code>). Follow these 3 quick steps:
-              </p>
+
+              <div className="flex items-center gap-1 rounded-xl bg-slate-100 p-1 text-xs">
+                {(['all', 'allowed', 'disallowed'] as MemberFilter[]).map((f) => (
+                  <button
+                    key={f}
+                    type="button"
+                    onClick={() => setMemberFilter(f)}
+                    className={`rounded-lg px-2.5 py-1 font-semibold capitalize transition ${
+                      memberFilter === f
+                        ? 'bg-white text-slate-900 shadow-sm'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {f}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-              <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
-                <div className="font-mono text-xs font-bold text-teal-700">STEP 1</div>
-                <h3 className="mt-1 text-sm font-bold text-slate-900">
-                  Set Token on Your Bot Host
-                </h3>
-                <p className="mt-1 text-xs leading-relaxed text-slate-600">
-                  Where you run your WhatsApp bot (Koyeb, KataBump, Railway, or VPS), add these two variables in its Environment / <code className="font-mono">.env</code>:
-                </p>
-                <pre className="mt-3 overflow-x-auto rounded-xl border border-slate-200 bg-white p-3 font-mono text-[11px] text-slate-800">
-                  {BOT_ENV_EXAMPLE}
-                </pre>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    await navigator.clipboard.writeText(BOT_ENV_EXAMPLE);
-                    setCopiedSnippet(true);
-                    setTimeout(() => setCopiedSnippet(false), 1800);
-                  }}
-                  className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-teal-700 hover:underline"
+            <form
+              onSubmit={handleAddMember}
+              className="mt-3.5 grid grid-cols-1 gap-2.5 rounded-xl border border-slate-200 bg-slate-50/70 p-3 sm:grid-cols-[1.2fr_1fr_auto] sm:items-end"
+            >
+              <div className="min-w-0">
+                <label
+                  htmlFor="add-member-email"
+                  className="mb-1 block text-xs font-medium text-slate-700"
                 >
-                  {copiedSnippet ? (
-                    <>
-                      <Check className="h-3.5 w-3.5" />
-                      Copied
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="h-3.5 w-3.5" />
-                      Copy .env lines
-                    </>
-                  )}
-                </button>
+                  Email
+                </label>
+                <input
+                  id="add-member-email"
+                  type="email"
+                  required
+                  value={newMemberEmail}
+                  onChange={(e) => setNewMemberEmail(e.target.value)}
+                  placeholder="member@gmail.com"
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                />
               </div>
-
-              <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
-                <div className="font-mono text-xs font-bold text-teal-700">STEP 2</div>
-                <h3 className="mt-1 text-sm font-bold text-slate-900">
-                  Zero Open Ports Required
-                </h3>
-                <p className="mt-1 text-xs leading-relaxed text-slate-600">
-                  On Hydrodactyl / Pterodactyl panels (<code className="font-mono">panel.xsystemshosting.com</code>), your bot connects <strong>outbound over HTTPS</strong> to <code className="font-mono">/api/bot/sync</code>:
-                </p>
-                <ul className="mt-2.5 space-y-1.5 text-xs text-slate-600">
-                  <li>
-                    • <strong>Live Heartbeat:</strong> Updates &ldquo;Last seen Xs ago&rdquo; + disk usage automatically
-                  </li>
-                  <li>
-                    • <strong>Instant Disallow:</strong> Versioned whitelist deltas sync within seconds
-                  </li>
-                  <li>
-                    • <strong>Pairing Codes:</strong> Picked up securely from D1 queue with HMAC verification
-                  </li>
-                </ul>
-              </div>
-
-              <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
-                <div className="font-mono text-xs font-bold text-teal-700">STEP 3</div>
-                <h3 className="mt-1 text-sm font-bold text-slate-900">
-                  Save Token &amp; Optional Panel Key
-                </h3>
-                <p className="mt-1 text-xs leading-relaxed text-slate-600">
-                  In <strong>Bot &amp; Numbers</strong>, paste the same <code className="font-mono">BOT_SYNC_TOKEN</code>, and optionally save your Hydrodactyl <code className="font-mono">hydro_…</code> API key for 1-click container restarts.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => setTab('bot')}
-                  className="mt-3 rounded-xl bg-teal-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-teal-700"
+              <div className="min-w-0">
+                <label
+                  htmlFor="add-member-name"
+                  className="mb-1 block text-xs font-medium text-slate-700"
                 >
-                  Open Bot &amp; Panel Settings →
-                </button>
+                  Name
+                </label>
+                <input
+                  id="add-member-name"
+                  type="text"
+                  value={newMemberName}
+                  onChange={(e) => setNewMemberName(e.target.value)}
+                  placeholder="Optional"
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                />
               </div>
+              <button
+                type="submit"
+                disabled={addingMember}
+                className="inline-flex h-[38px] items-center justify-center gap-1.5 rounded-xl bg-teal-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-teal-700 disabled:opacity-60"
+              >
+                <UserPlus className="h-4 w-4" />
+                {addingMember ? 'Saving…' : 'Allow'}
+              </button>
+            </form>
+
+            <div className="relative mt-3.5">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                type="search"
+                value={memberSearch}
+                onChange={(e) => setMemberSearch(e.target.value)}
+                placeholder="Filter members…"
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pl-9 pr-3 text-xs text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:bg-white focus:outline-none"
+              />
+            </div>
+
+            <div className="mt-3 divide-y divide-slate-100">
+              {filteredMembers.length === 0 ? (
+                <p className="py-8 text-center font-mono text-xs text-slate-400">
+                  No members found
+                </p>
+              ) : (
+                filteredMembers.map((member) => {
+                  const busy = busyEmail === member.email;
+                  return (
+                    <div
+                      key={member.email}
+                      className="flex flex-col gap-2.5 py-3.5 sm:flex-row sm:items-center sm:justify-between"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="truncate text-sm font-bold text-slate-900">
+                            {member.name}
+                          </span>
+                          {member.isAdmin ? (
+                            <span className="rounded-full bg-teal-50 px-2 py-0.5 text-[10px] font-bold uppercase text-teal-800 ring-1 ring-teal-200">
+                              Root
+                            </span>
+                          ) : member.allowed ? (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-bold uppercase text-emerald-700 ring-1 ring-emerald-200">
+                              <ShieldCheck className="h-3 w-3" />
+                              Allowed
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2 py-0.5 text-[10px] font-bold uppercase text-rose-700 ring-1 ring-rose-200">
+                              <ShieldBan className="h-3 w-3" />
+                              Blocked
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+                          <span className="break-all font-mono text-slate-700">
+                            {member.email}
+                          </span>
+                          <span>·</span>
+                          <span>{member.numbersCount} num</span>
+                        </div>
+                      </div>
+
+                      <div className="shrink-0">
+                        {member.isAdmin ? (
+                          <span className="font-mono text-[11px] font-semibold text-slate-400">
+                            Owner
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() =>
+                              handleToggleMember(
+                                member.email,
+                                !member.allowed,
+                                member.name,
+                              )
+                            }
+                            className={`rounded-xl px-3.5 py-1.5 text-xs font-semibold transition disabled:opacity-50 ${
+                              member.allowed
+                                ? 'border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100'
+                                : 'bg-teal-600 text-white hover:bg-teal-700'
+                            }`}
+                          >
+                            {busy
+                              ? 'Saving…'
+                              : member.allowed
+                                ? 'Block'
+                                : 'Allow'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
           </section>
         )}

@@ -98,6 +98,11 @@ export async function fetchLiveBotStatus(customTarget?: {
   lastSeenAt?: number | null;
   lastSeenSecondsAgo?: number | null;
   version?: string | null;
+  uptimeSeconds?: number | null;
+  commandsTotal?: number | null;
+  downloadsSuccess?: number | null;
+  failedTotal?: number | null;
+  ramUsedMB?: number | null;
   diskUsedMB?: number | null;
   diskBudgetMB?: number | null;
   queueLight?: number | null;
@@ -105,7 +110,6 @@ export async function fetchLiveBotStatus(customTarget?: {
   latencyMs?: number;
   error?: string;
 }> {
-  // When not probing a specific custom URL, check bot-initiated HTTPS heartbeat first!
   if (!customTarget) {
     const hb = await getBotHeartbeat();
     if (hb) {
@@ -119,10 +123,15 @@ export async function fetchLiveBotStatus(customTarget?: {
           lastSeenAt: hb.lastSeenAt,
           lastSeenSecondsAgo: ageSec,
           version: hb.version || null,
+          uptimeSeconds: hb.uptimeSeconds ?? null,
+          commandsTotal: hb.commandsTotal ?? 0,
+          downloadsSuccess: hb.downloadsSuccess ?? 0,
+          failedTotal: hb.failedTotal ?? 0,
+          ramUsedMB: hb.ramUsedMB ?? null,
           diskUsedMB: hb.diskUsedMB ?? null,
           diskBudgetMB: hb.diskBudgetMB ?? null,
-          queueLight: hb.queueLight ?? null,
-          queueHeavy: hb.queueHeavy ?? null,
+          queueLight: hb.queueLight ?? 0,
+          queueHeavy: hb.queueHeavy ?? 0,
         };
       }
     }
@@ -139,9 +148,16 @@ export async function fetchLiveBotStatus(customTarget?: {
           lastSeenAt: hb.lastSeenAt,
           lastSeenSecondsAgo: ageSec,
           version: hb.version || null,
+          uptimeSeconds: 0,
+          commandsTotal: hb.commandsTotal ?? 0,
+          downloadsSuccess: hb.downloadsSuccess ?? 0,
+          failedTotal: hb.failedTotal ?? 0,
+          ramUsedMB: null,
           diskUsedMB: hb.diskUsedMB ?? null,
           diskBudgetMB: hb.diskBudgetMB ?? null,
-          error: `Bot has not checked in for ${ageSec}s (currently offline).`,
+          queueLight: 0,
+          queueHeavy: 0,
+          error: `Offline (${ageSec}s since heartbeat).`,
         };
       }
       return {

@@ -45,6 +45,15 @@ export async function GET(req: NextRequest) {
     lastSeenSecondsAgo: live.lastSeenSecondsAgo ?? null,
     botConnected: live.connected,
     botNumber: live.botNumber,
+    uptimeSeconds: live.uptimeSeconds ?? null,
+    commandsTotal: live.commandsTotal ?? 0,
+    downloadsSuccess: live.downloadsSuccess ?? 0,
+    failedTotal: live.failedTotal ?? 0,
+    ramUsedMB: live.ramUsedMB ?? null,
+    diskUsedMB: live.diskUsedMB ?? null,
+    diskBudgetMB: live.diskBudgetMB ?? null,
+    queueLight: live.queueLight ?? null,
+    queueHeavy: live.queueHeavy ?? null,
     numbers,
   });
 }

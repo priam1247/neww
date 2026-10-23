@@ -64,6 +64,10 @@ export interface BotHeartbeatRecord {
   botName?: string;
   version?: string;
   uptimeSeconds?: number;
+  commandsTotal?: number;
+  downloadsSuccess?: number;
+  failedTotal?: number;
+  ramUsedMB?: number;
   diskUsedMB?: number;
   diskBudgetMB?: number;
   queueLight?: number;
@@ -101,6 +105,11 @@ export interface AdminOverviewPayload {
   lastSeenAt?: number | null;
   lastSeenSecondsAgo?: number | null;
   botVersion?: string | null;
+  uptimeSeconds?: number | null;
+  commandsTotal?: number | null;
+  downloadsSuccess?: number | null;
+  failedTotal?: number | null;
+  ramUsedMB?: number | null;
   diskUsedMB?: number | null;
   diskBudgetMB?: number | null;
   queueLight?: number | null;
@@ -125,6 +134,15 @@ export interface MemberOverviewPayload {
   lastSeenSecondsAgo?: number | null;
   botConnected: boolean;
   botNumber: string | null;
+  uptimeSeconds?: number | null;
+  commandsTotal?: number | null;
+  downloadsSuccess?: number | null;
+  failedTotal?: number | null;
+  ramUsedMB?: number | null;
+  diskUsedMB?: number | null;
+  diskBudgetMB?: number | null;
+  queueLight?: number | null;
+  queueHeavy?: number | null;
   numbers: ApprovedUser[];
 }
 

@@ -542,41 +542,29 @@ async function browseCode(courseCode) {
 
 const BROWSE_CODES_PER_PAGE = 40;
 const BROWSE_MODULES_PER_PAGE = 25;
-const MAX_PAPERS_PER_QUERY = Math.max(1, Math.min(10, Number(process.env.PAPER_MAX_PER_QUERY) || 5));
+const MAX_PAPERS_PER_QUERY = Math.max(1, Math.min(20, Number(process.env.PAPER_MAX_PER_QUERY) || 10));
 
 // ─── .paper COMMAND ───────────────────────────────────────────────────────────
 module.exports = {
   name: 'paper',
   aliases: ['papers', 'pastpaper', 'pp'],
   category: 'general',
-  description: 'Search and download Mzuzu University past exam papers',
+  description: 'Search past exam papers',
   usage: '.paper <code> [module] [year]',
 
   async execute(sock, msg, args, extra) {
     const P = config.prefix || '.';
-    const botName = config.botName || 'ZaFar Bot';
+    const telemetry = require('../../utils/telemetry');
     try {
-
-      // ── HELP ────────────────────────────────────────────────────────────────
       if (!args.length) {
         return extra.reply(
-          `📚 *Past Papers — Mzuzu University*\n\n` +
-          `*${P}paper <code>* — recent papers for a subject\n` +
-          `*${P}paper <code> <module>* — specific module\n` +
-          `*${P}paper <code> <module> <year>* — specific year\n` +
-          `*${P}paper browse [page]* — see course codes\n` +
-          `*${P}paper browse <code> [page]* — see modules\n\n` +
-          `*Examples*\n` +
-          `  ${P}paper nurs 2201 2024\n` +
-          `  ${P}paper chem 3601\n` +
-          `  ${P}paper browse geog\n\n` +
-          `_Use ${P}countpapers to see how many papers are in the vault_ 🎓`
+          `📚 *Usage:* ${P}paper <code> [module] [year]\n` +
+          `${P}paper browse [code] [page]`
         );
       }
 
       const mode = args[0].toLowerCase();
 
-      // ── BROWSE (paginated so replies never blow up into 60k–98k char walls) ─
       if (mode === 'browse') {
         const status = await extra.status('🔍 Searching...');
         const arg1 = args[1] ? String(args[1]).trim() : '';
@@ -590,10 +578,7 @@ module.exports = {
           if (modules.size === 0) {
             const hint = await nearbyHint(code, null);
             return status.update(
-              `😔 Sorry, no papers found for *${code}*\n` +
-              `Try *${P}paper browse* to see all available codes.\n` +
-              `${hint ? `\n${hint}\n` : ''}\n` +
-              `🙏 If anyone has that, please send it to help our friend!`
+              `❌ No papers for *${code}*.` + (hint ? `\n${hint}` : '')
             );
           }
 
@@ -605,30 +590,26 @@ module.exports = {
           const uniqueCodes = new Set(entries.map(([k]) => k.split(':')[0]));
           const headerCode = uniqueCodes.size === 1 ? [...uniqueCodes][0] : `${code}*`;
           const subjectName = SUBJECT_MAP[headerCode] || SUBJECT_MAP[code] || '';
-          let text = `📂 *${headerCode}${subjectName ? ` — ${subjectName}` : ''}*\n`;
-          text    += `_${modules.size} module(s) in vault · page ${page}/${totalPages}_\n\n`;
+          let text = `📂 *${headerCode}${subjectName ? ` — ${subjectName}` : ''}* _(page ${page}/${totalPages})_\n\n`;
 
           for (const [key, modFiles] of slice) {
             const [actualCode, mod] = key.split(':');
             const sorted = sortPapers(modFiles);
             const years  = [...new Set(sorted.map(f => parsed(f).year).filter(Boolean))];
-            text += `*${actualCode} ${mod}* — ${sorted.length} paper(s)  📅 ${years.join(', ') || 'various'}\n`;
-            text += `  ↳ ${P}paper ${actualCode.toLowerCase()} ${mod}\n\n`;
+            text += `*${actualCode} ${mod}* (${sorted.length}) · ${years.join(', ') || '—'}\n`;
           }
 
           if (totalPages > 1 && page < totalPages) {
-            text += `_Next page: ${P}paper browse ${code.toLowerCase()} ${page + 1}_`;
-          } else {
-            text += `_Use the command shown to download_`;
+            text += `\n_Next: ${P}paper browse ${code.toLowerCase()} ${page + 1}_`;
           }
-          return status.update(`📚 Found *${modules.size} module(s)* for *${code}*.\n\n${text}`);
+          return status.update(text.trim());
 
         } else {
           const reqPage = arg1IsPage ? Math.max(1, parseInt(arg1, 10) || 1) : 1;
           const codes = await browseAll();
 
           if (codes.size === 0) {
-            return status.update('❌ No papers in the vault yet.');
+            return status.update('❌ Vault is empty.');
           }
 
           const entries = [...codes.entries()];
@@ -636,17 +617,15 @@ module.exports = {
           const page = Math.min(reqPage, totalPages);
           const slice = entries.slice((page - 1) * BROWSE_CODES_PER_PAGE, page * BROWSE_CODES_PER_PAGE);
 
-          let text = `╭─ 📚 *${botName} — Paper Vault*\n`;
-          text    += `│ ${codes.size} course code(s) · page ${page}/${totalPages}\n│\n`;
-
+          let text = `📚 *Course Codes* (${codes.size} · page ${page}/${totalPages})\n\n`;
           for (const [code, count] of slice) {
             const name = SUBJECT_MAP[code] ? ` — ${SUBJECT_MAP[code]}` : '';
-            text += `*${code}*${name}  _(${count} paper${count !== 1 ? 's' : ''})_\n`;
+            text += `*${code}*${name} (${count})\n`;
           }
-
-          const nextHint = page < totalPages ? `${P}paper browse ${page + 1} for next · ` : '';
-          text += `╰─ _${nextHint}${P}paper browse <code> for modules_`;
-          return status.update(`📚 Found *${codes.size} course code(s)*.\n\n${text}`);
+          if (page < totalPages) {
+            text += `\n_Next: ${P}paper browse ${page + 1}_`;
+          }
+          return status.update(text.trim());
         }
       }
 
@@ -667,30 +646,19 @@ module.exports = {
       }
 
       if (files.length === 0) {
-        const subjectName = SUBJECT_MAP[courseCode] || '';
-        const label       = [courseCode, moduleNumber, ...yearArgs].filter(Boolean).join(' ');
-        let reply = `😔 Sorry, no papers found for *${label}*`;
-        if (subjectName) reply += ` _(${subjectName})_`;
-        reply += `\n\n*Try:*\n`;
-        if (yearArgs.length && moduleNumber) reply += `  .paper ${courseCode} ${moduleNumber}\n`;
-        if (moduleNumber) reply += `  .paper ${courseCode}\n`;
-        reply += `  .paper browse ${courseCode.toLowerCase()}\n\n`;
+        const label = [courseCode, moduleNumber, ...yearArgs].filter(Boolean).join(' ');
         const hint = await nearbyHint(courseCode, moduleNumber);
-        if (hint) reply += `${hint}\n`;
-        reply += `🙏 If anyone has that, please send it to help our friend!`;
-        return status.update(reply);
+        return status.update(`❌ No papers for *${label}*.` + (hint ? `\n${hint}` : ''));
       }
 
       const sorted     = sortPapers(files);
       const yearsFound = [...new Set(sorted.map(f => parsed(f).year).filter(Boolean))].sort();
       const label      = [courseCode, moduleNumber].filter(Boolean).join(' ');
-      const summary    = `📚 Found *${sorted.length} paper${sorted.length !== 1 ? 's' : ''}* for *${label}*${yearsFound.length ? ` (${yearsFound.join(', ')})` : ''}.`;
+      const summary    = `📚 *${label}* — ${sorted.length} paper${sorted.length !== 1 ? 's' : ''}${yearsFound.length ? ` (${yearsFound.join(', ')})` : ''}`;
 
       if (sorted.length > 15 && !moduleNumber && !yearArgs.length) {
         return status.update(
-          `${summary}\n\n_Too many to send at once — narrow your search:_\n` +
-          `  ${P}paper ${courseCode.toLowerCase()} ${moduleNumber || '[module]'} [year]\n` +
-          `  ${P}paper browse ${courseCode.toLowerCase()}`
+          `${summary}\nSpecify a module: \`${P}paper ${courseCode.toLowerCase()} <module>\` or \`${P}paper browse ${courseCode.toLowerCase()}\``
         );
       }
 
@@ -704,36 +672,26 @@ module.exports = {
       }
 
       if (toSend.length === 0) {
-        return status.update('♻️ These papers were already sent in this chat within the last 3 days — check earlier messages.');
+        return status.update('♻️ Already sent in this chat within the last 3 days.');
       }
 
       const allSendable = [], tooLarge = [];
       for (const file of toSend) {
         (MAX_SEND_BYTES && (file.size || 0) > MAX_SEND_BYTES ? tooLarge : allSendable).push(file);
       }
-      // Cap papers sent per query (newest first: `sortPapers` sorts ascending by year, so take the latest N)
       const cappedCount = allSendable.length > MAX_PAPERS_PER_QUERY ? allSendable.length - MAX_PAPERS_PER_QUERY : 0;
       const sendable = cappedCount > 0 ? allSendable.slice(-MAX_PAPERS_PER_QUERY) : allSendable;
 
-      await status.update(summary);
+      const statusNotes = [summary];
+      if (recentlySent.length > 0) statusNotes.push(`_${recentlySent.length} recent duplicate(s) skipped_`);
+      if (tooLarge.length > 0) statusNotes.push(`_${tooLarge.length} oversized skipped_`);
+      if (cappedCount > 0) statusNotes.push(`_Sending ${sendable.length} newest (+${cappedCount} older — add year to filter)_`);
+      await status.update(statusNotes.join('\n'));
 
-      if (recentlySent.length > 0) {
-        await extra.reply(`_⏩ ${recentlySent.length} paper(s) skipped — sent here recently._`);
-      }
-      if (tooLarge.length > 0) {
-        const names = tooLarge.map(f => `*${cleanName(f.name)}* (${formatSize(f.size)})`).join(', ');
-        await extra.reply(`_⚠️ ${tooLarge.length} paper(s) skipped — over ${Math.round(MAX_SEND_BYTES / 1048576)} MB:_ ${names}`);
-      }
-      if (cappedCount > 0) {
-        await extra.reply(
-          `_📎 Sending the ${sendable.length} most recent paper(s) (${cappedCount} older match(es) omitted — specify a year like \`${P}paper ${courseCode.toLowerCase()}${moduleNumber ? ` ${moduleNumber}` : ''} 2022\` for older papers)._`
-        );
-      }
       if (sendable.length === 0) {
-        return extra.reply('❌ Nothing sent — every match exceeds the configured send limit.');
+        return extra.reply('❌ Matching papers exceed the file size limit.');
       }
 
-      // Download & send sequentially in small batches (2 at a time) so temp disk stays tiny.
       for (let i = 0; i < sendable.length; i += 2) {
         const chunk = sendable.slice(i, i + 2);
         const jobs = await Promise.all(chunk.map(async (file) => {
@@ -747,28 +705,28 @@ module.exports = {
 
         for (const job of jobs) {
           if (job.error) {
+            telemetry.recordFailure('paper');
             console.warn('[paper] download failed:', job.file.name, job.error.message);
-            await extra.reply(`⚠️ Could not download *${cleanName(job.file.name)}* right now.`);
+            await extra.reply(`⚠️ Failed: *${cleanName(job.file.name)}*`);
             continue;
           }
           try {
             const { type, year: fileYear, monthDisplay, subjectName: sn } = parsed(job.file);
-
-            const metaLine = [sn, type, [monthDisplay, fileYear].filter(Boolean).join(' ')].filter(Boolean).join(' · ');
-            let caption = metaLine ? `╭─ ${metaLine}\n` : '';
-            caption += `╰─ ${botName}`;
+            const caption = [sn, type, [monthDisplay, fileYear].filter(Boolean).join(' ')].filter(Boolean).join(' · ') || undefined;
 
             await sock.sendMessage(extra.from, {
               document: { url: job.tmp },
               fileName: job.file.name,
               mimetype: 'application/pdf',
-              caption,
+              ...(caption ? { caption } : {}),
             }, { quoted: msg });
 
             database.logPaperSent(extra.from, job.file.id);
+            telemetry.recordDownloadSuccess('paper');
           } catch (fileErr) {
+            telemetry.recordFailure('paper');
             console.warn('[paper] send failed:', job.file.name, fileErr.message);
-            await extra.reply(`⚠️ Could not send *${cleanName(job.file.name)}* right now.`);
+            await extra.reply(`⚠️ Failed: *${cleanName(job.file.name)}*`);
           } finally {
             deleteTempFile(job.tmp);
           }
@@ -776,31 +734,28 @@ module.exports = {
       }
 
     } catch (error) {
+      telemetry.recordFailure('paper');
       console.error('[paper] command error:', error.message);
       await react(sock, msg, '❌');
       if (error.message && (error.message.includes('not configured') || error.message.includes('not set'))) {
-        return extra.reply('⚙️ *Papers feature not configured.* Ask the bot owner to configure the paper vault.');
+        return extra.reply('⚙️ Paper vault not configured.');
       }
-      return extra.reply('❌ Could not access the paper vault right now. Please try again in a moment.');
+      return extra.reply('❌ Paper vault unavailable.');
     }
   },
 };
 
 // ─── .countpapers ─────────────────────────────────────────────────────────────
-// Uses the cheap folder-count endpoint (1 request, always fresh) instead of
-// walking the whole vault.
 const countpapersCmd = {
   name: 'countpapers',
   aliases: ['listpapers', 'papercount', 'vaultcount'],
   category: 'general',
-  description: 'Count all papers in the vault',
+  description: 'Count papers in vault',
   usage: '.countpapers',
 
   async execute(sock, msg, args, extra) {
-    const P = config.prefix || '.';
-    const botName = config.botName || 'ZaFar Bot';
     try {
-      const status = await extra.status('🔍 Counting papers...');
+      const status = await extra.status('🔍 Counting...');
       const client = drimeClient();
       const count = await getFolderCount(
         client,
@@ -808,23 +763,15 @@ const countpapersCmd = {
         config.drime?.workspaceId || 0
       );
 
-      if (!count) {
-        return status.update('📭 The vault is empty. No papers yet.');
-      }
-
-      return status.update(
-        `📚 Found *${count} paper${count !== 1 ? 's' : ''}* in the vault.\n\n` +
-        `╭─ 🗄️ *${botName} — Paper Vault*\n` +
-        `│ ${count} paper${count !== 1 ? 's' : ''} in the vault\n` +
-        `╰─ _${P}paper browse to explore them_`
-      );
+      if (!count) return status.update('📭 0 papers.');
+      return status.update(`📚 *${count.toLocaleString()}* papers`);
     } catch (error) {
       console.error('[countpapers] error:', error.message);
       await react(sock, msg, '❌');
       if (error.message && (error.message.includes('not configured') || error.message.includes('not set'))) {
-        return extra.reply('⚙️ *Papers feature not configured.* Ask the bot owner to configure the paper vault.');
+        return extra.reply('⚙️ Paper vault not configured.');
       }
-      return extra.reply('❌ Could not count vault papers right now. Please try again shortly.');
+      return extra.reply('❌ Could not count papers.');
     }
   },
 };
@@ -834,27 +781,22 @@ const refreshpapersCmd = {
   name: 'refreshpapers',
   aliases: ['refreshvault', 'reloadpapers'],
   category: 'admin',
-  description: 'Force a vault refresh now (delta or full walk)',
+  description: 'Refresh paper index',
   usage: '.refreshpapers',
   ownerOnly: true,
 
   async execute(sock, msg, args, extra) {
     try {
-      const status = await extra.status('🔄 Refreshing paper vault...');
+      const status = await extra.status('🔄 Refreshing...');
       const t0 = Date.now();
-      _refreshCoolUntil = 0; // owner forced it — bypass the failure cooldown
-      const { files, source } = await refreshOnce();
+      _refreshCoolUntil = 0;
+      const { files } = await refreshOnce();
       const secs = ((Date.now() - t0) / 1000).toFixed(0);
-      return status.update(
-        `✅ Vault refreshed in ${secs}s — *${files.length} papers* (${source}).`
-      );
+      return status.update(`✅ *${files.length.toLocaleString()}* papers (${secs}s)`);
     } catch (error) {
       console.error('[refreshpapers] error:', error.message);
       await react(sock, msg, '❌');
-      if (error.message && (error.message.includes('not configured') || error.message.includes('not set'))) {
-        return extra.reply('⚙️ *Papers feature not configured.* Set DRIME_API_TOKEN in .env.');
-      }
-      return extra.reply('❌ Could not refresh the paper vault right now. Check server logs for details.');
+      return extra.reply('❌ Refresh failed.');
     }
   },
 };

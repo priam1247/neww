@@ -19,35 +19,35 @@ function buildGroups(prefix = '.', { isOwner = false } = {}) {
       key: 'media',
       title: 'MEDIA',
       rows: [
-        [`${p}movie <title> [year] [720]`, 'film → document'],
-        [`${p}series <title> s01e03`, 'episode, s01 1-6, or season'],
-        [`${p}song <name or link>`, 'audio → MP3 document'],
-        [`${p}ytv <name or link> [720]`, 'video → MP4'],
-        [`${p}dl <link> [audio|720]`, 'any supported site'],
-        [`${p}tiktok  ${p}x  ${p}pinterest`, 'social video grabs'],
-        [`${p}instagram  ${p}fb`, 'social video grabs'],
-        [`${p}spotify <url | title>`, 'track → MP3'],
-        [`${p}sticker  ${p}viewonce`, 'reply to a message'],
+        [`${p}movie <title> [year]`, 'movie'],
+        [`${p}series <title> s01e01`, 'series'],
+        [`${p}song <name|url>`, 'MP3'],
+        [`${p}ytv <name|url> [720]`, 'MP4'],
+        [`${p}dl <url>`, 'any URL'],
+        [`${p}tiktok ${p}x ${p}pinterest`, 'social'],
+        [`${p}instagram ${p}fb`, 'social'],
+        [`${p}spotify <url|title>`, 'Spotify MP3'],
+        [`${p}sticker ${p}viewonce`, 'reply tools'],
       ],
     },
     {
       key: 'papers',
       title: 'PAPERS',
       rows: [
-        [`${p}paper [code] [module] [year]`, 'find past papers'],
-        [`${p}paper browse [page]`, 'walk the archive'],
-        [`${p}countpapers`, 'how much is there'],
-        ...(isOwner ? [[`${p}refreshpapers`, 're-index vault (owner)']] : []),
+        [`${p}paper <code> [mod] [yr]`, 'past papers'],
+        [`${p}paper browse [code]`, 'browse'],
+        [`${p}countpapers`, 'vault count'],
+        ...(isOwner ? [[`${p}refreshpapers`, 'sync vault']] : []),
       ],
     },
     {
       key: 'engine',
       title: 'ENGINE',
       rows: [
-        [`${p}providers`, 'source health'],
-        [`${p}moviestatus`, 'cache · queue · counters'],
-        [`${p}debrid`, 'torrent account check'],
-        [`${p}info <title>`, 'what the sources return'],
+        [`${p}providers`, 'providers'],
+        [`${p}moviestatus`, 'engine stats'],
+        [`${p}debrid`, 'debrid'],
+        [`${p}info <title>`, 'metadata'],
       ],
     },
   ];
@@ -57,21 +57,20 @@ function buildGroups(prefix = '.', { isOwner = false } = {}) {
       key: 'admin',
       title: 'ADMIN',
       rows: [
-        [`${p}allow  ${p}disallow  ${p}listusers`, 'who may use the bot'],
-        [`${p}on  ${p}off`, 'enable/disable the bot globally'],
-        [`${p}cookies  ${p}ytdl`, 'YouTube bot-check tools'],
-        [`${p}restart  ${p}status  ${p}broadcast`, 'maintenance'],
+        [`${p}allow ${p}disallow ${p}listusers`, 'whitelist'],
+        [`${p}on ${p}off`, 'enable/disable the bot globally'],
+        [`${p}cookies ${p}ytdl`, 'yt-dlp'],
+        [`${p}restart ${p}status ${p}broadcast`, 'server'],
       ],
     });
   }
 
-  const sectionsHint = isOwner ? 'media|papers|engine|admin' : 'media|papers|engine';
   groups.push({
     key: 'general',
     title: 'GENERAL',
     rows: [
       [`${p}ping`, 'latency'],
-      [`${p}menu [${sectionsHint}]`, 'this card'],
+      [`${p}menu`, 'commands'],
     ],
   });
 
@@ -119,7 +118,7 @@ function buildCard(groups, user, { prefix = config.prefix || '.', botName = conf
   }
 
   out.push('');
-  out.push(`_prefix ${prefix} · tap a poll option or reply with its number · reply cancel to abort_`);
+  out.push(`_prefix ${prefix}_`);
   return out.join('\n');
 }
 

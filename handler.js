@@ -9,6 +9,7 @@ const { loadCommands } = require('./utils/commandLoader');
 const { jidVariants, isSystemJid } = require('./utils/jid');
 const { readWL, findAllowedUserIndex } = require('./utils/accessControl');
 const { safeErrorMessage } = require('./utils/userErrors');
+const telemetry = require('./utils/telemetry');
 
 // Load all commands
 const commands = loadCommands();
@@ -153,12 +154,18 @@ async function runCommand(sock, msg, name, args, { from, sender, senderIds }) {
   }
 
   console.log(`Executing command: ${invoked} from ${sender}`);
-  await command.execute(
-    sock,
-    msg,
-    args || [],
-    buildExtra(sock, msg, { from, sender, senderIds, commandName: invoked }),
-  );
+  telemetry.recordCommand(command.name || invoked);
+  try {
+    await command.execute(
+      sock,
+      msg,
+      args || [],
+      buildExtra(sock, msg, { from, sender, senderIds, commandName: invoked }),
+    );
+  } catch (err) {
+    telemetry.recordFailure('command');
+    throw err;
+  }
   return true;
 }
 
@@ -166,11 +173,11 @@ async function runCommand(sock, msg, name, args, { from, sender, senderIds }) {
 async function handleSelection(sock, msg, body, { from, sender, senderIds, quotedMessageId = null }) {
   const opts = { quotedMessageId };
   const open = selections.peek(from, senderIds, opts);
-  if (!open) return false; // nothing pending → "no"/"stop" stay ordinary text
+  if (!open) return false;
 
   if (selections.isCancel(body)) {
     selections.clear(from, senderIds, opts);
-    await sock.sendMessage(from, { text: '👍 Cancelled. Nothing was downloaded.' }, { quoted: msg });
+    await sock.sendMessage(from, { text: '👍 Cancelled.' }, { quoted: msg });
     return true;
   }
 
@@ -179,6 +186,7 @@ async function handleSelection(sock, msg, body, { from, sender, senderIds, quote
     try {
       await picked.entry.run(sock, msg, buildExtra(sock, msg, { from, sender, senderIds }), picked.item);
     } catch (e) {
+      telemetry.recordFailure('selection');
       console.error('Error running selection:', e.message);
       try {
         await sock.sendMessage(
@@ -191,10 +199,9 @@ async function handleSelection(sock, msg, body, { from, sender, senderIds, quote
     return true;
   }
 
-  // A number that no longer matches anything (expired, or too big)
   if (selections.isOutOfRange(from, senderIds, body, opts)) {
     await sock.sendMessage(from, {
-      text: `❌ Pick a number between 1 and ${open.items.length}, or reply *cancel*.`,
+      text: `❌ Reply *1–${open.items.length}* or *cancel*.`,
     }, { quoted: msg });
     return true;
   }

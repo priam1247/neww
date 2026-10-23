@@ -25,7 +25,7 @@ module.exports = {
       if (!ctx?.quotedMessage || !ctx?.stanzaId) {
         return await sock.sendMessage(
           chatId,
-          { text: '🗑️ Reply to a *view-once* message to reveal it.' },
+          { text: 'Reply to a view-once message.' },
           { quoted: msg }
         );
       }
