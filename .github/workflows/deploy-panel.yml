@@ -47,6 +47,7 @@ jobs:
         run: |
           npm ci
           npm run selftest
+          npm run test:jobs
           node scripts/test-nm3u8dl-live.js
 
       - name: Verify standalone dashboard typecheck & build

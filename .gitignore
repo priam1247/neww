@@ -16,9 +16,16 @@ database/*.json
 database/*.bak
 database/*.corrupt*
 database/*.tmp
+database/*.sqlite
+database/*.sqlite-wal
+database/*.sqlite-shm
 
 # local secrets
 .env
+secrets/
+cookies/
+*.wvd
+*.arl
 
 # web portal build output (dashboard/)
 .next/
