@@ -59,7 +59,7 @@ function buildGroups(prefix = '.', { isOwner = false } = {}) {
       rows: [
         [`${p}allow ${p}disallow ${p}listusers`, 'whitelist'],
         [`${p}on ${p}off`, 'enable/disable the bot globally'],
-        [`${p}cookies ${p}ytdl`, 'yt-dlp'],
+        [`${p}ytlogin ${p}cookies ${p}ytdl`, 'youtube'],
         [`${p}restart ${p}status ${p}broadcast`, 'server'],
       ],
     });

@@ -10,6 +10,7 @@
  */
 
 const YT = require('./youtubedl');
+const ytInnertube = require('./ytInnertube');
 
 const DEFAULT_LIMIT = 5;
 
@@ -72,16 +73,27 @@ async function searchYouTube(query, { limit = DEFAULT_LIMIT } = {}) {
     return [toResult({ url, id, title: meta.title, author: meta.uploader, duration: meta.duration, thumbnail: meta.thumbnail })];
   }
 
-  // yt-search first (durations + thumbnails), yt-dlp as the reliable fallback.
+  // yt-search first (durations + thumbnails), then native Innertube, then yt-dlp.
   const wide = Math.max(limit, 5);
   const first = await viaYtSearch(q, wide);
   if (first.length >= limit) return first.slice(0, limit);
 
-  const second = await viaYtDlp(q, limit);
   const merged = [...first];
-  for (const r of second) {
-    if (!merged.some(x => x.id && r.id && x.id === r.id)) merged.push(r);
-  }
+  const addUnique = (rows) => {
+    for (const r of rows) {
+      if (!merged.some(x => x.id && r.id && x.id === r.id)) merged.push(r);
+    }
+  };
+
+  try {
+    const itRows = await ytInnertube.searchVideos(q, { limit });
+    addUnique(itRows.map(toResult).filter(r => r.url));
+  } catch { /* fall through to yt-dlp */ }
+
+  if (merged.length >= limit) return merged.slice(0, limit);
+
+  const second = await viaYtDlp(q, limit);
+  addUnique(second);
   return merged.slice(0, limit);
 }
 

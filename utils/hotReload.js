@@ -29,7 +29,6 @@ const PRESERVED_UTILS = new Set([
   'reconnect.js',
   'safeLog.js',
   'adminApi.js',
-  'youtubedl.js',
   'botState.js',
   'jsonStore.js',
 ]);
@@ -58,6 +57,10 @@ function reloadRuntime() {
   try {
     require('./telemetry').flushNow();
   } catch { /* ignore */ }
+  let hadWatchdog = false;
+  try {
+    hadWatchdog = Boolean(require('./youtubedl').stopWatchdog());
+  } catch { /* ignore */ }
 
   let evicted = 0;
   for (const key of Object.keys(require.cache)) {
@@ -68,6 +71,11 @@ function reloadRuntime() {
   }
 
   const freshHandler = require(path.join(ROOT, 'handler.js'));
+  if (hadWatchdog) {
+    try {
+      require('./youtubedl').startWatchdog({ everyMinutes: 30 });
+    } catch { /* ignore */ }
+  }
   for (const fn of listeners) {
     try { fn(freshHandler); } catch { /* ignore */ }
   }

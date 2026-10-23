@@ -24,6 +24,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('../../config');
 const YT = require('../../utils/youtubedl');
+const ytInnertube = require('../../utils/ytInnertube');
 const settings = require('../../utils/mediaSettings');
 const providers = require('../../utils/downloadProviders');
 const youtubeSearch = require('../../utils/youtubeSearch');
@@ -141,12 +142,17 @@ const execute = async (sock, msg, args, extra) => {
 
       if (!title || !duration) {
         try {
-          const info = await YT.getInfo(url, { timeout: 45000 });
+          const info = await YT.getInfo(url, { timeout: 35000 });
           title = title || info.title; artist = artist || info.uploader;
           duration = duration || info.duration; thumbnail = thumbnail || info.thumbnail;
         } catch (e) {
           log.debug(`metadata lookup failed · ${e.message}`);
           attempts.push({ engine: 'metadata', code: YT.classify(e).code });
+          try {
+            const itMeta = await ytInnertube.getVideoInfo(url);
+            title = title || itMeta.title; artist = artist || itMeta.uploader;
+            duration = duration || itMeta.duration; thumbnail = thumbnail || itMeta.thumbnail;
+          } catch { /* download step reports final reason */ }
         }
       }
 
@@ -190,37 +196,67 @@ const execute = async (sock, msg, args, extra) => {
         attempts.push({ engine: 'yt-dlp', code: info.code });
         log.warn(`yt-dlp failed · ${info.code} · ${info.detail}`);
 
-        // ── 4. Engine 2: remote providers ───────────────────────────────────
-        const remoteWorthTrying = ['BOT_CHECK', 'NO_YTDLP', 'NO_FORMATS', 'FFMPEG_MISSING', 'UNKNOWN',
-          'NETWORK', 'RATE_LIMIT', 'PO_TOKEN', 'AGE_RESTRICTED', 'GEO_BLOCK', 'BAD_ARGS'];
-        const remoteAllowed = settings.get('remoteFallback', true) !== false;
+        // ── 4. Engine 2 (Innertube + PoToken/SABR) & Engine 3 (yt1d/remote) ──
+        const fallbackWorthTrying = ['BOT_CHECK', 'NO_YTDLP', 'NO_FORMATS', 'FFMPEG_MISSING', 'UNKNOWN',
+          'NETWORK', 'RATE_LIMIT', 'PO_TOKEN', 'AGE_RESTRICTED', 'GEO_BLOCK', 'BAD_ARGS', 'PROXY_ERROR'];
 
-        if (!remoteAllowed || !remoteWorthTrying.includes(info.code)) throw ytErr;
+        if (!fallbackWorthTrying.includes(info.code)) throw ytErr;
 
         await react('🔄');
-        let remoteHit;
-        try {
-          remoteHit = await providers.resolveMedia(url, {
-            kind: 'audio',
-            timeoutMs: 20000,
-            onAttempt: (name, err, st) => { if (st.code !== 'OK') attempts.push({ engine: name, code: st.code }); },
-          });
-        } catch (providerErr) {
-          log.warn(`backup sources failed · ${providerErr.message}`);
-          ytErr.attempts = attempts;   // report the *real* first failure plus what was tried
-          throw ytErr;
+
+        if (ytInnertube.isEnabled()) {
+          try {
+            const itRes = await ytInnertube.downloadAudio(url, {
+              outBase,
+              maxMB: MAX_AUDIO_MB,
+              timeoutMs: 120000,
+              onAttempt: (name, err) => {
+                attempts.push({ engine: name, code: err?.code || 'FAILED' });
+              },
+            });
+            file = itRes.file;
+            ext = itRes.ext || 'm4a';
+            via = itRes.authenticated ? 'innertube (oauth)' : 'innertube';
+            title = title || itRes.metadata?.title || '';
+            artist = artist || itRes.metadata?.author || '';
+            files.push(file);
+          } catch (itErr) {
+            log.warn(`innertube audio failed · ${itErr.message}`);
+            attempts.push({ engine: 'innertube', code: itErr.code || 'FAILED' });
+          }
         }
 
-        via = remoteHit.provider;
-        const dest = `${outBase}_remote.${remoteHit.ext || 'mp3'}`;
-        const got = await downloadToFile(remoteHit.url, dest, {
-          maxBytes: MAX_AUDIO_MB * 1024 * 1024,
-          headers: remoteHit.headers
-        });
-        files.push(dest);
-        file = dest;
-        ext = got.sniff.kind === 'audio' ? got.sniff.ext : (remoteHit.ext || 'mp3');
-        title = title || remoteHit.title;
+        if (!file) {
+          const remoteAllowed = settings.get('remoteFallback', true) !== false;
+          if (!remoteAllowed) {
+            ytErr.attempts = attempts;
+            throw ytErr;
+          }
+
+          let remoteHit;
+          try {
+            remoteHit = await providers.resolveMedia(url, {
+              kind: 'audio',
+              timeoutMs: 55000,
+              onAttempt: (name, err, st) => { if (st.code !== 'OK') attempts.push({ engine: name, code: st.code }); },
+            });
+          } catch (providerErr) {
+            log.warn(`backup sources failed · ${providerErr.message}`);
+            ytErr.attempts = attempts;   // report the *real* first failure plus what was tried
+            throw ytErr;
+          }
+
+          via = remoteHit.provider;
+          const dest = `${outBase}_remote.${remoteHit.ext || 'mp3'}`;
+          const got = await downloadToFile(remoteHit.url, dest, {
+            maxBytes: MAX_AUDIO_MB * 1024 * 1024,
+            headers: remoteHit.headers
+          });
+          files.push(dest);
+          file = dest;
+          ext = got.sniff.kind === 'audio' ? got.sniff.ext : (remoteHit.ext || 'mp3');
+          title = title || remoteHit.title;
+        }
       }
 
       if (!file || !fs.existsSync(file) || fs.statSync(file).size < 10 * 1024) {

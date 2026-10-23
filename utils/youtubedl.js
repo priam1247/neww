@@ -446,11 +446,36 @@ function cookieFile() {
 
 const { maskUrlCredentials } = require('./safeLog');
 
-const proxyUrl = () => {
+let _warnedInvalidProxy = '';
+
+const rawConfiguredProxy = () => {
   const cfg = config.ytdlp || {};
-  // Runtime setting (.ytdl proxy) wins over config/environment.
   const runtime = settings.get('proxy', '');
   return String(runtime || cfg.proxy || process.env.YTDLP_PROXY || '').trim();
+};
+
+const proxyUrl = () => {
+  const raw = rawConfiguredProxy();
+  if (!raw) return '';
+  if (typeof settings.validateProxyUrl === 'function') {
+    const check = settings.validateProxyUrl(raw);
+    if (!check.ok) {
+      if (_warnedInvalidProxy !== raw) {
+        _warnedInvalidProxy = raw;
+        console.warn(`[ytdlp] ignoring invalid proxy configuration (${check.reason}): ${maskUrlCredentials(raw)}`);
+      }
+      return '';
+    }
+    return check.url;
+  }
+  return raw;
+};
+
+const invalidProxyReason = () => {
+  const raw = rawConfiguredProxy();
+  if (!raw || typeof settings.validateProxyUrl !== 'function') return null;
+  const check = settings.validateProxyUrl(raw);
+  return check.ok ? null : `${maskUrlCredentials(raw)} (${check.reason})`;
 };
 
 // ─── ARGUMENT BUILDING ────────────────────────────────────────────────────────
@@ -470,9 +495,9 @@ const PROGRESS_TEMPLATE =
   '%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s';
 
 /**
- * @param {{progress?:boolean}} opts
+ * @param {{progress?:boolean,noProxy?:boolean}} opts
  */
-function baseArgs({ progress = false } = {}) {
+function baseArgs({ progress = false, noProxy = false } = {}) {
   const cfg = config.ytdlp || {};
   const caps = capabilities();
 
@@ -507,7 +532,7 @@ function baseArgs({ progress = false } = {}) {
   const cookies = cookieFile();
   if (cookies) args.push('--cookies', cookies);
 
-  const proxy = proxyUrl();
+  const proxy = noProxy ? '' : proxyUrl();
   if (proxy) args.push('--proxy', proxy);
 
   if (progress && caps.newline && caps.progressTemplate) {
@@ -654,6 +679,7 @@ async function run(args, { timeout = 120000 } = {}) {
 // ─── ERROR CLASSIFICATION ─────────────────────────────────────────────────────
 
 const RULES = [
+  { code: 'PROXY_ERROR',    re: /nonnumeric port|unable to connect to proxy|tunnel connection failed|proxyerror|407 proxy authentication|sockshttps?connectionpool|proxy.*(?:connection refused|timed out|unreachable)/i },
   { code: 'RATE_LIMIT',     re: /HTTP Error 429|too many requests|rate.?limit/i },
   // Age must be checked before the generic "sign in" rule: yt-dlp words an
   // age-restriction as "Sign in to confirm your age", which is not a bot-check.
@@ -714,7 +740,7 @@ function classify(err) {
 }
 
 // Failures worth retrying with a different player client.
-const RETRY_CODES = new Set(['BOT_CHECK', 'NO_FORMATS', 'UNKNOWN', 'NETWORK', 'AGE_RESTRICTED', 'IMPERSONATE', 'PO_TOKEN']);
+const RETRY_CODES = new Set(['BOT_CHECK', 'NO_FORMATS', 'UNKNOWN', 'NETWORK', 'AGE_RESTRICTED', 'IMPERSONATE', 'PO_TOKEN', 'PROXY_ERROR']);
 // UNSUPPORTED_URL is final: retrying other player clients cannot help.
 
 const isRetryable = (code) => RETRY_CODES.has(code);
@@ -722,6 +748,7 @@ const isRetryable = (code) => RETRY_CODES.has(code);
 // ─── USER-FACING MESSAGES ─────────────────────────────────────────────────────
 
 const USER_HINTS = {
+  PROXY_ERROR: '❌ Could not reach the media site right now (proxy connection failed). Please try again shortly.',
   NO_AUDIO: '❌ The download carries no audio track — refusing to send a silent video. Try another link or quality.',
   NO_YTDLP: '❌ The media downloader is temporarily unavailable on this server. Please try again later.',
   BOT_CHECK: '❌ YouTube temporarily blocked automated access for this video (anti-bot check, not a region block). Please try again shortly or try another link.',
@@ -746,11 +773,12 @@ const USER_HINTS = {
 };
 
 const OWNER_HINTS = {
+  PROXY_ERROR: 'Admin fix: clear or fix the proxy with `.ytdl proxy off`.',
   NO_YTDLP: 'Admin fix: run `.ytdl repair` or `pip install -U yt-dlp`.',
-  BOT_CHECK: 'Admin fix: `.cookies set` (YouTube cookies.txt) or `.ytdl proxy <url>`.',
-  AGE_RESTRICTED: 'Admin fix: add cookies with `.cookies set`.',
+  BOT_CHECK: 'Admin fix: run `.ytlogin` (Google TV sign-in), `.cookies set` (YouTube cookies.txt), or `.ytdl proxy <url>`.',
+  AGE_RESTRICTED: 'Admin fix: run `.ytlogin` or add cookies with `.cookies set`.',
   GEO_BLOCK: 'Admin fix: `.ytdl proxy <url>`.',
-  PO_TOKEN: 'Admin fix: `.ytdl update` and `.cookies set`.',
+  PO_TOKEN: 'Admin fix: `.ytlogin` or `.cookies set` and `.ytdl update`.',
   FFMPEG_MISSING: 'Admin fix: install `ffmpeg` on the host.',
   BAD_ARGS: 'Admin fix: `.ytdl update` or `.ytdl repair`.',
   NETWORK: 'Admin fix: check server internet or `.ytdl proxy <url>`.',
@@ -809,12 +837,7 @@ const remember = (err, url, attempts) => {
  */
 async function fetchInfo(url, { timeout = 60000 } = {}) {
   const caps = capabilities();
-  const args = [...baseArgs(), '--skip-download'];
-  if (caps.noCheckFormats) args.push('--no-check-formats');
-  args.push('--print', '%(title)s\t%(duration)s\t%(uploader)s\t%(thumbnail)s\t%(id)s', url);
-
-  try {
-    const { stdout } = await run(args, { timeout });
+  const parseLine = (stdout) => {
     const line = String(stdout || '').trim().split('\n').pop() || '';
     const [title, duration, uploader, thumbnail, id] = line.split('\t');
     return {
@@ -824,23 +847,45 @@ async function fetchInfo(url, { timeout = 60000 } = {}) {
       thumbnail: (thumbnail || '').trim(),
       id: (id || '').trim(),
     };
+  };
+
+  const buildPrintArgs = (extra = [], noProxy = false) => {
+    const args = [...baseArgs({ noProxy }), ...extra, '--skip-download'];
+    if (caps.noCheckFormats) args.push('--no-check-formats');
+    args.push('--print', '%(title)s\t%(duration)s\t%(uploader)s\t%(thumbnail)s\t%(id)s', url);
+    return args;
+  };
+
+  try {
+    const { stdout } = await run(buildPrintArgs([], false), { timeout });
+    return parseLine(stdout);
   } catch (err) {
+    let last = err;
+    const hadProxy = Boolean(proxyUrl());
+    const firstCode = classify(err).code;
+
+    // If configured proxy itself failed, immediately try direct without proxy.
+    if (hadProxy && (firstCode === 'PROXY_ERROR' || firstCode === 'NETWORK')) {
+      try {
+        const { stdout } = await run(buildPrintArgs([], true), { timeout });
+        return parseLine(stdout);
+      } catch (e) { last = e; }
+    }
+
     // Metadata is often the first thing a bot-check kills; try the escalations
     // before giving up so search results still resolve.
-    let last = err;
+    const useNoProxy = hadProxy && firstCode === 'PROXY_ERROR';
     for (const profile of attemptProfiles(url).slice(1, 4)) {
       try {
-        const { stdout } = await run([...baseArgs(), ...profile.args, '--skip-download', '--print',
-          '%(title)s\t%(duration)s\t%(uploader)s\t%(thumbnail)s\t%(id)s', url], { timeout });
-        const line = String(stdout || '').trim().split('\n').pop() || '';
-        const [title, duration, uploader, thumbnail, id] = line.split('\t');
-        return {
-          title: (title || '').trim(),
-          duration: Number(duration) || 0,
-          uploader: (uploader || '').trim(),
-          thumbnail: (thumbnail || '').trim(),
-          id: (id || '').trim(),
-        };
+        const { stdout } = await run(buildPrintArgs(profile.args, useNoProxy), { timeout });
+        return parseLine(stdout);
+      } catch (e) { last = e; }
+    }
+
+    if (hadProxy && !useNoProxy) {
+      try {
+        const { stdout } = await run(buildPrintArgs([], true), { timeout });
+        return parseLine(stdout);
       } catch (e) { last = e; }
     }
     throw last;
@@ -903,16 +948,28 @@ async function probeRaw(url, { timeout = 60000, client = null } = {}) {
 async function searchVideos(query, { limit = 5, timeout = 60000 } = {}) {
   const caps = capabilities();
   const n = Math.max(1, Math.min(20, Number(limit) || 5));
-  const args = [
-    // --no-playlist would collapse a search into a single entry
-    ...baseArgs().filter(a => a !== '--no-playlist'),
-    '--flat-playlist',
-    '--skip-download',
-  ];
-  if (caps.noCheckFormats) args.push('--no-check-formats');
-  args.push('--print', '%(id)s\t%(title)s\t%(duration)s\t%(uploader)s\t%(thumbnail)s', `ytsearch${n}:${query}`);
+  const buildSearchArgs = (noProxy = false) => {
+    const args = [
+      // --no-playlist would collapse a search into a single entry
+      ...baseArgs({ noProxy }).filter(a => a !== '--no-playlist'),
+      '--flat-playlist',
+      '--skip-download',
+    ];
+    if (caps.noCheckFormats) args.push('--no-check-formats');
+    args.push('--print', '%(id)s\t%(title)s\t%(duration)s\t%(uploader)s\t%(thumbnail)s', `ytsearch${n}:${query}`);
+    return args;
+  };
 
-  const { stdout } = await run(args, { timeout });
+  let stdout;
+  try {
+    ({ stdout } = await run(buildSearchArgs(false), { timeout }));
+  } catch (err) {
+    if (proxyUrl()) {
+      ({ stdout } = await run(buildSearchArgs(true), { timeout }));
+    } else {
+      throw err;
+    }
+  }
   return String(stdout || '')
     .trim()
     .split('\n')
@@ -1129,62 +1186,92 @@ async function runWithProfiles(url, buildArgs, {
   const attempts = [];
   let lastErr = null;
   let lastCode = 'UNKNOWN';
+  const hadProxy = Boolean(proxyUrl());
 
-  for (let i = 0; i < profiles.length; i++) {
-    const profile = profiles[i];
-    const elapsed = Date.now() - startedAt;
-    const remaining = deadlineMs - elapsed;
-    if (remaining <= 5000) {
-      console.warn(`[ytdlp] deadline reached after ${attempts.length} attempt(s)`);
-      break;
+  const runPass = async (noProxy) => {
+    let botChecksInPass = 0;
+    for (let i = 0; i < profiles.length; i++) {
+      const profile = profiles[i];
+      const elapsed = Date.now() - startedAt;
+      const remaining = deadlineMs - elapsed;
+      if (remaining <= 5000) {
+        console.warn(`[ytdlp] deadline reached after ${attempts.length} attempt(s)`);
+        break;
+      }
+
+      const tag = noProxy && hadProxy ? `${profile.name}(direct)` : profile.name;
+      try {
+        const args = [...baseArgs({ progress, noProxy }), ...profile.args, ...buildArgs(profile)];
+        const { stdout } = await spawnYtdlp(args, {
+          timeout: Math.min(timeout, remaining),
+          onProgress: onProgress ? (p) => { try { onProgress(p, tag); } catch { /* ignore */ } } : undefined,
+        });
+        return { profile: tag, attempts, stdout };
+      } catch (err) {
+        const info = classify(err);
+        lastErr = err;
+        lastCode = info.code;
+        attempts.push({ engine: `yt-dlp:${tag}`, code: info.code, detail: info.detail });
+        if (onAttempt) onAttempt(tag, err, info);
+
+        // If the configured proxy itself is unreachable or broken, stop burning
+        // profiles on it and immediately switch to direct egress.
+        if (!noProxy && hadProxy && info.code === 'PROXY_ERROR') {
+          console.warn(`[ytdlp] proxy failed (${info.detail}) — retrying directly without proxy`);
+          return null;
+        }
+
+        // A build that cannot impersonate will not learn to: drop that profile.
+        if (info.code === 'IMPERSONATE' && profile.name === 'impersonate') disableImpersonation();
+
+        // Broken/missing binary mid-flight: repair it once and retry the profile.
+        if (info.code === 'NO_YTDLP' && !_healedThisRun) {
+          _healedThisRun = true;
+          const repaired = await selfHeal(`download failed with ${info.code}`);
+          if (repaired) { i--; continue; }
+        }
+
+        // Some builds reject one of the optional flags (usually because they are
+        // much older than expected). Drop them and retry the same profile once
+        // instead of failing every download with "no such option".
+        if (info.code === 'BAD_ARGS' && !_minimalBaseArgs) {
+          console.warn('[ytdlp] this build rejected an optional option — retrying with minimal arguments');
+          setMinimalBaseArgs(true);
+          i--;
+          continue;
+        }
+
+        // YouTube silently breaks older yt-dlp builds: a bot-check on a stale
+        // version is worth one self-update per process before giving up.
+        if (info.code === 'BOT_CHECK' && !_autoUpdated && config.ytdlp?.updateOnBotCheck !== false) {
+          _autoUpdated = true;
+          console.log('[ytdlp] bot-check detected — updating yt-dlp before retrying');
+          try { await update({ quick: true }); } catch (e) { console.warn('[ytdlp] auto-update failed:', e.message); }
+        }
+
+        // When unauthenticated on YouTube, cap repeated bot-check retries so
+        // Innertube + remote fallbacks take over promptly instead of stalling.
+        if ((info.code === 'BOT_CHECK' || info.code === 'PO_TOKEN') && !hasCookies()) {
+          botChecksInPass += 1;
+          if (botChecksInPass >= 4) break;
+        }
+
+        // "Video unavailable" style failures are final — retrying other clients
+        // only wastes minutes of the user's time.
+        if (!isRetryable(info.code)) break;
+      }
     }
+    return null;
+  };
 
-    try {
-      const args = [...baseArgs({ progress }), ...profile.args, ...buildArgs(profile)];
-      const { stdout } = await spawnYtdlp(args, {
-        timeout: Math.min(timeout, remaining),
-        onProgress: onProgress ? (p) => { try { onProgress(p, profile.name); } catch { /* ignore */ } } : undefined,
-      });
-      return { profile: profile.name, attempts, stdout };
-    } catch (err) {
-      const info = classify(err);
-      lastErr = err;
-      lastCode = info.code;
-      attempts.push({ engine: `yt-dlp:${profile.name}`, code: info.code, detail: info.detail });
-      if (onAttempt) onAttempt(profile.name, err, info);
+  const firstPass = await runPass(false);
+  if (firstPass) return firstPass;
 
-      // A build that cannot impersonate will not learn to: drop that profile.
-      if (info.code === 'IMPERSONATE' && profile.name === 'impersonate') disableImpersonation();
-
-      // Broken/missing binary mid-flight: repair it once and retry the profile.
-      if (info.code === 'NO_YTDLP' && !_healedThisRun) {
-        _healedThisRun = true;
-        const repaired = await selfHeal(`download failed with ${info.code}`);
-        if (repaired) { i--; continue; }
-      }
-
-      // Some builds reject one of the optional flags (usually because they are
-      // much older than expected). Drop them and retry the same profile once
-      // instead of failing every download with "no such option".
-      if (info.code === 'BAD_ARGS' && !_minimalBaseArgs) {
-        console.warn('[ytdlp] this build rejected an optional option — retrying with minimal arguments');
-        setMinimalBaseArgs(true);
-        i--;
-        continue;
-      }
-
-      // YouTube silently breaks older yt-dlp builds: a bot-check on a stale
-      // version is worth one self-update per process before giving up.
-      if (info.code === 'BOT_CHECK' && !_autoUpdated && config.ytdlp?.updateOnBotCheck !== false) {
-        _autoUpdated = true;
-        console.log('[ytdlp] bot-check detected — updating yt-dlp before retrying');
-        try { await update({ quick: true }); } catch (e) { console.warn('[ytdlp] auto-update failed:', e.message); }
-      }
-
-      // "Video unavailable" style failures are final — retrying other clients
-      // only wastes minutes of the user's time.
-      if (!isRetryable(info.code)) break;
-    }
+  // Automatic direct fallback when a configured proxy fails with proxy/network/bot errors
+  if (hadProxy && (Date.now() - startedAt) < deadlineMs - 8000 &&
+      ['PROXY_ERROR', 'NETWORK', 'BOT_CHECK', 'UNKNOWN'].includes(lastCode)) {
+    const directPass = await runPass(true);
+    if (directPass) return directPass;
   }
 
   if (lastErr) {
@@ -1370,6 +1457,7 @@ async function diagnostics() {
     cookieCount: ci.count,
     cookieAgeMs: ci.mtime ? Date.now() - ci.mtime : null,
     proxy: maskUrlCredentials(proxyUrl()) || null,
+    invalidProxy: invalidProxyReason(),
     capabilities: {
       version: caps.version,
       impersonate: caps.impersonate && !caps.impersonateBroken,
@@ -1393,8 +1481,8 @@ module.exports = {
   ffmpegLocationArgs, assertProduced,
   capabilities, disableImpersonation, setMinimalBaseArgs, usingMinimalBaseArgs,
   selfHeal, healthCheck, startWatchdog, stopWatchdog,
-  // cookies
-  setCookies, clearCookies, cookieInfo, cookieFile, hasCookies, normaliseCookieText,
+  // cookies & proxy
+  setCookies, clearCookies, cookieInfo, cookieFile, hasCookies, normaliseCookieText, proxyUrl, invalidProxyReason,
   // errors
   classify, isRetryable, friendlyError, lastError, recordFailure, attemptsSummary,
   // diagnostics
