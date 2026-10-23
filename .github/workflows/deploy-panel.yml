@@ -47,6 +47,7 @@ jobs:
         run: |
           npm ci
           npm run selftest
+          node scripts/test-nm3u8dl-live.js
 
       - name: Verify standalone dashboard typecheck & build
         working-directory: dashboard
@@ -109,6 +110,7 @@ jobs:
           EXCLUDES=(
             --exclude-glob .github/
             --exclude-glob node_modules/
+            --exclude-glob bin/
             --exclude-glob dashboard/
             --exclude-glob session/
             --exclude-glob temp/

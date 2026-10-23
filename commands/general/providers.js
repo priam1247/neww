@@ -78,14 +78,21 @@ const statusCommand = {
       const minutes = Math.floor((stats.uptimeMs || 0) / 60000);
       const { tempUsage } = require('../../utils/cleanup');
       const { inspectDisk } = require('../../utils/diskSpace');
+      const nm3u8dl = require('../../utils/nm3u8dl');
+      const getFfmpeg = require('../../utils/ffmpeg');
       const tempMB = tempUsage() / 1048576;
       const d = inspectDisk();
       const t = telemetry.snapshot();
+      const reDiag = nm3u8dl.diagnostics();
+      const hlsLabel = reDiag.available
+        ? `N_m3u8DL-RE (${reDiag.threads}t)`
+        : getFfmpeg.works() ? 'ffmpeg' : 'native';
 
       const text = [
         '📊 *Engine*',
         `Uptime: ${minutes}m`,
         `Queue: ${q.running} active · ${q.queued} waiting`,
+        `HLS: ${hlsLabel}`,
         `Disk: ${d.folderUsedMB.toFixed(0)} / ${d.budgetMB} MB`,
         `Temp: ${tempMB.toFixed(1)} MB`,
         `Downloads: ${t.downloadsSuccess} ok · ${t.failedTotal} failed`,

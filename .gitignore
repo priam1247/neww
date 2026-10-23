@@ -1,5 +1,6 @@
-# dependencies
+# dependencies & runtime-fetched standalone binaries
 node_modules/
+bin/
 
 # WhatsApp credentials — never commit
 session/

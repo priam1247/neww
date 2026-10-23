@@ -76,6 +76,11 @@ function reloadRuntime() {
       require('./youtubedl').startWatchdog({ everyMinutes: 30 });
     } catch { /* ignore */ }
   }
+  if (!process.env.FAKE_YTDLP && !process.env.NM3U8DL_DISABLE_AUTOINSTALL) {
+    try {
+      require('./nm3u8dl').ensureInstalled({ quiet: true }).catch(() => {});
+    } catch { /* ignore */ }
+  }
   for (const fn of listeners) {
     try { fn(freshHandler); } catch { /* ignore */ }
   }

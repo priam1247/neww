@@ -101,13 +101,28 @@ function sweepBootPartials(dir = null) {
     for (const f of all) {
       const resolved = path.resolve(f.path);
       const inMovies = resolved.startsWith(`${moviesSubdir}${path.sep}`);
+      const inNm3u8Work = /[\\/]\.nm3u8_[^\\/]+[\\/]/i.test(resolved);
       const isLeftoverMedia = PARTIAL_NAME.test(f.name)
         || MEDIA_PREFIX.test(f.name)
-        || (inMovies && /\.(mp4|mkv|webm|ts|m4v|avi|srt|vtt|part|tmp)$/i.test(f.name));
+        || inNm3u8Work
+        || (inMovies && /\.(mp4|mkv|webm|ts|m4v|avi|m4s|aac|srt|vtt|part|tmp)$/i.test(f.name));
 
       if (isLeftoverMedia && unlink(f.path)) {
         result.files++;
         result.freedBytes += f.size;
+      }
+    }
+
+    // Remove empty `.nm3u8_*` staging folders left behind by interrupted jobs
+    for (const parent of [tempDir, moviesSubdir]) {
+      let entries = [];
+      try { entries = fs.readdirSync(parent, { withFileTypes: true }); } catch { continue; }
+      for (const e of entries) {
+        if (!e.isDirectory() || !e.name.startsWith('.nm3u8_')) continue;
+        const full = path.join(parent, e.name);
+        if (!isHeld(full)) {
+          try { fs.rmSync(full, { recursive: true, force: true }); } catch { /* ignore */ }
+        }
       }
     }
 
