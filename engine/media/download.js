@@ -19,8 +19,8 @@ import { formatBytes } from '../utils/format.js';
 import { freeBytes, ensureDir, which, sanitize as sanitizeName } from '../utils/disk.js';
 import { emit, EVENTS } from '../core/events.js';
 import { metrics } from '../core/metrics.js';
-import { ffmpegPath, downloadFallback } from '../host.js';
-import { downloadHlsNative } from './hls.js';
+import { ffmpegPath, downloadFallback, hlsDownload } from '../host.js';
+import { downloadHlsNative, parseVariants, chooseVariant } from './hls.js';
 
 export const sanitize = (name, q, s, e) => {
   const base = sanitizeName(name);
@@ -30,20 +30,133 @@ export const sanitize = (name, q, s, e) => {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+/**
+ * When falling back to raw `ffmpeg -i <url>`, pick the variant matching
+ * `maxHeight` if `url` is a master playlist without separate audio renditions.
+ */
+async function resolveFfmpegVariantUrl(url, headers, maxHeight) {
+  if (!maxHeight) return url;
+  try {
+    const res = await fetch(url, {
+      headers: { 'user-agent': config.userAgent, accept: '*/*', ...headers },
+      signal: AbortSignal.timeout(12000),
+      redirect: 'follow',
+    });
+    if (!res.ok) return url;
+    const text = await res.text();
+    if (!/#EXT-X-STREAM-INF/i.test(text)) return url;
+    // Keep master URL if audio is carried in a separate #EXT-X-MEDIA rendition
+    if (/#EXT-X-MEDIA:[^\r\n]*TYPE=AUDIO[^\r\n]*URI="/i.test(text)) return url;
+    const chosen = chooseVariant(parseVariants(text, url), maxHeight);
+    return chosen?.url || url;
+  } catch {
+    return url;
+  }
+}
+
 // HLS -> file, straight to disk.
-// ffmpeg is used when the host has it (it is faster and remuxes cleanly), but
-// it is NOT required any more: the native downloader below concatenates the
-// playlist's segments itself, so stream sources work on a bare Node host.
-export async function hlsToFile(url, dest, onProgress, { headers = {}, maxHeight } = {}) {
-  // Prefer the binary the bot itself verified (system → user install →
-  // packaged fallback); fall back to a PATH lookup so the engine still works alone.
-  const ffmpeg = (await ffmpegPath()) || await which('ffmpeg');
-  if (!ffmpeg) {
-    // hard cap so a runaway playlist can never eat the host's disk
-    const maxBytes = Math.round(config.maxDownloadMB * 1.2 * 1048576);
+// 3-tier cascade:
+//   1. `N_m3u8DL-RE` (16 parallel segment threads + `ffmpeg` MP4 mux, honours `maxHeight`)
+//   2. `ffmpeg` HLS remux (honours `maxHeight` on muxed master playlists)
+//   3. `downloadHlsNative` (pure Node.js segment concatenation + AES-128 decryption)
+export async function hlsToFile(url, dest, onProgress, { headers = {}, maxHeight, onAbort } = {}) {
+  ensureDir(path.dirname(dest));
+  cache.markActive(dest);
+  emit(EVENTS.DOWNLOAD_START, { dest });
+
+  // hard cap so a runaway playlist can never eat the host's disk
+  const maxBytes = Math.round(config.maxDownloadMB * 1.2 * 1048576);
+  const hlsMode = String(process.env.MOVIE_HLS_ENGINE || 'auto').toLowerCase();
+
+  try {
+    // ── Tier 1: N_m3u8DL-RE parallel segment downloader + ffmpeg MP4 muxer ──
+    if (hlsMode !== 'ffmpeg' && hlsMode !== 'native' && hlsMode !== 'off') {
+      const viaRe = await hlsDownload(url, dest, {
+        headers,
+        maxHeight,
+        maxBytes,
+        stallMs: config.downloadStallMs,
+        onProgress,
+        onAbort,
+      });
+      if (viaRe && viaRe.bytes > 0) {
+        metrics.bump('download.bytes', {}, viaRe.bytes);
+        emit(EVENTS.DOWNLOAD_DONE, { dest: viaRe.file, bytes: viaRe.bytes });
+        return { bytes: viaRe.bytes, file: viaRe.file, engine: 'nm3u8dl-re' };
+      }
+    }
+
+    // ── Tier 2: ffmpeg HLS remux ────────────────────────────────────────────
+    const ffmpeg = hlsMode === 'native' ? null : ((await ffmpegPath()) || await which('ffmpeg'));
+    if (ffmpeg) {
+      const targetUrl = await resolveFfmpegVariantUrl(url, headers, maxHeight);
+      const headerLines = Object.entries({ 'User-Agent': config.userAgent, ...headers })
+        .map(([k, v]) => `${k}: ${v}`)
+        .join('\r\n');
+
+      try {
+        await new Promise((resolve, reject) => {
+          const p = execFile(ffmpeg, [
+            '-y', '-hide_banner', '-loglevel', 'error',
+            '-headers', `${headerLines}\r\n`,
+            '-user_agent', config.userAgent,
+            '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '10',
+            '-i', targetUrl,
+            '-c', 'copy', '-bsf:a', 'aac_adtstoasc',
+            '-movflags', '+faststart',
+            dest
+          ], { maxBuffer: 1 << 24 });
+
+          let lastSize = 0, lastChange = Date.now();
+          const tick = setInterval(() => {
+            if (onAbort?.()) {
+              clearInterval(tick);
+              try { p.kill('SIGKILL'); } catch {}
+              return reject(Object.assign(new Error('download aborted'), { code: 'ABORTED' }));
+            }
+            try {
+              const s = fs.statSync(dest).size;
+              if (maxBytes > 0 && s > maxBytes) {
+                clearInterval(tick);
+                try { p.kill('SIGKILL'); } catch {}
+                return reject(Object.assign(new Error('HLS stream larger than the cap'), { code: 'TOO_BIG' }));
+              }
+              if (s !== lastSize) { lastSize = s; lastChange = Date.now(); onProgress?.(s, 0); }
+              else if (Date.now() - lastChange > config.downloadStallMs) {
+                clearInterval(tick);
+                try { p.kill('SIGKILL'); } catch {}
+                return reject(new Error('HLS stream stalled (no data) — link expired?'));
+              }
+            } catch { /* file not created yet */ }
+          }, 4000);
+
+          p.on('error', (e) => { clearInterval(tick); reject(e); });
+          p.on('close', (c) => { clearInterval(tick); c === 0 ? resolve() : reject(new Error(`ffmpeg exited ${c}`)); });
+        });
+
+        const bytes = fs.statSync(dest).size;
+        if (bytes >= 10 * 1024) {
+          metrics.bump('download.bytes', {}, bytes);
+          emit(EVENTS.DOWNLOAD_DONE, { dest, bytes });
+          return { bytes, file: dest, engine: 'ffmpeg' };
+        }
+      } catch (ffErr) {
+        try { fs.rmSync(dest, { force: true }); } catch { /* ignore */ }
+        if (ffErr?.code === 'TOO_BIG' || ffErr?.code === 'ABORTED') throw ffErr;
+        // Any other ffmpeg HLS failure falls through to pure-JS segment fetch
+      }
+    }
+
+    // ── Tier 3: pure Node.js segment concatenation + AES-128 decryption ─────
     let got;
     try {
-      got = await downloadHlsNative(url, dest, { headers, onProgress, maxHeight, maxBytes });
+      const wrappedProgress = typeof onProgress === 'function'
+        ? (done, total, bytes) => {
+            const estTotal = total > 0 && done > 0 ? Math.round((bytes / done) * total) : 0;
+            onProgress(bytes, estTotal);
+          }
+        : undefined;
+      got = await downloadHlsNative(url, dest, { headers, onProgress: wrappedProgress, maxHeight, maxBytes });
     } catch (e) {
       // never leave a half-written stream behind for the next retry to resume
       for (const f of [dest, dest.replace(/\.(mp4|mkv|ts|m4v)$/i, '') + '.ts']) {
@@ -53,50 +166,10 @@ export async function hlsToFile(url, dest, onProgress, { headers = {}, maxHeight
     }
     metrics.bump('download.bytes', {}, got.bytes);
     emit(EVENTS.DOWNLOAD_DONE, { dest: got.file, bytes: got.bytes });
-    return { bytes: got.bytes, file: got.file, native: true };
-  }
-  ensureDir(path.dirname(dest));
-  cache.markActive(dest);
-
-  const headerLines = Object.entries({ 'User-Agent': config.userAgent, ...headers })
-    .map(([k, v]) => `${k}: ${v}`)
-    .join('\r\n');
-
-  try {
-    await new Promise((resolve, reject) => {
-      const p = execFile(ffmpeg, [
-        '-y', '-hide_banner', '-loglevel', 'error',
-        '-headers', `${headerLines}\r\n`,
-        '-user_agent', config.userAgent,
-        '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '10',
-        '-i', url,
-        '-c', 'copy', '-bsf:a', 'aac_adtstoasc',
-        '-movflags', '+faststart',
-        dest
-      ], { maxBuffer: 1 << 24 });
-
-      let lastSize = 0, lastChange = Date.now();
-      const tick = setInterval(() => {
-        try {
-          const s = fs.statSync(dest).size;
-          if (s !== lastSize) { lastSize = s; lastChange = Date.now(); onProgress?.(s, 0); }
-          else if (Date.now() - lastChange > config.downloadStallMs) {
-            try { p.kill('SIGKILL'); } catch {}
-            reject(new Error('HLS stream stalled (no data) — link expired?'));
-          }
-        } catch { /* file not created yet */ }
-      }, 4000);
-
-      p.on('error', (e) => { clearInterval(tick); reject(e); });
-      p.on('close', (c) => { clearInterval(tick); c === 0 ? resolve() : reject(new Error(`ffmpeg exited ${c}`)); });
-    });
+    return { bytes: got.bytes, file: got.file, native: true, engine: 'native' };
   } finally {
     cache.unmarkActive(dest);
   }
-
-  const bytes = fs.statSync(dest).size;
-  metrics.bump('download.bytes', {}, bytes);
-  return { bytes, file: dest };
 }
 
 // One HTTP attempt. Resumes from whatever is already on disk.

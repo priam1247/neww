@@ -449,12 +449,20 @@ require('./utils/logger').banner([
 (() => {
   const YT = require('./utils/youtubedl');
   const ffmpeg = require('./utils/ffmpeg');
+  const nm3u8dl = require('./utils/nm3u8dl');
   console.log(ffmpeg.works() ? `🎞️ ffmpeg  ${ffmpeg.version() || 'ready'}` : '🎞️ ffmpeg  ❌ not available');
   YT.scheduleAutoUpdate();
   YT.healthCheck().then((cmd) => {
     console.log(cmd ? `🎬 yt-dlp  ${YT.version() || 'ready'}` : '🎬 yt-dlp  ❌ not available (will retry while running)');
   }).catch(() => {});
   YT.startWatchdog({ everyMinutes: 30 });
+  nm3u8dl.ensureInstalled().then((bin) => {
+    console.log(
+      bin
+        ? `⚡ N_m3u8DL-RE  ${nm3u8dl.version() || 'ready'} (${nm3u8dl.threadCount()}t)`
+        : '⚡ N_m3u8DL-RE  unavailable (falling back to ffmpeg/native HLS)'
+    );
+  }).catch(() => {});
 })();
 
 // ── Dashboard Outbound HTTPS Sync + Optional Inbound API ─────────────────────

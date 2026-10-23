@@ -3271,6 +3271,303 @@ const settings = require(path.join(REPO, 'utils/mediaSettings.js'));
     settings24.reload();
   }
 
+  console.log('\n── 25. N_m3u8DL-RE parallel HLS engine, tar.gz auto-installer & 3-tier HLS cascade ──');
+  {
+    const http = require('http');
+    const zlib = require('zlib');
+    const { execFileSync } = require('child_process');
+    const nm3u8dl = require(path.join(REPO, 'utils/nm3u8dl.js'));
+    const cleanup25 = require(path.join(REPO, 'utils/cleanup.js'));
+    const getFfmpeg = require(path.join(REPO, 'utils/ffmpeg.js'));
+    const { probeMedia } = require(path.join(REPO, 'utils/mediaTransfer.js'));
+    const [, moviestatusCmd] = require(path.join(REPO, 'commands/general/providers.js'));
+    const engineDl = await import(pathToFileURL(path.join(REPO, 'engine/media/download.js')).href);
+
+    // Helper: create a minimal valid POSIX ustar .tar.gz containing one file
+    const makeSingleFileTarGz = (entryName, contentBuf) => {
+      const header = Buffer.alloc(512, 0);
+      header.write(entryName, 0, Math.min(100, Buffer.byteLength(entryName)), 'utf8');
+      header.write('0000755\0', 100, 8, 'ascii');
+      header.write('0000000\0', 108, 8, 'ascii');
+      header.write('0000000\0', 116, 8, 'ascii');
+      header.write(`${contentBuf.length.toString(8).padStart(11, '0')}\0`, 124, 12, 'ascii');
+      header.write(`${Math.floor(Date.now() / 1000).toString(8).padStart(11, '0')}\0`, 136, 12, 'ascii');
+      header.fill(0x20, 148, 156); // checksum placeholder spaces
+      header[156] = '0'.charCodeAt(0);
+      header.write('ustar\0', 257, 6, 'ascii');
+      header.write('00', 263, 2, 'ascii');
+      let sum = 0;
+      for (let i = 0; i < 512; i++) sum += header[i];
+      header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'ascii');
+
+      const padLen = (512 - (contentBuf.length % 512)) % 512;
+      const eof = Buffer.alloc(1024, 0);
+      return zlib.gzipSync(Buffer.concat([header, contentBuf, Buffer.alloc(padLen, 0), eof]));
+    };
+
+    await test('buildAboveHeightRegex is colon-free and exact across all heights 1..4000', () => {
+      for (const target of [360, 480, 720, 1080, 1440, 2160]) {
+        const pattern = nm3u8dl.buildAboveHeightRegex(target, 60);
+        assert.ok(!pattern.includes(':'), `colon found in ComplexParamParser regex: ${pattern}`);
+        const re = new RegExp(pattern);
+        const cutoff = target + 60;
+        for (let h = 1; h <= 4000; h++) {
+          assert.strictEqual(
+            re.test(`1920x${h}`),
+            h > cutoff,
+            `mismatch at target=${target} h=${h} (pattern=${pattern})`
+          );
+        }
+      }
+    });
+
+    await test('ensureInstalled downloads & extracts POSIX tar.gz into bin/N_m3u8DL-RE and heals 0644 perms', async () => {
+      nm3u8dl._resetForTests();
+      const fakeReCalls = path.join(sandbox, 'nm3u8_calls.jsonl');
+      const fakeRePath = path.join(sandbox, 'bin', 'N_m3u8DL-RE');
+      try { fs.rmSync(fakeRePath, { force: true }); } catch { /* ignore */ }
+
+      const fakeReScript = Buffer.from(`#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(fakeReCalls)}, JSON.stringify(args) + '\\n');
+
+if (args.includes('--version')) {
+  console.log('N_m3u8DL-RE 0.6.0 20260629');
+  process.exit(0);
+}
+
+const mode = process.env.FAKE_NM3U8_MODE || 'ok';
+if (mode === 'fail') {
+  console.error('ERROR: upstream CDN 403');
+  process.exit(1);
+}
+if (mode === 'drop_all' && args.includes('-dv')) {
+  console.error('ERROR: No streams to download');
+  process.exit(1);
+}
+
+const getOpt = (flag) => {
+  const idx = args.indexOf(flag);
+  return idx !== -1 ? args[idx + 1] : null;
+};
+const saveDir = getOpt('--save-dir') || process.cwd();
+const saveName = getOpt('--save-name') || 'media';
+const ff = getOpt('--ffmpeg-binary-path');
+fs.mkdirSync(saveDir, { recursive: true });
+const outFile = path.join(saveDir, saveName + '.mp4');
+
+if (mode === 'oversize') {
+  fs.writeFileSync(outFile, Buffer.alloc(2 * 1024 * 1024, 9));
+  process.exit(0);
+}
+
+execFileSync(ff, [
+  '-y', '-hide_banner', '-loglevel', 'error',
+  '-f', 'lavfi', '-i', 'testsrc=size=320x180:rate=24:duration=2',
+  '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2',
+  '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-shortest',
+  outFile
+]);
+console.log('Done');
+`, 'utf8');
+
+      const gzPayload = makeSingleFileTarGz('N_m3u8DL-RE', fakeReScript);
+      let srvPort = 0;
+      const srv = http.createServer((req, res) => {
+        if (req.url === '/releases/latest') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({
+            tag_name: 'v0.6.0-beta',
+            assets: [
+              {
+                name: 'N_m3u8DL-RE_v0.6.0-beta_linux-x64_20260629.tar.gz',
+                browser_download_url: `http://127.0.0.1:${srvPort}/re.tar.gz`,
+              },
+              {
+                name: 'N_m3u8DL-RE_v0.6.0-beta_linux-arm64_20260629.tar.gz',
+                browser_download_url: `http://127.0.0.1:${srvPort}/re.tar.gz`,
+              },
+            ],
+          }));
+        }
+        if (req.url === '/re.tar.gz') {
+          res.writeHead(200, { 'Content-Type': 'application/gzip' });
+          return res.end(gzPayload);
+        }
+        res.writeHead(404).end();
+      });
+      await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+      srvPort = srv.address().port;
+
+      try {
+        const installed = await nm3u8dl.ensureInstalled({
+          slug: 'linux-x64',
+          releaseApiUrl: `http://127.0.0.1:${srvPort}/releases/latest`,
+          destPath: fakeRePath,
+        });
+        assert.strictEqual(installed, fakeRePath);
+        assert.strictEqual(nm3u8dl.version(), 'N_m3u8DL-RE 0.6.0 20260629');
+
+        // Simulate SFTP upload stripping +x (0644) -> resolveBinary heals to 0755
+        fs.chmodSync(fakeRePath, 0o644);
+        assert.strictEqual(nm3u8dl.resolveBinary({ force: true }), fakeRePath);
+        assert.ok((fs.statSync(fakeRePath).mode & 0o111) !== 0, 'did not heal 0644 permissions');
+
+        // Verify .moviestatus surfaces N_m3u8DL-RE
+        const replies = [];
+        await moviestatusCmd.execute({}, {}, [], { reply: async (t) => replies.push(t) });
+        assert.match(replies[0], /HLS: N_m3u8DL-RE \(16t\)/);
+      } finally {
+        await new Promise((r) => srv.close(r));
+      }
+    });
+
+    await test('hlsToFile Tier 1 uses N_m3u8DL-RE (16t + ffmpeg mp4 mux), retries -sv worst, enforces TOO_BIG & leaves 0 temp dirs', async () => {
+      const fakeReCalls = path.join(sandbox, 'nm3u8_calls.jsonl');
+      fs.writeFileSync(fakeReCalls, '', 'utf8');
+      const moviesDir = path.join(sandbox, 're_movies');
+      fs.mkdirSync(moviesDir, { recursive: true });
+
+      // 1. Primary 720p download through engine's hlsToFile
+      const dest1 = path.join(moviesDir, 'Movie.720p.mp4');
+      const got1 = await engineDl.hlsToFile('https://cdn.example.test/master.m3u8', dest1, null, {
+        headers: { Referer: 'https://vixsrc.to/' },
+        maxHeight: 720,
+      });
+      assert.strictEqual(got1.engine, 'nm3u8dl-re');
+      assert.strictEqual(got1.file, dest1);
+      const probed1 = await probeMedia(dest1);
+      assert.strictEqual(probed1.hasVideo, true);
+      assert.strictEqual(probed1.hasAudio, true);
+
+      const callArgs = JSON.parse(fs.readFileSync(fakeReCalls, 'utf8').trim().split('\n').pop());
+      assert.ok(callArgs.includes('--thread-count') && callArgs[callArgs.indexOf('--thread-count') + 1] === '16');
+      assert.ok(callArgs.includes('--download-retry-count') && callArgs[callArgs.indexOf('--download-retry-count') + 1] === '10');
+      assert.ok(callArgs.includes('-mt'), 'missing concurrent audio/video flag -mt');
+      assert.ok(callArgs.includes('--no-log'), 'missing --no-log');
+      assert.ok(callArgs.includes('--vod-select-parts') && callArgs[callArgs.indexOf('--vod-select-parts') + 1] === 'false');
+      assert.ok(callArgs.includes('-dv'), 'missing -dv height cap');
+      assert.ok(callArgs.some((a) => /Referer:\s*https:\/\/vixsrc\.to\//i.test(a)), 'missing custom Referer header');
+
+      const leftovers = fs.readdirSync(moviesDir).filter((n) => n.startsWith('.nm3u8_'));
+      assert.strictEqual(leftovers.length, 0, `leaked temp dirs: ${leftovers.join(', ')}`);
+
+      // 2. Automatic `-sv worst` retry when all variants exceed requested height
+      process.env.FAKE_NM3U8_MODE = 'drop_all';
+      try {
+        const dest2 = path.join(moviesDir, 'Movie.480p.mp4');
+        const got2 = await nm3u8dl.downloadHls('https://cdn.example.test/1080only.m3u8', dest2, { maxHeight: 480 });
+        assert.strictEqual(got2.engine, 'nm3u8dl-re');
+        const lines = fs.readFileSync(fakeReCalls, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+        const lastCall = lines[lines.length - 1];
+        assert.ok(!lastCall.includes('-dv') && lastCall[lastCall.indexOf('-sv') + 1] === 'worst');
+      } finally {
+        delete process.env.FAKE_NM3U8_MODE;
+      }
+
+      // 3. Hard TOO_BIG cap aborts without falling back
+      process.env.FAKE_NM3U8_MODE = 'oversize';
+      try {
+        let capErr = null;
+        try {
+          await nm3u8dl.downloadHls('https://cdn.example.test/huge.m3u8', path.join(moviesDir, 'Huge.mp4'), {
+            maxBytes: 256 * 1024,
+          });
+        } catch (e) { capErr = e; }
+        assert.strictEqual(capErr?.code, 'TOO_BIG', 'did not enforce maxBytes cap');
+      } finally {
+        delete process.env.FAKE_NM3U8_MODE;
+      }
+    });
+
+    await test('hlsToFile cascades cleanly to Tier 2 (ffmpeg w/ maxHeight) and Tier 3 (native) + boot sweep cleans .nm3u8_*', async () => {
+      const ff = getFfmpeg();
+      const hlsFixtureDir = path.join(sandbox, 'hls_cascade');
+      fs.mkdirSync(path.join(hlsFixtureDir, 'v1080'), { recursive: true });
+      fs.mkdirSync(path.join(hlsFixtureDir, 'v480'), { recursive: true });
+
+      // Generate real 1080p and 480p muxed HLS TS streams with ffmpeg
+      execFileSync(ff, [
+        '-y', '-hide_banner', '-loglevel', 'error',
+        '-f', 'lavfi', '-i', 'testsrc=size=640x360:rate=20:duration=2',
+        '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest',
+        '-f', 'hls', '-hls_time', '1', '-hls_playlist_type', 'vod',
+        path.join(hlsFixtureDir, 'v1080', 'index.m3u8'),
+      ]);
+      execFileSync(ff, [
+        '-y', '-hide_banner', '-loglevel', 'error',
+        '-f', 'lavfi', '-i', 'testsrc=size=320x180:rate=20:duration=2',
+        '-f', 'lavfi', '-i', 'sine=frequency=523:duration=2',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest',
+        '-f', 'hls', '-hls_time', '1', '-hls_playlist_type', 'vod',
+        path.join(hlsFixtureDir, 'v480', 'index.m3u8'),
+      ]);
+
+      const requestedPaths = [];
+      const hlsSrv = http.createServer((req, res) => {
+        requestedPaths.push(req.url);
+        if (req.url === '/master.m3u8') {
+          res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
+          return res.end([
+            '#EXTM3U',
+            '#EXT-X-STREAM-INF:BANDWIDTH=4500000,RESOLUTION=1920x1080',
+            '/v1080/index.m3u8',
+            '#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=854x480',
+            '/v480/index.m3u8',
+          ].join('\n'));
+        }
+        const local = path.join(hlsFixtureDir, req.url.replace(/^\/+/, ''));
+        if (fs.existsSync(local) && fs.statSync(local).isFile()) {
+          res.writeHead(200);
+          return fs.createReadStream(local).pipe(res);
+        }
+        res.writeHead(404).end();
+      });
+      await new Promise((r) => hlsSrv.listen(0, '127.0.0.1', r));
+      const baseUrl = `http://127.0.0.1:${hlsSrv.address().port}`;
+
+      process.env.FAKE_NM3U8_MODE = 'fail';
+      try {
+        // Tier 1 fails -> Tier 2 (ffmpeg) selects 480p variant (never touches /v1080/)
+        const ffOut = path.join(hlsFixtureDir, 'tier2_ff.mp4');
+        const res2 = await engineDl.hlsToFile(`${baseUrl}/master.m3u8`, ffOut, null, { maxHeight: 480 });
+        assert.strictEqual(res2.engine, 'ffmpeg');
+        assert.ok(!requestedPaths.some((u) => u.startsWith('/v1080/')), `ffmpeg pulled 1080p despite maxHeight=480: ${requestedPaths}`);
+        assert.ok(requestedPaths.some((u) => u.startsWith('/v480/')), 'ffmpeg did not pull 480p variant');
+        const p2 = await probeMedia(res2.file);
+        assert.strictEqual(p2.hasVideo, true);
+        assert.strictEqual(p2.hasAudio, true);
+
+        // Tier 3 (native) fallback when MOVIE_HLS_ENGINE=native
+        process.env.MOVIE_HLS_ENGINE = 'native';
+        const natOut = path.join(hlsFixtureDir, 'tier3_nat.mp4');
+        const res3 = await engineDl.hlsToFile(`${baseUrl}/master.m3u8`, natOut, null, { maxHeight: 480 });
+        assert.strictEqual(res3.engine, 'native');
+        assert.ok(res3.file.endsWith('.ts'));
+        assert.ok(fs.statSync(res3.file).size > 10 * 1024);
+      } finally {
+        delete process.env.FAKE_NM3U8_MODE;
+        delete process.env.MOVIE_HLS_ENGINE;
+        await new Promise((r) => hlsSrv.close(r));
+        try { fs.rmSync(path.join(sandbox, 'bin', 'N_m3u8DL-RE'), { force: true }); } catch { /* ignore */ }
+        nm3u8dl._resetForTests();
+      }
+
+      // Boot sweep cleans crashed `.nm3u8_*` folders inside temp/movies/
+      const sweepRoot = path.join(sandbox, 'sweep_nm3u8');
+      const crashedWork = path.join(sweepRoot, 'movies', '.nm3u8_crashed_job', 'tmp');
+      fs.mkdirSync(crashedWork, { recursive: true });
+      fs.writeFileSync(path.join(crashedWork, 'seg_0001.m4s'), Buffer.alloc(16384, 7));
+      const swept = cleanup25.sweepBootPartials(sweepRoot);
+      assert.strictEqual(swept.files, 1);
+      assert.strictEqual(fs.existsSync(path.join(sweepRoot, 'movies', '.nm3u8_crashed_job')), false);
+    });
+  }
+
   // ─── summary ────────────────────────────────────────────────────────────────
   console.log(`\n${'─'.repeat(52)}`);
   if (failures.length) {

@@ -51,6 +51,7 @@ const moviesCfg = () => cfg().movies || {};
 const tempMod = () => host('./tempManager');
 const transfer = () => host('./mediaTransfer');
 const ffmpegMod = () => host('./ffmpeg');
+const nm3u8Mod = () => host('./nm3u8dl');
 
 /** Forget cached host modules (tests / hot reloads). */
 function reset() { cache.clear(); }
@@ -145,16 +146,65 @@ function maxDownloadMB() {
   return Number(moviesCfg().maxDownloadMB) || 2000;
 }
 
+function nm3u8dl() {
+  const n = nm3u8Mod();
+  if (!n || typeof n.diagnostics !== 'function') {
+    return { available: false, path: null, version: null, threads: 16, retries: 10 };
+  }
+  try { return n.diagnostics(); } catch {
+    return { available: false, path: null, version: null, threads: 16, retries: 10 };
+  }
+}
+
 function capabilities() {
   const t = transfer();
   return {
     tempDir: tempDir(),
     downloader: Boolean(t && typeof t.downloadToFile === 'function'),
     ffmpeg: ffmpeg(),
+    nm3u8dl: nm3u8dl(),
     maxDownloadMB: maxDownloadMB(),
     defaultQuality: defaultQuality(),
     send: 'document (same as .song/.paper)',
   };
+}
+
+/**
+ * High-speed parallel HLS/DASH download via `N_m3u8DL-RE` + `ffmpeg` muxing.
+ * Throws `{ code: 'TOO_BIG' | 'ABORTED' }` on hard stops so the caller does not
+ * waste time retrying oversized/cancelled jobs; any other failure allows the
+ * engine to fall back seamlessly to `ffmpeg` or `downloadHlsNative`.
+ */
+async function hlsDownload(url, dest, {
+  headers = {},
+  maxHeight,
+  maxBytes,
+  stallMs,
+  onProgress,
+  onAbort,
+  keys,
+} = {}) {
+  const mode = String(moviesCfg().hlsEngine || 'auto').toLowerCase();
+  if (mode === 'ffmpeg' || mode === 'native' || mode === 'off') {
+    throw Object.assign(new Error(`hlsEngine=${mode}`), { code: 'NM3U8DL_SKIPPED' });
+  }
+  const n = nm3u8Mod();
+  if (!n || typeof n.downloadHls !== 'function') {
+    throw Object.assign(new Error('nm3u8dl helper unavailable'), { code: 'NO_NM3U8DL' });
+  }
+  const cap = Number(maxBytes) || Math.round(maxDownloadMB() * 1.2 * MB);
+  return n.downloadHls(url, dest, {
+    headers,
+    maxHeight,
+    maxBytes: cap,
+    stallMs,
+    onProgress,
+    onAbort,
+    keys,
+    ffmpegPath: ffmpegPath(),
+    threads: moviesCfg().hlsThreads,
+    retries: moviesCfg().hlsRetries,
+  });
 }
 
 // ── download ───────────────────────────────────────────────────────────────
@@ -271,8 +321,9 @@ async function release(file) {
 function statusLine() {
   const caps = capabilities();
   const ff = caps.ffmpeg.works ? `ffmpeg ${caps.ffmpeg.version || 'ok'}` : 'ffmpeg missing';
+  const re = caps.nm3u8dl.available ? `N_m3u8DL-RE (${caps.nm3u8dl.threads}t)` : 'HLS fallback';
   const dl = caps.downloader ? 'downloader ✓' : 'downloader ✗';
-  return `${dl} · ${ff} · no cache (file deleted after send)`;
+  return `${dl} · ${re} · ${ff} · no cache (file deleted after send)`;
 }
 
 module.exports = {
@@ -281,8 +332,8 @@ module.exports = {
   // paths
   tempDir, tempFile, cleanup, fmtMB,
   // media
-  sniff, safeName, ffmpeg, ffmpegPath, defaultQuality, maxDownloadMB,
-  download, sendMedia, sendSubtitle, release,
+  sniff, safeName, ffmpeg, ffmpegPath, nm3u8dl, defaultQuality, maxDownloadMB,
+  download, hlsDownload, sendMedia, sendSubtitle, release,
   // delivery
   deliver,
 };

@@ -209,6 +209,12 @@ module.exports = {
     // 1080 → 720 → 480 instead of failing when a quality has no source
     qualityFallback: env.QUALITY_FALLBACK !== '0',
 
+    // HLS acceleration: 'auto' tries N_m3u8DL-RE (parallel segments + ffmpeg mux)
+    // first, falling back to ffmpeg HLS remux and pure-JS segment download.
+    hlsEngine: String(env.MOVIE_HLS_ENGINE || 'auto').toLowerCase(),
+    hlsThreads: Math.max(1, Math.min(32, Number(env.NM3U8DL_THREADS || 16))),
+    hlsRetries: Math.max(1, Math.min(20, Number(env.NM3U8DL_RETRIES || 10))),
+
     defaultQuality: Number(env.MOVIE_QUALITY || 720),
     // WhatsApp send ceiling (used by the engine's own ranking) …
     maxSendMB: Number(env.MOVIE_MAX_MB || movieCapDefault),
