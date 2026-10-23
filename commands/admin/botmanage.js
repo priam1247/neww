@@ -67,11 +67,14 @@ module.exports = [
         return;
       }
 
-      await extra.reply('🔄 Reconnecting WhatsApp…');
+      const { reloadRuntime } = require('../../utils/hotReload');
+      try { reloadRuntime(); } catch (_) {}
+
+      await extra.reply('♻️ Reloaded code & reconnecting…');
       setTimeout(() => {
         restarting = false;
         try { sock.end(new Error('restart requested')); } catch (_) {}
-      }, 1500);
+      }, 1000);
     },
   },
 
