@@ -3332,11 +3332,45 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const args = process.argv.slice(2);
-fs.appendFileSync(${JSON.stringify(fakeReCalls)}, JSON.stringify(args) + '\\n');
 
 if (args.includes('--version')) {
-  console.log('N_m3u8DL-RE 0.6.0 20260629');
+  console.log('N_m3u8DL-RE (Beta version) 20260628');
   process.exit(0);
+}
+if (args.includes('--help') || args.includes('-h')) {
+  console.log([
+    '--tmp-dir --save-dir --save-name --save-pattern --log-file-path --base-url',
+    '--thread-count --download-retry-count --http-request-timeout --force-ansi-console',
+    '--no-ansi-color --auto-select --skip-merge --skip-download --check-segments-count',
+    '--binary-merge --use-ffmpeg-concat-demuxer --del-after-done --no-date-info --no-log',
+    '--write-meta-json --append-url-params --concurrent-download --header --sub-only',
+    '--sub-format --auto-subtitle-fix --ffmpeg-binary-path --log-level --ui-language',
+    '--key --key-text-file --decryption-engine --decryption-binary-path --max-speed',
+    '--mux-after-done --custom-proxy --select-video --select-audio --select-subtitle',
+    '--drop-video --drop-audio --drop-subtitle --disable-update-check --allow-hls-multi-ext-map'
+  ].join(' '));
+  process.exit(0);
+}
+
+fs.appendFileSync(${JSON.stringify(fakeReCalls)}, JSON.stringify(args) + '\\n');
+
+// Match v0.6.0-beta System.CommandLine TreatUnmatchedTokensAsErrors = true
+const V060_LONG_OPTS = new Set([
+  '--tmp-dir', '--save-dir', '--save-name', '--save-pattern', '--log-file-path', '--base-url',
+  '--thread-count', '--download-retry-count', '--http-request-timeout', '--force-ansi-console',
+  '--no-ansi-color', '--auto-select', '--skip-merge', '--skip-download', '--check-segments-count',
+  '--binary-merge', '--use-ffmpeg-concat-demuxer', '--del-after-done', '--no-date-info', '--no-log',
+  '--write-meta-json', '--append-url-params', '--concurrent-download', '--header', '--sub-only',
+  '--sub-format', '--auto-subtitle-fix', '--ffmpeg-binary-path', '--log-level', '--ui-language',
+  '--key', '--key-text-file', '--decryption-engine', '--decryption-binary-path', '--max-speed',
+  '--mux-after-done', '--custom-proxy', '--select-video', '--select-audio', '--select-subtitle',
+  '--drop-video', '--drop-audio', '--drop-subtitle', '--disable-update-check', '--allow-hls-multi-ext-map'
+]);
+for (const tok of args) {
+  if (tok.startsWith('--') && !V060_LONG_OPTS.has(tok)) {
+    console.error("Unrecognized command or argument '" + tok + "'.");
+    process.exit(1);
+  }
 }
 
 const mode = process.env.FAKE_NM3U8_MODE || 'ok';
@@ -3409,7 +3443,7 @@ console.log('Done');
           destPath: fakeRePath,
         });
         assert.strictEqual(installed, fakeRePath);
-        assert.strictEqual(nm3u8dl.version(), 'N_m3u8DL-RE 0.6.0 20260629');
+        assert.strictEqual(nm3u8dl.version(), 'N_m3u8DL-RE (Beta version) 20260628');
 
         // Simulate SFTP upload stripping +x (0644) -> resolveBinary heals to 0755
         fs.chmodSync(fakeRePath, 0o644);
@@ -3448,7 +3482,8 @@ console.log('Done');
       assert.ok(callArgs.includes('--download-retry-count') && callArgs[callArgs.indexOf('--download-retry-count') + 1] === '10');
       assert.ok(callArgs.includes('-mt'), 'missing concurrent audio/video flag -mt');
       assert.ok(callArgs.includes('--no-log'), 'missing --no-log');
-      assert.ok(callArgs.includes('--vod-select-parts') && callArgs[callArgs.indexOf('--vod-select-parts') + 1] === 'false');
+      assert.ok(!callArgs.includes('--no-config'), 'passed unsupported --no-config to v0.6.0-beta');
+      assert.ok(!callArgs.includes('--vod-select-parts'), 'passed unsupported --vod-select-parts to v0.6.0-beta');
       assert.ok(callArgs.includes('-dv'), 'missing -dv height cap');
       assert.ok(callArgs.some((a) => /Referer:\s*https:\/\/vixsrc\.to\//i.test(a)), 'missing custom Referer header');
 

@@ -347,7 +347,36 @@ function sanitizeHeaderLine(key, val) {
   return `${k}: ${v}`;
 }
 
+const _flagsCache = new Map();
+
+function supportedFlags(bin) {
+  const b = bin || resolveBinary();
+  if (!b) return new Set();
+  let cacheKey = b;
+  try {
+    const st = fs.statSync(b);
+    cacheKey = `${b}:${st.size}:${Math.floor(st.mtimeMs)}`;
+  } catch { /* ignore */ }
+  if (_flagsCache.has(cacheKey)) return _flagsCache.get(cacheKey);
+
+  const flags = new Set();
+  try {
+    const res = spawnSync(b, ['--help'], {
+      encoding: 'utf8',
+      timeout: 8_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    const out = `${res.stdout || ''}\n${res.stderr || ''}`;
+    const matches = out.match(/--[a-z0-9][a-z0-9-]*/gi) || [];
+    for (const m of matches) flags.add(m.toLowerCase());
+  } catch { /* ignore */ }
+  if (flags.size > 0) _flagsCache.set(cacheKey, flags);
+  return flags;
+}
+
 function buildArgs(url, {
+  bin,
   workTmpDir,
   workOutDir,
   saveName = 'media',
@@ -361,6 +390,7 @@ function buildArgs(url, {
   keys = [],
   proxy = '',
 } = {}) {
+  const flags = supportedFlags(bin);
   const args = [
     url,
     '--tmp-dir', workTmpDir,
@@ -373,12 +403,16 @@ function buildArgs(url, {
     '--del-after-done',
     '--no-log',
     '--write-meta-json', 'false',
-    '--no-config',
     '--disable-update-check',
     '--no-ansi-color',
     '--ui-language', 'en-US',
-    '--vod-select-parts', 'false',
   ];
+  if (flags.has('--no-config')) {
+    args.push('--no-config');
+  }
+  if (flags.has('--vod-select-parts')) {
+    args.push('--vod-select-parts', 'false');
+  }
 
   if (ffmpegPath) {
     args.push('--ffmpeg-binary-path', ffmpegPath);
@@ -577,6 +611,7 @@ async function downloadHls(url, dest, opts = {}) {
 
   try {
     const primaryArgs = buildArgs(url, {
+      bin,
       workTmpDir,
       workOutDir,
       saveName: 'media',
@@ -606,6 +641,7 @@ async function downloadHls(url, dest, opts = {}) {
         fs.mkdirSync(workOutDir, { recursive: true });
 
         const worstArgs = buildArgs(url, {
+          bin,
           workTmpDir,
           workOutDir,
           saveName: 'media',
@@ -665,6 +701,7 @@ function _resetForTests() {
   _version = null;
   _installError = null;
   _ensurePromise = null;
+  _flagsCache.clear();
 }
 
 module.exports = {
@@ -678,6 +715,7 @@ module.exports = {
   platformAssetSlug,
   extractBinaryFromTarGz,
   ensureInstalled,
+  supportedFlags,
   buildAboveHeightRegex,
   buildArgs,
   downloadHls,

@@ -111,6 +111,18 @@ const { probeMedia } = require(path.join(REPO, 'utils/mediaTransfer'));
       const engineDl = await import(pathToFileURL(path.join(REPO, 'engine/media/download.js')).href);
       const outDir = path.join(work, 'out');
       fs.mkdirSync(outDir, { recursive: true });
+
+      // Direct nm3u8dl.downloadHls smoke check (surfaces exact N_m3u8DL-RE stderr on failure)
+      const directDest = path.join(outDir, 'Direct.720p.mp4');
+      const directGot = await nm3u8dl.downloadHls(`${baseUrl}/master.m3u8`, directDest, {
+        ffmpegPath: ff,
+        headers: { Referer: 'https://vixsrc.to/' },
+        maxHeight: 720,
+      });
+      assert.strictEqual(directGot.engine, 'nm3u8dl-re');
+      assert.ok(fs.existsSync(directDest) && directGot.bytes > 10 * 1024);
+      hits.length = 0;
+
       const dest = path.join(outDir, 'Test.Movie.720p.mp4');
 
       const got = await engineDl.hlsToFile(`${baseUrl}/master.m3u8`, dest, null, {
