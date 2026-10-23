@@ -26,6 +26,20 @@ A command-driven WhatsApp bot built on Baileys v7 with an integrated Past-Paper 
 
 Interactive title and quality choices use **WhatsApp Polls** (with automatic numbered-reply fallback `1`, `2`, … or `cancel`), scoped strictly to the sender and quoted prompt.
 
+## Background link jobs
+
+A bare link (nothing else in the message) from an allowed user in a direct chat is queued and answered with `⚙️ Queued #<id>`. Results up to `INLINE_LIMIT` return as normal WhatsApp media; larger files are uploaded with `rclone` and returned as a share link. Jobs are stored in `database/jobs.sqlite` (built-in `node:sqlite`) and resume after a restart — two run at once, one per provider.
+
+```text
+URL_JOBS=1                 set 0 to disable
+INLINE_LIMIT=104857600     bytes that still go inline (100 MB)
+MEDIA_DIR=temp             staging folder for downloads
+RCLONE_REMOTE=gdrive       remote name from secrets/rclone.conf
+RCLONE_PATH=bot/uploads    folder inside that remote
+```
+
+DRM-protected services (Netflix, Disney+, Apple TV+, Apple Music, Deezer) are refused with a short reason instead of being queued.
+
 Owner/admin commands (hidden from non-owners in `.menu` and error hints):
 `.status` (alias `.update`), `.restart`, `.broadcast`, `.on`, `.off`, `.allow`, `.disallow`, `.listusers`, `.cookies`, `.ytdl` (`status` | `update` | `repair` | `proxy` | `test`), and `.refreshpapers`.
 

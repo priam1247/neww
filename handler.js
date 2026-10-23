@@ -2,6 +2,8 @@
  * Message Handler - Processes incoming messages and executes commands
  */
 
+const fs = require('fs');
+const path = require('path');
 const config = require('./config');
 const database = require('./database');
 const selections = require('./utils/selections');
@@ -10,6 +12,11 @@ const { jidVariants, isSystemJid } = require('./utils/jid');
 const { readWL, findAllowedUserIndex } = require('./utils/accessControl');
 const { safeErrorMessage } = require('./utils/userErrors');
 const telemetry = require('./utils/telemetry');
+const jobs = require('./utils/persistentJobs');
+const router = require('./utils/providerRouter');
+const rcloneStore = require('./utils/rcloneStore');
+const mediaTransfer = require('./utils/mediaTransfer');
+const { getTempDir, deleteTempFile } = require('./utils/tempManager');
 
 // Load all commands
 const commands = loadCommands();
@@ -206,6 +213,161 @@ async function handleSelection(sock, msg, body, { from, sender, senderIds, quote
   return false;
 }
 
+// ── Background link jobs ─────────────────────────────────────────────────────
+// A bare link from an allowed user in a direct chat is queued to the persistent
+// worker pool instead of blocking the message handler. Small results come back
+// as normal WhatsApp media, large ones as an rclone share link.
+const URL_ONLY = /^https?:\/\/\S+$/i;
+let activeSock = null;
+let jobsStarted = false;
+
+const urlJobsEnabled = () => String(process.env.URL_JOBS ?? '1') !== '0';
+
+const shortError = (text, max = 160) => {
+  const line = String(text || 'failed').split('\n').map(s => s.trim()).filter(Boolean).pop() || 'failed';
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+};
+
+const isOwnerJid = (jid) => isOwner([String(jid || '')]);
+
+async function say(chatId, text, quoted) {
+  if (!activeSock || !chatId) return;
+  try {
+    await activeSock.sendMessage(chatId, { text }, quoted ? { quoted } : {});
+  } catch (e) {
+    console.error('jobs: reply failed:', e.message);
+  }
+}
+
+// Only files this bot produced (MEDIA_DIR or temp/) are ever removed here.
+const ownedByBot = (file) => {
+  const target = path.resolve(String(file || ''));
+  return [router.mediaDir(), getTempDir()]
+    .map((dir) => path.resolve(dir))
+    .some((dir) => target === dir || target.startsWith(`${dir}${path.sep}`));
+};
+
+function discardJob(job) {
+  for (const file of [job.path, ...(job.subs || [])]) {
+    if (!file) continue;
+    if (ownedByBot(file)) {
+      try { fs.rmSync(file, { force: true }); } catch { /* already gone */ }
+    } else {
+      deleteTempFile(file);
+    }
+  }
+}
+
+/** Send a finished download inline (media picks) or as a document. */
+async function sendJobInline(sock, chatId, job, size) {
+  const sniff = mediaTransfer.sniffFile(job.path);
+  const name = mediaTransfer.safeName(job.title || path.basename(job.path), 'media');
+  const caption = `📥 *${job.title || name}*${job.quality ? `\n🎞️ ${job.quality}` : ''}\n📦 ${mediaTransfer.fmtMB(size)}`;
+
+  if (sniff.kind === 'video') {
+    const ready = await mediaTransfer.ensureWhatsAppMp4(job.path, path.join(getTempDir(), `${path.basename(job.path)}.wa.mp4`));
+    try {
+      const finalSize = fs.statSync(ready).size;
+      const payload = finalSize > 50 * 1024 * 1024
+        ? { document: { url: ready }, mimetype: 'video/mp4', fileName: `${name}.mp4`, caption }
+        : { video: { url: ready }, mimetype: 'video/mp4', caption };
+      await sock.sendMessage(chatId, payload);
+    } finally {
+      if (ready !== job.path) deleteTempFile(ready);
+    }
+    return;
+  }
+
+  if (sniff.kind === 'audio') {
+    await sock.sendMessage(chatId, {
+      audio: { url: job.path }, mimetype: sniff.mime, fileName: `${name}.${sniff.ext}`, ptt: false,
+    });
+    return;
+  }
+
+  if (sniff.kind === 'image') {
+    await sock.sendMessage(chatId, { image: { url: job.path }, caption });
+    return;
+  }
+
+  await sock.sendMessage(chatId, {
+    document: { url: job.path }, mimetype: sniff.mime, fileName: `${name}.${sniff.ext}`, caption,
+  });
+}
+
+/** Deliver a finished job, then delete its temp files. */
+async function deliverJob(job) {
+  const chatId = job.req?.chatId;
+  const file = job.path;
+
+  try {
+    if (!chatId || !file || !fs.existsSync(file)) return;
+    const size = Number(job.size) || fs.statSync(file).size;
+
+    if (size > rcloneStore.inlineLimit()) {
+      const link = await rcloneStore.put(file, size);
+      await say(chatId, `📦 *${job.title || path.basename(file)}* — ${mediaTransfer.fmtMB(size)}\n${link}`);
+      return;
+    }
+
+    if (!activeSock) return;
+    await sendJobInline(activeSock, chatId, job, size);
+  } catch (e) {
+    const isOwner = Boolean(job.req?.sender) && isOwnerJid(job.req.sender);
+    await say(chatId, `❌ ${safeErrorMessage(e, { isOwner })}`);
+  } finally {
+    discardJob(job);
+  }
+}
+
+/** Boot the worker pool on first use so imports stay side-effect free. */
+function ensureJobs() {
+  if (jobsStarted) return;
+  jobsStarted = true;
+  jobs.on('done', (job) => {
+    deliverJob(job).catch((e) => console.error('jobs: delivery failed:', e.message));
+  });
+  jobs.on('fail', (job) => {
+    say(job.req?.chatId, `❌ ${shortError(job.error)}`).catch(() => {});
+  });
+  jobs.start();
+  console.log('jobs: worker pool online');
+}
+
+/**
+ * Queue a bare link. Returns true when the message was handled here.
+ * Groups are left alone so one link cannot start downloads for everybody.
+ */
+async function queueLinkJob(sock, msg, body, { from, sender }) {
+  if (!urlJobsEnabled()) return false;
+  if (!URL_ONLY.test(body)) return false;
+  if (!String(from || '').endsWith('@s.whatsapp.net')) return false;
+
+  let target;
+  try {
+    target = router.route(body);
+  } catch {
+    await sock.sendMessage(from, { text: '❌ Not a downloadable link.' }, { quoted: msg });
+    return true;
+  }
+
+  if (target.blocked) {
+    await sock.sendMessage(from, { text: `❌ ${target.reason}` }, { quoted: msg });
+    return true;
+  }
+
+  ensureJobs();
+  try {
+    const id = jobs.enqueue({ provider: target.provider, req: { url: body, chatId: from, sender } });
+    await sock.sendMessage(from, { text: `⚙️ Queued #${id}` }, { quoted: msg });
+  } catch (e) {
+    if (e.code === 'QUEUE_FULL') await sock.sendMessage(from, { text: '⚠️ Queue is full, try again later.' }, { quoted: msg });
+    else if (e.code === 'NOT_ENOUGH_DISK') await sock.sendMessage(from, { text: '⚠️ Not enough disk space right now.' }, { quoted: msg });
+    else throw e;
+  }
+  return true;
+}
+
 // Main message handler
 const handleMessage = async (sock, msg) => {
   try {
@@ -230,6 +392,9 @@ const handleMessage = async (sock, msg) => {
     // allowed via .allow. Non-allowed users get no response at all.
     if (!database.getBotState() && !isOwner(senderIds)) return;
     if (!isAllowedSender(senderIds)) return;
+
+    // The worker pool delivers finished jobs through this socket.
+    activeSock = sock;
 
     // ── Poll votes (`pollUpdateMessage`) ──────────────────────────────────
     if (content.pollUpdateMessage) {
@@ -287,8 +452,12 @@ const handleMessage = async (sock, msg) => {
     // "Reply with a number" for a command that offered a list
     if (await handleSelection(sock, msg, body, { from, sender, senderIds, quotedMessageId })) return;
 
-    // Ignore ordinary text; only explicitly prefixed commands are executed.
-    if (!body.startsWith(config.prefix)) return;
+    // A bare link in a direct chat becomes a background job; ordinary text is
+    // still ignored and every command still needs its prefix.
+    if (!body.startsWith(config.prefix)) {
+      await queueLinkJob(sock, msg, body, { from, sender });
+      return;
+    }
 
     const commandText = body.slice(config.prefix.length).trim();
     if (!commandText) return;
